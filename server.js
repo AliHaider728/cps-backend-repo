@@ -11,7 +11,7 @@ app.use(
   cors({
     origin: [
       "http://localhost:5173",
-      "https://cps-6ltm.vercel.app",
+      "https://cps-tau-five.vercel.app",
     ],
     credentials: true,
   })
