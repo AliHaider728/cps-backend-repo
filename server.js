@@ -12,10 +12,12 @@ app.use(
     origin: [
       "http://localhost:5173",
       "https://cps-tau-five.vercel.app",
+      "cps-8gcli4794-alis-projects-58e3c939.vercel.app",
     ],
     credentials: true,
   })
 );
+app.options("*", cors());
 
 app.use(express.json());
 app.use("/api/auth", authRoutes);
