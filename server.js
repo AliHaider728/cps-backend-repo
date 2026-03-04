@@ -1,25 +1,18 @@
 require("dotenv").config();
-const express   = require("express");
-const cors      = require("cors");
-const connectDB = require("./config/db");
+const express    = require("express");
+const cors       = require("cors");
+const connectDB  = require("./config/db");
 const authRoutes = require("./routes/authRoutes");
 
 const app = express();
 connectDB();
 
-const allowedOrigins = (process.env.CLIENT_URL || "")
-  .split(",")
-  .map((o) => o.trim())
-  .filter(Boolean);
-
 app.use(
   cors({
-    origin: (origin, callback) => {
-      // Allow requests with no origin (Postman, curl, server-to-server)
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-      callback(new Error(`CORS blocked: ${origin}`));
-    },
+    origin: [
+      "http://localhost:5173",
+      "https://cps-6ltm.vercel.app",
+    ],
     credentials: true,
   })
 );
@@ -29,5 +22,6 @@ app.use("/api/auth", authRoutes);
 app.get("/", (_, res) => res.json({ message: "CPS API running" }));
 app.use((_, res) => res.status(404).json({ message: "Route not found" }));
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server on http://localhost:${PORT}`));
+app.listen(process.env.PORT || 5000, () =>
+  console.log("Server running...")
+);
