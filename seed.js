@@ -14,18 +14,18 @@ const USERS = [
 
 (async () => {
   await mongoose.connect(process.env.MONGODB_URI);
-  console.log("✅ MongoDB connected");
+  console.log(" MongoDB connected");
 
-  // Pehle sab delete karo
-  await User.deleteMany({ email: { $in: USERS.map(u => u.email) } });
-  console.log("🗑️  Old users deleted");
-
-  // Phir naye banao — pre('save') hook chalega, password hash hoga
   for (const u of USERS) {
-    await User.create(u);
-    console.log(`✅ Created: ${u.email} [${u.role}]`);
+    // Upsert: update karo agar exists hai, warna create karo
+    await User.findOneAndUpdate(
+      { email: u.email },
+      u,
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    console.log(` Seeded: ${u.email} [${u.role}]`);
   }
 
   await mongoose.disconnect();
-  console.log("🎉 Seed complete!");
+  console.log(" Seed complete!");
 })();
