@@ -1,6 +1,6 @@
 require("dotenv").config();
 const mongoose = require("mongoose");
-const bcrypt   = require("bcryptjs"); // npm install bcryptjs agar nahi hai
+const bcrypt   = require("bcryptjs");  
 const User     = require("./models/User");
 
 const USERS = [
@@ -15,10 +15,10 @@ const USERS = [
 
 (async () => {
   await mongoose.connect(process.env.MONGODB_URI);
-  console.log("✅ MongoDB connected");
+  console.log(" MongoDB connected");
 
   for (const u of USERS) {
-    // ✅ FIX: Hash password manually (findOneAndUpdate bypasses pre-save hook)
+    // FIX: Hash password manually (findOneAndUpdate bypasses pre-save hook)
     const hashedPassword = await bcrypt.hash(u.password, 10);
 
     await User.findOneAndUpdate(
@@ -26,9 +26,9 @@ const USERS = [
       { ...u, password: hashedPassword },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
-    console.log(`✅ Seeded: ${u.email} [${u.role}]`);
+    console.log(` Seeded: ${u.email} [${u.role}]`);
   }
 
   await mongoose.disconnect();
-  console.log("🎉 Seed complete!");
+  console.log(" Seed complete!");
 })();
