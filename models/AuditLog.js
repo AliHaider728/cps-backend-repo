@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 
+
 const AuditLogSchema = new mongoose.Schema(
   {
     user:       { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
