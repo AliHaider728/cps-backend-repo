@@ -1,23 +1,18 @@
 import jwt from "jsonwebtoken";
-import { rateLimit } from "express-rate-limit";
+import { rateLimit, ipKeyGenerator } from "express-rate-limit";
 import User from "../models/User.js";
 import AuditLog from "../models/AuditLog.js";
 import { logAudit } from "../middleware/auditLogger.js";
+import { sendWelcomeEmail } from "../utils/sendEmail.js";
 
-// ── Per-IP login rate limiter: 10 failed attempts / 15 min ────────
-// NOTE: ipKeyGenerator does NOT exist in express-rate-limit v7
-// We use a custom keyGenerator instead (IPv6 safe via trust proxy)
+// ── Per-IP login rate limiter ─────────────────────────────────────
 export const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,   // 15 minutes
-  max: 10,                      // 10 failed attempts max
-  keyGenerator: (req) => {
-    // Trust proxy is set in server.js so req.ip is already correct
-    return req.ip || req.headers["x-forwarded-for"] || "unknown";
-  },
-  skipSuccessfulRequests: true, // only COUNT failed/blocked attempts
-  standardHeaders: "draft-7",   // sends RateLimit headers
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  keyGenerator: ipKeyGenerator,
+  skipSuccessfulRequests: true,
+  standardHeaders: "draft-7",
   legacyHeaders: false,
-  // This handler fires when limit is exceeded — returns 429
   handler: (req, res) => {
     res.status(429).json({
       message: "Too many failed login attempts. Please try again in 15 minutes.",
@@ -52,7 +47,6 @@ export const login = async (req, res) => {
 
     const user = await User.findOne({ email }).select("+password");
 
-    // Wrong credentials → audit + 401
     if (!user || !(await user.matchPassword(password))) {
       await AuditLog.create({
         action:    "LOGIN_FAILED",
@@ -62,11 +56,9 @@ export const login = async (req, res) => {
         userAgent: req.headers["user-agent"] ?? "",
         status:    "fail",
       });
-      // NOTE: intentionally vague message (don't confirm if email exists)
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
-    // Deactivated account
     if (!user.isActive) {
       req.user = user;
       await logAudit(req, "LOGIN_BLOCKED", "User", {
@@ -77,7 +69,6 @@ export const login = async (req, res) => {
       return res.status(403).json({ message: "Account is deactivated. Contact admin." });
     }
 
-    // ── SUCCESS ──
     user.lastLogin = new Date();
     await user.save({ validateBeforeSave: false });
 
@@ -93,11 +84,12 @@ export const login = async (req, res) => {
       success: true,
       token,
       user: {
-        id:         user._id,
-        name:       user.name,
-        email:      user.email,
-        role:       user.role,
-        redirectTo: ROLE_REDIRECTS[user.role],
+        id:                 user._id,
+        name:               user.name,
+        email:              user.email,
+        role:               user.role,
+        mustChangePassword: user.mustChangePassword,
+        redirectTo:         ROLE_REDIRECTS[user.role],
       },
     });
   } catch (err) {
@@ -110,11 +102,12 @@ export const getMe = (req, res) => {
   res.json({
     success: true,
     user: {
-      id:         req.user._id,
-      name:       req.user.name,
-      email:      req.user.email,
-      role:       req.user.role,
-      redirectTo: ROLE_REDIRECTS[req.user.role],
+      id:                 req.user._id,
+      name:               req.user.name,
+      email:              req.user.email,
+      role:               req.user.role,
+      mustChangePassword: req.user.mustChangePassword,
+      redirectTo:         ROLE_REDIRECTS[req.user.role],
     },
   });
 };
@@ -149,7 +142,17 @@ export const createUser = async (req, res) => {
     if (exists)
       return res.status(400).json({ message: "Email already registered" });
 
-    const user = await User.create({ name, email, password, role, createdBy: req.user._id });
+    const user = await User.create({
+      name, email, password, role,
+      createdBy:          req.user._id,
+      mustChangePassword: true,
+    });
+
+    try {
+      await sendWelcomeEmail({ name, email, password, role });
+    } catch (emailErr) {
+      console.error("⚠️  Welcome email failed:", emailErr.message);
+    }
 
     await logAudit(req, "CREATE_USER", "User", {
       resourceId: user._id,
@@ -177,7 +180,10 @@ export const updateUser = async (req, res) => {
     if (email)                         user.email    = email;
     if (role)                          user.role     = role;
     if (typeof isActive === "boolean") user.isActive = isActive;
-    if (password)                      user.password = password; // pre-save rehashes
+    if (password) {
+      user.password           = password;
+      user.mustChangePassword = true; // admin ne reset kiya → phir se change karna hoga
+    }
 
     await user.save();
 
@@ -230,5 +236,28 @@ export const anonymiseUser = async (req, res) => {
     return res.json({ success: true, message: "User anonymised successfully" });
   } catch (err) {
     return res.status(500).json({ message: err.message });
+  }
+};
+
+// ── CHANGE PASSWORD (first-login force) 
+export const changePassword = async (req, res) => {
+  try {
+    const { newPassword } = req.body;
+    if (!newPassword || newPassword.length < 6)
+      return res.status(400).json({ message: "Password must be at least 6 characters" });
+
+    const user = await User.findById(req.user._id).select("+password");
+    user.password           = newPassword;
+    user.mustChangePassword = false;
+    await user.save();
+
+    await logAudit(req, "CHANGE_PASSWORD", "User", {  // ← CHANGE_PASSWORD action
+      resourceId: user._id,
+      detail:     `${user.name} changed their password`,
+    });
+
+    res.json({ success: true, message: "Password changed successfully" });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
 };

@@ -11,18 +11,18 @@ const UserSchema = new mongoose.Schema(
       enum: ["super_admin", "director", "ops_manager", "finance", "training", "workforce", "clinician"],
       required: true,
     },
-    isActive:  { type: Boolean, default: true },
-    lastLogin: { type: Date },
-    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    isActive:           { type: Boolean, default: true },
+    mustChangePassword: { type: Boolean, default: false }, // ← NEW
+    lastLogin:          { type: Date },
+    createdBy:          { type: mongoose.Schema.Types.ObjectId, ref: "User" },
 
-    // ── GDPR ── anonymised after 7 years for leavers
-    anonymisedAt: { type: Date, default: null },
-    isAnonymised:  { type: Boolean, default: false },
+    // ── GDPR ──
+    anonymisedAt: { type: Date,    default: null },
+    isAnonymised: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
 
-// ── Hash password on save ────────────────────────────────────────
 UserSchema.pre("save", async function (next) {
   if (!this.isModified("password")) return next();
   this.password = await bcrypt.hash(this.password, 12);
@@ -33,7 +33,6 @@ UserSchema.methods.matchPassword = async function (entered) {
   return bcrypt.compare(entered, this.password);
 };
 
-// ── GDPR: anonymise a leaver ─────────────────────────────────────
 UserSchema.methods.anonymise = async function () {
   this.name          = "Anonymised User";
   this.email         = `anon_${this._id}@deleted.internal`;
