@@ -57,7 +57,7 @@ export const sendWelcomeEmail = async ({ name, email, password, role }) => {
                 border:1px solid rgba(255,255,255,0.22);border-radius:30px;
                 padding:4px 14px;color:#c5beff;font-size:11px;
                 font-weight:700;letter-spacing:0.09em;text-transform:uppercase;">
-                Rx &nbsp;Core Prescribing Solutions
+                 &nbsp;Core Prescribing Solutions
               </p>
 
               <h1 style="margin:0 0 8px;color:#ffffff;font-size:22px;font-weight:700;line-height:1.35;">
