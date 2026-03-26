@@ -19,175 +19,212 @@ export const sendWelcomeEmail = async ({ name, email, password, role }) => {
     to: email,
     subject: "Welcome to Core Prescribing System — Your Login Credentials",
     html: `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Welcome to Core Prescribing System</title>
-</head>
-<body style="margin:0;padding:0;background-color:#f0f4f8;font-family:'Georgia',serif;">
-
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f0f4f8;padding:40px 0;">
-    <tr>
-      <td align="center">
-        <table width="520" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
-
-          <!-- Header -->
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+        <title>Welcome to Core Prescribing System</title>
+      </head>
+      <body style="margin:0;padding:0;background-color:#f0f2f8;font-family:'Segoe UI',Helvetica,Arial,sans-serif;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="background:#f0f2f8;padding:40px 0;">
           <tr>
-            <td style="background:linear-gradient(135deg,#0f2a5e 0%,#1a4a9e 100%);padding:36px 40px 28px;text-align:center;">
-              <!-- Logo / Icon -->
-              <div style="margin-bottom:16px;">
-                <svg width="52" height="52" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <rect width="52" height="52" rx="14" fill="rgba(255,255,255,0.12)"/>
-                  <path d="M26 12C26 12 18 16 18 24V32L26 36L34 32V24C34 16 26 12 26 12Z" stroke="white" stroke-width="1.8" fill="rgba(255,255,255,0.08)"/>
-                  <path d="M22 24H30M26 20V28" stroke="white" stroke-width="2" stroke-linecap="round"/>
-                </svg>
-              </div>
-              <p style="margin:0;color:rgba(255,255,255,0.6);font-size:11px;letter-spacing:3px;text-transform:uppercase;font-family:Arial,sans-serif;">Core Prescribing System</p>
-              <h1 style="margin:8px 0 0;color:#ffffff;font-size:26px;font-weight:normal;letter-spacing:0.5px;">Welcome, ${name}</h1>
-            </td>
-          </tr>
+            <td align="center">
+              <table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(30,0,180,0.10);">
 
-          <!-- Body -->
-          <tr>
-            <td style="padding:36px 40px 28px;">
-
-              <p style="margin:0 0 24px;color:#374151;font-size:15px;line-height:1.7;">
-                Your account has been successfully created on the <strong>Core Prescribing System</strong>. Below are your login credentials to get started.
-              </p>
-
-              <!-- Role Badge -->
-              <table cellpadding="0" cellspacing="0" style="margin-bottom:28px;">
+                <!-- Header Banner -->
                 <tr>
-                  <td style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 16px;">
+                  <td style="background:linear-gradient(135deg,#0f0087 0%,#1e00c3 60%,#3a1de0 100%);padding:36px 40px 28px;">
+                    <table width="100%" cellpadding="0" cellspacing="0">
+                      <tr>
+                        <td>
+                          <!-- Logo wordmark pill -->
+                          <div style="display:inline-block;background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.25);border-radius:20px;padding:5px 14px;margin-bottom:16px;">
+                            <table cellpadding="0" cellspacing="0">
+                              <tr>
+                                <td style="padding-right:7px;vertical-align:middle;">
+                                  <!-- Rx pill icon -->
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <circle cx="12" cy="12" r="11" stroke="rgba(255,255,255,0.7)" stroke-width="1.5"/>
+                                    <text x="5" y="17" font-size="11" font-weight="700" fill="white" font-family="Arial">Rx</text>
+                                  </svg>
+                                </td>
+                                <td>
+                                  <span style="color:#c7c0ff;font-size:11px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;">Core Prescribing Solutions</span>
+                                </td>
+                              </tr>
+                            </table>
+                          </div>
+                          <h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:700;line-height:1.3;">
+                            Welcome aboard, ${name}!
+                          </h1>
+                          <p style="margin:8px 0 0;color:#a89ff5;font-size:14px;">Your account has been created. Here are your login details.</p>
+                        </td>
+
+                        <!-- Decorative Rx badge -->
+                        <td width="68" align="right" valign="middle" style="padding-left:16px;">
+                          <div style="width:60px;height:60px;border-radius:50%;background:rgba(255,255,255,0.1);border:2px solid rgba(255,255,255,0.22);text-align:center;line-height:60px;">
+                            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;margin-top:13px;">
+                              <path d="M6 3h7a5 5 0 0 1 0 10H6V3z" stroke="white" stroke-width="1.6" stroke-linejoin="round" fill="none"/>
+                              <line x1="6" y1="13" x2="6" y2="21" stroke="white" stroke-width="1.6" stroke-linecap="round"/>
+                              <line x1="13" y1="13" x2="18" y2="21" stroke="white" stroke-width="1.6" stroke-linecap="round"/>
+                            </svg>
+                          </div>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+
+                <!-- Role badge row -->
+                <tr>
+                  <td style="padding:24px 40px 0;">
                     <table cellpadding="0" cellspacing="0">
                       <tr>
-                        <td style="vertical-align:middle;padding-right:10px;">
-                          <!-- Role/Badge Icon -->
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="#1d4ed8"/>
-                          </svg>
-                        </td>
-                        <td style="vertical-align:middle;font-family:Arial,sans-serif;font-size:13px;color:#1e40af;">
-                          <strong>Role Assigned:</strong>&nbsp;${role}
+                        <td style="background:#ededff;border:1px solid #c4bfff;border-radius:8px;padding:10px 16px;">
+                          <table cellpadding="0" cellspacing="0">
+                            <tr>
+                              <td style="padding-right:10px;vertical-align:middle;">
+                                <!-- Shield icon -->
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                  <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z" fill="#1e00c3"/>
+                                </svg>
+                              </td>
+                              <td>
+                                <span style="color:#1e00c3;font-size:13px;font-weight:600;">Role: ${role}</span>
+                              </td>
+                            </tr>
+                          </table>
                         </td>
                       </tr>
                     </table>
                   </td>
                 </tr>
-              </table>
 
-              <!-- Divider -->
-              <div style="border-top:1px solid #e5e7eb;margin-bottom:28px;"></div>
-
-              <!-- Credentials Heading -->
-              <p style="margin:0 0 16px;font-family:Arial,sans-serif;font-size:12px;letter-spacing:2px;text-transform:uppercase;color:#9ca3af;font-weight:600;">Your Login Credentials</p>
-
-              <!-- Email Row -->
-              <table cellpadding="0" cellspacing="0" width="100%" style="margin-bottom:12px;">
+                <!-- Divider -->
                 <tr>
-                  <td style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:14px 18px;">
-                    <table cellpadding="0" cellspacing="0" width="100%">
+                  <td style="padding:20px 40px 0;">
+                    <div style="height:1px;background:#e8e8f4;"></div>
+                  </td>
+                </tr>
+
+                <!-- Credentials Section -->
+                <tr>
+                  <td style="padding:24px 40px 0;">
+                    <p style="margin:0 0 14px;color:#6b7280;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">Your Login Credentials</p>
+
+                    <!-- Email Row -->
+                    <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:10px;">
                       <tr>
-                        <td style="width:36px;vertical-align:middle;">
-                          <!-- Mail Icon -->
-                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <rect x="2" y="4" width="20" height="16" rx="3" stroke="#6b7280" stroke-width="1.6"/>
-                            <path d="M2 8l10 7 10-7" stroke="#6b7280" stroke-width="1.6" stroke-linejoin="round"/>
-                          </svg>
-                        </td>
-                        <td style="vertical-align:middle;padding-left:4px;">
-                          <p style="margin:0;font-family:Arial,sans-serif;font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:1px;">Email Address</p>
-                          <p style="margin:2px 0 0;font-family:Arial,sans-serif;font-size:14px;color:#111827;font-weight:600;">${email}</p>
+                        <td style="background:#f7f7fd;border:1px solid #e2e2f0;border-radius:10px;padding:14px 18px;">
+                          <table cellpadding="0" cellspacing="0" width="100%">
+                            <tr>
+                              <td style="padding-right:12px;vertical-align:middle;" width="36">
+                                <div style="width:32px;height:32px;background:#ededff;border-radius:8px;text-align:center;line-height:32px;">
+                                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;margin-top:8px;">
+                                    <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z" fill="#1e00c3"/>
+                                  </svg>
+                                </div>
+                              </td>
+                              <td>
+                                <p style="margin:0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.07em;">Email Address</p>
+                                <p style="margin:3px 0 0;color:#1a1a2e;font-size:14px;font-weight:500;">${email}</p>
+                              </td>
+                            </tr>
+                          </table>
                         </td>
                       </tr>
                     </table>
-                  </td>
-                </tr>
-              </table>
 
-              <!-- Password Row -->
-              <table cellpadding="0" cellspacing="0" width="100%" style="margin-bottom:28px;">
-                <tr>
-                  <td style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:14px 18px;">
-                    <table cellpadding="0" cellspacing="0" width="100%">
+                    <!-- Password Row -->
+                    <table width="100%" cellpadding="0" cellspacing="0">
                       <tr>
-                        <td style="width:36px;vertical-align:middle;">
-                          <!-- Key Icon -->
-                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <circle cx="8" cy="12" r="4" stroke="#6b7280" stroke-width="1.6"/>
-                            <path d="M12 12h8M17 10v4" stroke="#6b7280" stroke-width="1.6" stroke-linecap="round"/>
-                          </svg>
-                        </td>
-                        <td style="vertical-align:middle;padding-left:4px;">
-                          <p style="margin:0;font-family:Arial,sans-serif;font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:1px;">Temporary Password</p>
-                          <p style="margin:2px 0 0;font-family:'Courier New',monospace;font-size:15px;color:#111827;font-weight:700;letter-spacing:1.5px;">${password}</p>
+                        <td style="background:#f7f7fd;border:1px solid #e2e2f0;border-radius:10px;padding:14px 18px;">
+                          <table cellpadding="0" cellspacing="0" width="100%">
+                            <tr>
+                              <td style="padding-right:12px;vertical-align:middle;" width="36">
+                                <div style="width:32px;height:32px;background:#ededff;border-radius:8px;text-align:center;line-height:32px;">
+                                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;margin-top:8px;">
+                                    <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z" fill="#1e00c3"/>
+                                  </svg>
+                                </div>
+                              </td>
+                              <td>
+                                <p style="margin:0;color:#9ca3af;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.07em;">Temporary Password</p>
+                                <p style="margin:3px 0 0;color:#1a1a2e;font-size:14px;font-weight:600;font-family:'Courier New',monospace;letter-spacing:0.05em;">${password}</p>
+                              </td>
+                            </tr>
+                          </table>
                         </td>
                       </tr>
                     </table>
                   </td>
                 </tr>
-              </table>
 
-              <!-- Warning Box -->
-              <table cellpadding="0" cellspacing="0" width="100%" style="margin-bottom:32px;">
+                <!-- Warning Notice -->
                 <tr>
-                  <td style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:14px 18px;">
+                  <td style="padding:14px 40px 0;">
+                    <table width="100%" cellpadding="0" cellspacing="0">
+                      <tr>
+                        <td style="background:#fff8f0;border:1px solid #fcd4a0;border-left:4px solid #f97316;border-radius:0 8px 8px 0;padding:12px 16px;">
+                          <table cellpadding="0" cellspacing="0">
+                            <tr>
+                              <td style="padding-right:10px;vertical-align:middle;">
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                  <path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z" fill="#f97316"/>
+                                </svg>
+                              </td>
+                              <td>
+                                <span style="color:#9a3412;font-size:13px;font-weight:500;">You will be required to change your password upon first login.</span>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+
+                <!-- CTA Button -->
+                <tr>
+                  <td style="padding:28px 40px 32px;">
                     <table cellpadding="0" cellspacing="0">
                       <tr>
-                        <td style="vertical-align:top;padding-right:12px;padding-top:2px;">
-                          <!-- Warning Icon -->
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <path d="M12 2L2 21h20L12 2z" stroke="#c2410c" stroke-width="1.8" stroke-linejoin="round"/>
-                            <path d="M12 9v5M12 16.5v.5" stroke="#c2410c" stroke-width="2" stroke-linecap="round"/>
-                          </svg>
-                        </td>
-                        <td style="font-family:Arial,sans-serif;font-size:13px;color:#9a3412;line-height:1.6;">
-                          <strong>Password Change Required</strong><br/>
-                          You will be prompted to set a new password the first time you log in.
+                        <td style="background:linear-gradient(135deg,#0f0087,#1e00c3);border-radius:10px;box-shadow:0 4px 16px rgba(30,0,195,0.35);">
+                          <a href="${loginUrl}" style="display:inline-block;padding:14px 32px;color:#ffffff;font-size:15px;font-weight:600;text-decoration:none;letter-spacing:0.02em;">
+                            Sign In to Your Account &nbsp;→
+                          </a>
                         </td>
                       </tr>
                     </table>
                   </td>
                 </tr>
-              </table>
 
-              <!-- CTA Button -->
-              <table cellpadding="0" cellspacing="0" width="100%">
+                <!-- Divider -->
                 <tr>
-                  <td align="center">
-                    <a href="${loginUrl}" style="display:inline-block;background:linear-gradient(135deg,#1a4a9e,#0f2a5e);color:#ffffff;text-decoration:none;font-family:Arial,sans-serif;font-size:15px;font-weight:600;padding:14px 40px;border-radius:10px;letter-spacing:0.4px;">
-                      Access Your Account
-                      &nbsp;
-                      <svg style="vertical-align:middle;" width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M5 12h14M13 6l6 6-6 6" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                      </svg>
-                    </a>
+                  <td style="padding:0 40px;">
+                    <div style="height:1px;background:#e8e8f4;"></div>
                   </td>
                 </tr>
+
+                <!-- Footer -->
+                <tr>
+                  <td style="padding:20px 40px 28px;">
+                    <p style="margin:0;color:#9ca3af;font-size:12px;line-height:1.6;">
+                      If you did not expect this email, please ignore it or contact your system administrator immediately. Do not share your credentials with anyone.
+                    </p>
+                  </td>
+                </tr>
+
               </table>
 
+              <!-- Bottom note -->
+              <p style="margin:16px 0 0;color:#9ca3af;font-size:11px;">© 2025 Core Prescribing Solutions. All rights reserved.</p>
             </td>
           </tr>
-
-          <!-- Footer -->
-          <tr>
-            <td style="background:#f9fafb;border-top:1px solid #e5e7eb;padding:20px 40px;text-align:center;">
-              <p style="margin:0;font-family:Arial,sans-serif;font-size:12px;color:#9ca3af;line-height:1.6;">
-                If you did not expect this email, please contact your system administrator immediately.<br/>
-                &copy; ${new Date().getFullYear()} Core Prescribing System. All rights reserved.
-              </p>
-            </td>
-          </tr>
-
         </table>
-      </td>
-    </tr>
-  </table>
-
-</body>
-</html>
+      </body>
+      </html>
     `,
   });
 };
