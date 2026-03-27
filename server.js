@@ -7,6 +7,7 @@ import rateLimit from "express-rate-limit";
 import connectDB from "./config/db.js";
 import authRoutes from "./routes/authRoutes.js";
 import auditRoutes from "./routes/auditRoutes.js";
+import clientRoutes from "./routes/clientRoutes.js";
 
 const app = express();
 
@@ -55,6 +56,8 @@ app.use(express.urlencoded({ extended: true }));
 // ── ROUTES 
 app.use("/api/auth",  authRoutes);
 app.use("/api/audit", auditRoutes);
+app.use("/api/clients", clientRoutes);
+
 
 app.get("/", (_, res) =>
   res.json({ message: "CPS API running ✓", version: "1.0.0" })

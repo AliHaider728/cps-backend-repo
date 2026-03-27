@@ -5,7 +5,7 @@ import AuditLog from "../models/AuditLog.js";
 import { logAudit } from "../middleware/auditLogger.js";
 import { sendWelcomeEmail } from "../utils/sendEmail.js";
 
-// ── Per-IP login rate limiter ─────────────────────────────────────
+// ── Per-IP login rate limiter  
 export const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
@@ -20,7 +20,7 @@ export const loginLimiter = rateLimit({
   },
 });
 
-// ── ROLE REDIRECTS ────────────────────────────────────────────────
+// ── ROLE REDIRECTS  
 const ROLE_REDIRECTS = {
   super_admin: "/dashboard/super-admin",
   director:    "/dashboard/director",
@@ -31,13 +31,13 @@ const ROLE_REDIRECTS = {
   clinician:   "/portal/clinician",
 };
 
-// ── SIGN TOKEN ────────────────────────────────────────────────────
+// ── SIGN TOKEN  ────
 const signToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRES_IN || "7d",
   });
 
-// ── LOGIN ─────────────────────────────────────────────────────────
+// ── LOGIN  ─────────
 export const login = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -97,7 +97,7 @@ export const login = async (req, res) => {
   }
 };
 
-// ── GET ME ────────────────────────────────────────────────────────
+// ── GET ME   
 export const getMe = (req, res) => {
   res.json({
     success: true,
@@ -112,7 +112,7 @@ export const getMe = (req, res) => {
   });
 };
 
-// ── LOGOUT ────────────────────────────────────────────────────────
+// ── LOGOUT   
 export const logout = async (req, res) => {
   await logAudit(req, "LOGOUT", "User", {
     resourceId: req.user._id,
@@ -121,7 +121,7 @@ export const logout = async (req, res) => {
   res.json({ success: true, message: "Logged out successfully" });
 };
 
-// ── GET ALL USERS ─────────────────────────────────────────────────
+// ── GET ALL USERS  ─
 export const getAllUsers = async (req, res) => {
   try {
     const users = await User.find({ isAnonymised: { $ne: true } }).sort({ createdAt: -1 });
@@ -131,7 +131,7 @@ export const getAllUsers = async (req, res) => {
   }
 };
 
-// ── CREATE USER ───────────────────────────────────────────────────
+// ── CREATE USER  ───
 export const createUser = async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
@@ -166,7 +166,7 @@ export const createUser = async (req, res) => {
   }
 };
 
-// ── UPDATE USER ───────────────────────────────────────────────────
+// ── UPDATE USER  ───
 export const updateUser = async (req, res) => {
   try {
     const { name, email, role, isActive, password } = req.body;
@@ -200,7 +200,7 @@ export const updateUser = async (req, res) => {
   }
 };
 
-// ── DELETE USER ───────────────────────────────────────────────────
+// ── DELETE USER  
 export const deleteUser = async (req, res) => {
   try {
     const user = await User.findByIdAndDelete(req.params.id);
@@ -219,7 +219,7 @@ export const deleteUser = async (req, res) => {
   }
 };
 
-// ── GDPR ANONYMISE ────────────────────────────────────────────────
+// ── GDPR ANONYMISE  
 export const anonymiseUser = async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
