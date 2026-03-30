@@ -12,7 +12,7 @@ const UserSchema = new mongoose.Schema(
       required: true,
     },
     isActive:           { type: Boolean, default: true },
-    mustChangePassword: { type: Boolean, default: false }, // ← NEW
+    mustChangePassword: { type: Boolean, default: false },
     lastLogin:          { type: Date },
     createdBy:          { type: mongoose.Schema.Types.ObjectId, ref: "User" },
 
@@ -22,6 +22,8 @@ const UserSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// NOTE: No manual index needed — email has unique:true which creates index automatically
 
 UserSchema.pre("save", async function (next) {
   if (!this.isModified("password")) return next();

@@ -1,38 +1,66 @@
 import mongoose from "mongoose";
 
-const ContactHistorySchema = new mongoose.Schema({
-  // Which entity this log belongs to
-  entityType: { type: String, enum: ["ICB", "PCN", "Practice"], required: true },
-  entityId:   { type: mongoose.Schema.Types.ObjectId, required: true, refPath: "entityType" },
+/**
+ * ContactHistory Model
+ * Tracks all interactions (calls, emails, meetings, notes) with PCNs and Practices.
+ */
 
-  type: {
-    type: String,
-    enum: ["email", "call", "meeting", "contract", "complaint", "system_access", "note"],
-    required: true,
+const EmailTrackingSchema = new mongoose.Schema(
+  {
+    trackingId:  { type: String },   // NOTE: index defined below via schema.index() only — no index:true here
+    sentAt:      { type: Date },
+    openedAt:    { type: Date },
+    clickedAt:   { type: Date },
+    status:      { type: String, enum: ["sent", "delivered", "opened", "clicked", "failed"], default: "sent" },
   },
+  { _id: false }
+);
 
-  subject:  { type: String, required: true, trim: true },
-  notes:    { type: String, default: "" },
-  date:     { type: Date, required: true },
-  starred:  { type: Boolean, default: false },
+const ContactHistorySchema = new mongoose.Schema(
+  {
+    entityType: {
+      type: String,
+      enum: ["PCN", "Practice", "Federation", "ICB"],
+      required: true,
+    },
+    entityId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      refPath: "entityType",
+    },
 
-  // For email tracking
-  emailTracking: {
-    sent:     { type: Boolean, default: false },
-    opened:   { type: Boolean, default: false },
-    openedAt: { type: Date,    default: null },
-    trackingId:{ type: String, default: null },   // unique token per email
+    type: {
+      type: String,
+      enum: ["call", "email", "meeting", "note", "complaint", "document", "system_access"],
+      required: true,
+    },
+
+    subject:  { type: String, trim: true, default: "" },
+    notes:    { type: String, default: "" },
+    date:     { type: Date, default: Date.now },
+    time:     { type: String, default: "" },   // "09:30"
+    starred:  { type: Boolean, default: false },
+
+    // ── Email tracking (optional, for email type) ──────────
+    emailTracking: EmailTrackingSchema,
+
+    // ── Linked resources ───────────────────────────────────
+    attachments: [
+      {
+        name: { type: String },
+        url:  { type: String },
+      },
+    ],
+
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   },
+  { timestamps: true }
+);
 
-  // Mass email meta
-  isMassEmail:  { type: Boolean, default: false },
-  recipients:   [{ email: String, name: String, opened: Boolean, openedAt: Date }],
-
-  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-}, { timestamps: true });
-
-ContactHistorySchema.index({ entityType: 1, entityId: 1, createdAt: -1 });
+// ── Indexes ────────────────────────────────────────────────────────────────
+ContactHistorySchema.index({ entityType: 1, entityId: 1 });
+ContactHistorySchema.index({ createdAt: -1 });
 ContactHistorySchema.index({ starred: 1 });
-ContactHistorySchema.index({ "emailTracking.trackingId": 1 });
+ContactHistorySchema.index({ "emailTracking.trackingId": 1 }); // single definition only — no index:true above
 
 export default mongoose.model("ContactHistory", ContactHistorySchema);
