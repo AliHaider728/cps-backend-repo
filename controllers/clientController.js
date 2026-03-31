@@ -1,23 +1,25 @@
 /**
  * clientController.js  —  CPS Client Management
- * 
+ *
  * FIXES applied:
- *    getHierarchy: PCNs now grouped under their Federation in the tree
- *    getPCNById: lean() used safely — practices attached manually (correct)
+ *    getHierarchy:  defensive populate on federation (CastError fix)
+ *                   null/undefined icbKey guard added
+ *    getPCNs:       defensive populate on federation (CastError fix)
+ *    getPCNById:    lean() used safely — practices attached manually (correct)
  *    getPracticeById: recordView called on Practice model correctly
  *    updatePractice: now returns populated practice
  *    requestSystemAccess: clinician type determines which systems to suggest
  *    sendMassEmail: auto-logs to history with correct entity
  *    All error messages consistent and descriptive
  */
-import ICB           from "../models/ICB.js";
-import Federation    from "../models/Federation.js";
-import PCN           from "../models/PCN.js";
-import Practice      from "../models/Practice.js";
+import ICB            from "../models/ICB.js";
+import Federation     from "../models/Federation.js";
+import PCN            from "../models/PCN.js";
+import Practice       from "../models/Practice.js";
 import ContactHistory from "../models/ContactHistory.js";
-import User          from "../models/User.js";
-import nodemailer    from "nodemailer";
-import crypto        from "crypto";
+import User           from "../models/User.js";
+import nodemailer     from "nodemailer";
+import crypto         from "crypto";
 
 /* ─────────────────────────────────────────────────
    EMAIL TRANSPORT
@@ -41,11 +43,18 @@ const recordView = async (Model, id, userId) => {
   } catch (_) { /* non-blocking */ }
 };
 
-/*  
+/* ─────────────────────────────────────────────────
+   SAFE POPULATE — skips bad/string refs silently
+   Prevents CastError when federation field has a
+   string name instead of a valid ObjectId
+───────────────────────────────────────────────── */
+const safeFederationPopulate = { path: "federation", select: "name type", options: { strictPopulate: false } };
+
+/*
    HIERARCHY
    Returns full ICB → Federation → PCN → Practice tree
    From spec 2.1: "Hierarchical Model (Mandatory)"
-  */
+*/
 export const getHierarchy = async (req, res) => {
   try {
     const [icbs, federations, pcns, practices] = await Promise.all([
@@ -53,7 +62,7 @@ export const getHierarchy = async (req, res) => {
       Federation.find({ isActive: true }).sort({ name: 1 }).lean(),
       PCN.find({ isActive: true })
         .populate("icb", "name")
-        .populate("federation", "name type")
+        .populate(safeFederationPopulate)   // ← FIX: won't crash on string federation values
         .sort({ name: 1 })
         .lean(),
       Practice.find({ isActive: true })
@@ -74,6 +83,8 @@ export const getHierarchy = async (req, res) => {
     const pcnsByICB = {};
     for (const pcn of pcns) {
       const icbKey = String(pcn.icb?._id || pcn.icb);
+      // FIX: skip PCNs with missing/invalid ICB reference
+      if (!icbKey || icbKey === "null" || icbKey === "undefined") continue;
       if (!pcnsByICB[icbKey]) pcnsByICB[icbKey] = [];
       pcnsByICB[icbKey].push({
         ...pcn,
@@ -111,9 +122,9 @@ export const getHierarchy = async (req, res) => {
   }
 };
 
-/*  
+/*
    ICB CRUD
-  */
+*/
 export const getICBs = async (req, res) => {
   try {
     const icbs = await ICB.find({ isActive: true }).sort({ name: 1 }).lean();
@@ -180,10 +191,10 @@ export const deleteICB = async (req, res) => {
   }
 };
 
-/*  
+/*
    FEDERATION / INT CRUD
    From spec 2.1: "Federations and/or Integrated neighbourhood teams"
-  */
+*/
 export const getFederations = async (req, res) => {
   try {
     const filter = { isActive: true };
@@ -237,10 +248,10 @@ export const deleteFederation = async (req, res) => {
   }
 };
 
-/*  
+/*
    PCN CRUD
    From spec 2.2: "PCN Record Must Include…"
-  */
+*/
 export const getPCNs = async (req, res) => {
   try {
     const filter = { isActive: true };
@@ -248,7 +259,7 @@ export const getPCNs = async (req, res) => {
     if (req.query.federation) filter.federation = req.query.federation;
     const pcns = await PCN.find(filter)
       .populate("icb", "name region")
-      .populate("federation", "name type")
+      .populate(safeFederationPopulate)   // ← FIX: same guard as getHierarchy
       .sort({ name: 1 })
       .lean();
     res.json({ pcns });
@@ -261,7 +272,7 @@ export const getPCNById = async (req, res) => {
   try {
     const pcn = await PCN.findById(req.params.id)
       .populate("icb", "name region code")
-      .populate("federation", "name type")
+      .populate(safeFederationPopulate)
       .populate("activeClinicians", "name email role")
       .populate("restrictedClinicians", "name email role")
       .lean();
@@ -291,7 +302,7 @@ export const createPCN = async (req, res) => {
     const pcn = await PCN.create({ ...req.body, name: name.trim(), createdBy: req.user._id });
     const populated = await PCN.findById(pcn._id)
       .populate("icb", "name")
-      .populate("federation", "name type")
+      .populate(safeFederationPopulate)
       .lean();
     res.status(201).json({ pcn: populated, message: "PCN created" });
   } catch (err) {
@@ -304,7 +315,7 @@ export const updatePCN = async (req, res) => {
   try {
     const pcn = await PCN.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true })
       .populate("icb", "name region")
-      .populate("federation", "name type")
+      .populate(safeFederationPopulate)
       .lean();
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
     res.json({ pcn, message: "PCN updated" });
@@ -378,7 +389,7 @@ export const getPCNRollup = async (req, res) => {
   try {
     const pcn = await PCN.findById(req.params.id)
       .populate("icb", "name region")
-      .populate("federation", "name")
+      .populate(safeFederationPopulate)
       .lean();
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
 
@@ -433,10 +444,10 @@ export const getPCNRollup = async (req, res) => {
   }
 };
 
-/*  
+/*
    PRACTICE CRUD
    From spec 2.2: "Practice/Surgery Record Must Include…"
-  */
+*/
 export const getPractices = async (req, res) => {
   try {
     const filter = { isActive: true };
@@ -553,7 +564,6 @@ Kind regards,
 Core Prescribing Solutions
 `.trim();
 
-    // Log to contact history — spec: "Log request in contact history with date/time, responsible team member, and client"
     const log = await ContactHistory.create({
       entityType,
       entityId,
@@ -572,10 +582,10 @@ Core Prescribing Solutions
   }
 };
 
-/*  
+/*
    CONTACT HISTORY
    From spec section 3: "Contact History & Communication Management"
-  */
+*/
 export const getContactHistory = async (req, res) => {
   try {
     const { entityType, entityId } = req.params;
@@ -635,7 +645,13 @@ export const updateContactHistory = async (req, res) => {
     const { subject, notes, type, date, time } = req.body;
     const log = await ContactHistory.findByIdAndUpdate(
       req.params.logId,
-      { ...(subject && { subject }), ...(notes !== undefined && { notes }), ...(type && { type }), ...(date && { date }), ...(time && { time }) },
+      {
+        ...(subject            && { subject }),
+        ...(notes !== undefined && { notes }),
+        ...(type               && { type }),
+        ...(date               && { date }),
+        ...(time               && { time }),
+      },
       { new: true }
     ).populate("createdBy", "name role");
     if (!log) return res.status(404).json({ message: "Log not found" });
@@ -667,11 +683,11 @@ export const deleteContactHistory = async (req, res) => {
   }
 };
 
-/*  
+/*
    MASS EMAIL
    From spec 3: "Mass emails at PCN, Practice/Surgery level"
    From spec 3: "Track which client has open and read emails"
-  */
+*/
 export const sendMassEmail = async (req, res) => {
   try {
     const { entityType, entityId } = req.params;
@@ -703,17 +719,16 @@ export const sendMassEmail = async (req, res) => {
       }
     }
 
-    // Auto-log to contact history
     await ContactHistory.create({
       entityType,
       entityId,
-      type:       "email",
-      subject:    `[Mass Email] ${subject}`,
-      notes:      body.replace(/<[^>]+>/g, "").slice(0, 500),
-      date:       new Date(),
-      time:       new Date().toTimeString().slice(0, 5),
-      isMassEmail:true,
-      recipients: recipientResults,
+      type:        "email",
+      subject:     `[Mass Email] ${subject}`,
+      notes:       body.replace(/<[^>]+>/g, "").slice(0, 500),
+      date:        new Date(),
+      time:        new Date().toTimeString().slice(0, 5),
+      isMassEmail: true,
+      recipients:  recipientResults,
       emailTracking: { sent: true, sentAt: new Date(), trackingId },
       createdBy: req.user._id,
     });
@@ -738,9 +753,9 @@ export const trackEmailOpen = async (req, res) => {
   res.end(pixel);
 };
 
-/*  
+/*
    SEARCH  (cross-entity)
-  */
+*/
 export const searchClients = async (req, res) => {
   try {
     const q = req.query.q?.trim();
