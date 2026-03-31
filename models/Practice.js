@@ -50,7 +50,7 @@ const SystemAccessSchema = new mongoose.Schema(
 
 const PracticeSchema = new mongoose.Schema(
   {
-    // ── Core ──────────────────────────────────────────────
+    // ── Core  ───────────────
     name:            { type: String, required: true, trim: true },
     pcn:             { type: mongoose.Schema.Types.ObjectId, ref: "PCN", required: true },
     odsCode:         { type: String, trim: true, default: "" },
@@ -59,18 +59,18 @@ const PracticeSchema = new mongoose.Schema(
     city:            { type: String, trim: true, default: "" },
     postcode:        { type: String, trim: true, default: "" },
 
-    // ── Contacts ──────────────────────────────────────────
+    // ── Contacts  ───────────
     contacts: [PracticeContactSchema],
 
-    // ── Linked Clinicians ──────────────────────────────────
+    // ── Linked Clinicians  ───
     linkedClinicians:    [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
     restrictedClinicians:[{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
 
-    // ── System Access ─────────────────────────────────────
+    // ── System Access  ──────
     systemAccess:     [SystemAccessSchema],
     systemAccessNotes:{ type: String, default: "" },
 
-    // ── Contract & Financial ───────────────────────────────
+    // ── Contract & Financial  
     contractType:      { type: String, enum: ["ARRS", "EA", "Direct", "Mixed", ""], default: "" },
     fte:               { type: String, default: "" },
     contractSignedDate:{ type: Date },
@@ -89,13 +89,13 @@ const PracticeSchema = new mongoose.Schema(
     templateInstalled:        { type: Boolean, default: false },
     reportsImported:          { type: Boolean, default: false },
 
-    // ── Documents ─────────────────────────────────────────
+    // ── Documents  ──────────
     documents: [DocumentSchema],
 
-    // ── Rota ──────────────────────────────────────────────
+    // ── Rota  ───────────────
     rotaVisible: { type: Boolean, default: true },
 
-    // ── Meta ──────────────────────────────────────────────
+    // ── Meta  ───────────────
     notes:    { type: String, default: "" },
     isActive: { type: Boolean, default: true },
     createdBy:{ type: mongoose.Schema.Types.ObjectId, ref: "User" },

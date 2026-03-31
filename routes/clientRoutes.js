@@ -32,32 +32,32 @@ import {
 
 const router = Router();
 
-// ── Role groups ─────────────────────────────────────────────────────
+// ── Role groups  
 const admin    = [verifyToken, allowRoles("super_admin", "director", "ops_manager")];
 const adminFin = [verifyToken, allowRoles("super_admin", "director", "ops_manager", "finance")];
 const superOnly= [verifyToken, allowRoles("super_admin")];
 
-// ── Public — email tracking pixel (no auth) ────────────────────────
+// ── Public — email tracking pixel (no auth)  
 router.get("/track/:trackingId", trackEmailOpen);
 
-// ── Hierarchy & search ─────────────────────────────────────────────
+// ── Hierarchy & search 
 router.get("/hierarchy", ...admin,    getHierarchy);
 router.get("/search",    ...adminFin, searchClients);
 
-// ── ICB ────────────────────────────────────────────────────────────
+// ── ICB   
 router.get   ("/icb",         ...adminFin, getICBs);
 router.get   ("/icb/:id",     ...adminFin, getICBById);
 router.post  ("/icb",         ...admin,    createICB);
 router.put   ("/icb/:id",     ...admin,    updateICB);
 router.delete("/icb/:id",     ...superOnly,deleteICB);
 
-// ── Federation / INT ───────────────────────────────────────────────
+// ── Federation / INT ──
 router.get   ("/federation",      ...adminFin, getFederations);
 router.post  ("/federation",      ...admin,    createFederation);
 router.put   ("/federation/:id",  ...admin,    updateFederation);
 router.delete("/federation/:id",  ...superOnly,deleteFederation);
 
-// ── PCN ────────────────────────────────────────────────────────────
+// ── PCN  ───────
 router.get   ("/pcn",                          ...adminFin, getPCNs);
 router.get   ("/pcn/:id",                      ...adminFin, getPCNById);
 router.get   ("/pcn/:id/rollup",               ...adminFin, getPCNRollup);
@@ -68,7 +68,7 @@ router.patch ("/pcn/:id/restricted",           ...admin,    updateRestrictedClin
 router.get   ("/pcn/:id/meetings",             ...admin,    getMonthlyMeetings);
 router.post  ("/pcn/:id/meetings",             ...admin,    upsertMonthlyMeeting);
 
-// ── Practice ───────────────────────────────────────────────────────
+// ── Practice  ──
 router.get   ("/practice",         ...adminFin, getPractices);
 router.get   ("/practice/:id",     ...adminFin, getPracticeById);
 router.post  ("/practice",         ...admin,    createPractice);
@@ -76,17 +76,17 @@ router.put   ("/practice/:id",     ...admin,    updatePractice);
 router.delete("/practice/:id",     ...superOnly,deletePractice);
 router.patch ("/practice/:id/restricted", ...admin, updatePracticeRestricted);
 
-// ── System Access Request ──────────────────────────────────────────
+// ── System Access Request  
 router.post("/:entityType/:entityId/system-access-request", ...admin, requestSystemAccess);
 
-// ── Contact History ────────────────────────────────────────────────
+// ── Contact History ───
 router.get   ("/:entityType/:entityId/history",    ...adminFin, getContactHistory);
 router.post  ("/:entityType/:entityId/history",    ...admin,    addContactHistory);
 router.put   ("/history/:logId",                   ...admin,    updateContactHistory);
 router.patch ("/history/:logId/star",              ...admin,    toggleStarred);
 router.delete("/history/:logId",                   ...superOnly,deleteContactHistory);
 
-// ── Mass Email ─────────────────────────────────────────────────────
+// ── Mass Email  
 router.post("/:entityType/:entityId/mass-email",   ...admin,    sendMassEmail);
 
 export default router;

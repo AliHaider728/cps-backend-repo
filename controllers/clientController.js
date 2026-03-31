@@ -2,6 +2,7 @@
  * clientController.js  —  CPS Client Management
  *
  * FIXES applied:
+ *    safeFederationPopulate: strictPopulate moved to TOP LEVEL (was inside options{} — WRONG)
  *    getHierarchy:  defensive populate on federation (CastError fix)
  *                   null/undefined icbKey guard added
  *    getPCNs:       defensive populate on federation (CastError fix)
@@ -45,10 +46,16 @@ const recordView = async (Model, id, userId) => {
 
 /* ─────────────────────────────────────────────────
    SAFE POPULATE — skips bad/string refs silently
-   Prevents CastError when federation field has a
-   string name instead of a valid ObjectId
+   FIX: strictPopulate must be at TOP LEVEL of the
+   populate config object — NOT inside options{}
+   Mongoose ignores it inside options{} which causes
+   CastError when federation has a string instead of ObjectId
 ───────────────────────────────────────────────── */
-const safeFederationPopulate = { path: "federation", select: "name type", options: { strictPopulate: false } };
+const safeFederationPopulate = {
+  path:           "federation",
+  select:         "name type",
+  strictPopulate: false,          // ✅ TOP LEVEL — this is the fix
+};
 
 /*
    HIERARCHY
@@ -62,7 +69,7 @@ export const getHierarchy = async (req, res) => {
       Federation.find({ isActive: true }).sort({ name: 1 }).lean(),
       PCN.find({ isActive: true })
         .populate("icb", "name")
-        .populate(safeFederationPopulate)   // ← FIX: won't crash on string federation values
+        .populate(safeFederationPopulate)
         .sort({ name: 1 })
         .lean(),
       Practice.find({ isActive: true })
@@ -83,7 +90,7 @@ export const getHierarchy = async (req, res) => {
     const pcnsByICB = {};
     for (const pcn of pcns) {
       const icbKey = String(pcn.icb?._id || pcn.icb);
-      // FIX: skip PCNs with missing/invalid ICB reference
+      // Guard: skip PCNs with missing/invalid ICB reference
       if (!icbKey || icbKey === "null" || icbKey === "undefined") continue;
       if (!pcnsByICB[icbKey]) pcnsByICB[icbKey] = [];
       pcnsByICB[icbKey].push({
@@ -117,8 +124,8 @@ export const getHierarchy = async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("getHierarchy:", err);
-    res.status(500).json({ message: "Failed to load hierarchy" });
+    console.error("getHierarchy ERROR:", err.message, err.stack);
+    res.status(500).json({ message: "Failed to load hierarchy", detail: err.message });
   }
 };
 
@@ -129,7 +136,8 @@ export const getICBs = async (req, res) => {
   try {
     const icbs = await ICB.find({ isActive: true }).sort({ name: 1 }).lean();
     res.json({ icbs });
-  } catch {
+  } catch (err) {
+    console.error("getICBs ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch ICBs" });
   }
 };
@@ -139,7 +147,8 @@ export const getICBById = async (req, res) => {
     const icb = await ICB.findById(req.params.id).lean();
     if (!icb) return res.status(404).json({ message: "ICB not found" });
     res.json({ icb });
-  } catch {
+  } catch (err) {
+    console.error("getICBById ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch ICB" });
   }
 };
@@ -155,6 +164,7 @@ export const createICB = async (req, res) => {
     res.status(201).json({ icb, message: "ICB created successfully" });
   } catch (err) {
     if (err.code === 11000) return res.status(409).json({ message: "An ICB with this name already exists" });
+    console.error("createICB ERROR:", err.message);
     res.status(500).json({ message: "Failed to create ICB" });
   }
 };
@@ -169,7 +179,8 @@ export const updateICB = async (req, res) => {
     );
     if (!icb) return res.status(404).json({ message: "ICB not found" });
     res.json({ icb, message: "ICB updated" });
-  } catch {
+  } catch (err) {
+    console.error("updateICB ERROR:", err.message);
     res.status(500).json({ message: "Failed to update ICB" });
   }
 };
@@ -186,7 +197,8 @@ export const deleteICB = async (req, res) => {
       });
     await ICB.findByIdAndUpdate(req.params.id, { isActive: false });
     res.json({ message: "ICB deleted" });
-  } catch {
+  } catch (err) {
+    console.error("deleteICB ERROR:", err.message);
     res.status(500).json({ message: "Failed to delete ICB" });
   }
 };
@@ -204,7 +216,8 @@ export const getFederations = async (req, res) => {
       .sort({ name: 1 })
       .lean();
     res.json({ federations });
-  } catch {
+  } catch (err) {
+    console.error("getFederations ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch federations" });
   }
 };
@@ -220,7 +233,8 @@ export const createFederation = async (req, res) => {
     });
     const populated = await fed.populate("icb", "name");
     res.status(201).json({ federation: populated, message: "Federation created" });
-  } catch {
+  } catch (err) {
+    console.error("createFederation ERROR:", err.message);
     res.status(500).json({ message: "Failed to create federation" });
   }
 };
@@ -231,7 +245,8 @@ export const updateFederation = async (req, res) => {
       .populate("icb", "name");
     if (!fed) return res.status(404).json({ message: "Federation not found" });
     res.json({ federation: fed, message: "Federation updated" });
-  } catch {
+  } catch (err) {
+    console.error("updateFederation ERROR:", err.message);
     res.status(500).json({ message: "Failed to update federation" });
   }
 };
@@ -243,7 +258,8 @@ export const deleteFederation = async (req, res) => {
       return res.status(409).json({ message: `Cannot delete — ${pcnCount} active PCN(s) are linked` });
     await Federation.findByIdAndUpdate(req.params.id, { isActive: false });
     res.json({ message: "Federation deleted" });
-  } catch {
+  } catch (err) {
+    console.error("deleteFederation ERROR:", err.message);
     res.status(500).json({ message: "Failed to delete federation" });
   }
 };
@@ -259,11 +275,12 @@ export const getPCNs = async (req, res) => {
     if (req.query.federation) filter.federation = req.query.federation;
     const pcns = await PCN.find(filter)
       .populate("icb", "name region")
-      .populate(safeFederationPopulate)   // ← FIX: same guard as getHierarchy
+      .populate(safeFederationPopulate)
       .sort({ name: 1 })
       .lean();
     res.json({ pcns });
-  } catch {
+  } catch (err) {
+    console.error("getPCNs ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch PCNs" });
   }
 };
@@ -289,8 +306,8 @@ export const getPCNById = async (req, res) => {
 
     res.json({ pcn });
   } catch (err) {
-    console.error("getPCNById:", err);
-    res.status(500).json({ message: "Failed to fetch PCN" });
+    console.error("getPCNById ERROR:", err.message, err.stack);
+    res.status(500).json({ message: "Failed to fetch PCN", detail: err.message });
   }
 };
 
@@ -306,7 +323,7 @@ export const createPCN = async (req, res) => {
       .lean();
     res.status(201).json({ pcn: populated, message: "PCN created" });
   } catch (err) {
-    console.error("createPCN:", err);
+    console.error("createPCN ERROR:", err.message);
     res.status(500).json({ message: "Failed to create PCN" });
   }
 };
@@ -319,7 +336,8 @@ export const updatePCN = async (req, res) => {
       .lean();
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
     res.json({ pcn, message: "PCN updated" });
-  } catch {
+  } catch (err) {
+    console.error("updatePCN ERROR:", err.message);
     res.status(500).json({ message: "Failed to update PCN" });
   }
 };
@@ -331,7 +349,8 @@ export const deletePCN = async (req, res) => {
       return res.status(409).json({ message: `Cannot delete — ${practiceCount} active practice(s) are linked` });
     await PCN.findByIdAndUpdate(req.params.id, { isActive: false });
     res.json({ message: "PCN deleted" });
-  } catch {
+  } catch (err) {
+    console.error("deletePCN ERROR:", err.message);
     res.status(500).json({ message: "Failed to delete PCN" });
   }
 };
@@ -347,7 +366,8 @@ export const updateRestrictedClinicians = async (req, res) => {
     ).populate("restrictedClinicians", "name email role");
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
     res.json({ pcn, message: "Restricted clinicians updated" });
-  } catch {
+  } catch (err) {
+    console.error("updateRestrictedClinicians ERROR:", err.message);
     res.status(500).json({ message: "Failed to update restricted clinicians" });
   }
 };
@@ -358,7 +378,8 @@ export const getMonthlyMeetings = async (req, res) => {
     const pcn = await PCN.findById(req.params.id).select("monthlyMeetings name").lean();
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
     res.json({ meetings: pcn.monthlyMeetings || [], pcnName: pcn.name });
-  } catch {
+  } catch (err) {
+    console.error("getMonthlyMeetings ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch meetings" });
   }
 };
@@ -379,7 +400,8 @@ export const upsertMonthlyMeeting = async (req, res) => {
     }
     await pcn.save();
     res.json({ meetings: pcn.monthlyMeetings, message: "Meeting saved" });
-  } catch {
+  } catch (err) {
+    console.error("upsertMonthlyMeeting ERROR:", err.message);
     res.status(500).json({ message: "Failed to save meeting" });
   }
 };
@@ -439,7 +461,7 @@ export const getPCNRollup = async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("getPCNRollup:", err);
+    console.error("getPCNRollup ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to generate rollup report" });
   }
 };
@@ -457,7 +479,8 @@ export const getPractices = async (req, res) => {
       .sort({ name: 1 })
       .lean();
     res.json({ practices });
-  } catch {
+  } catch (err) {
+    console.error("getPractices ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch practices" });
   }
 };
@@ -475,7 +498,8 @@ export const getPracticeById = async (req, res) => {
     recordView(Practice, req.params.id, req.user._id);
 
     res.json({ practice });
-  } catch {
+  } catch (err) {
+    console.error("getPracticeById ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch practice" });
   }
 };
@@ -488,7 +512,8 @@ export const createPractice = async (req, res) => {
     const practice = await Practice.create({ ...req.body, name: name.trim(), createdBy: req.user._id });
     const populated = await Practice.findById(practice._id).populate("pcn", "name").lean();
     res.status(201).json({ practice: populated, message: "Practice created" });
-  } catch {
+  } catch (err) {
+    console.error("createPractice ERROR:", err.message);
     res.status(500).json({ message: "Failed to create practice" });
   }
 };
@@ -502,7 +527,8 @@ export const updatePractice = async (req, res) => {
       .lean();
     if (!practice) return res.status(404).json({ message: "Practice not found" });
     res.json({ practice, message: "Practice updated" });
-  } catch {
+  } catch (err) {
+    console.error("updatePractice ERROR:", err.message);
     res.status(500).json({ message: "Failed to update practice" });
   }
 };
@@ -511,7 +537,8 @@ export const deletePractice = async (req, res) => {
   try {
     await Practice.findByIdAndUpdate(req.params.id, { isActive: false });
     res.json({ message: "Practice deleted" });
-  } catch {
+  } catch (err) {
+    console.error("deletePractice ERROR:", err.message);
     res.status(500).json({ message: "Failed to delete practice" });
   }
 };
@@ -527,7 +554,8 @@ export const updatePracticeRestricted = async (req, res) => {
     ).populate("restrictedClinicians", "name email role");
     if (!practice) return res.status(404).json({ message: "Practice not found" });
     res.json({ practice, message: "Restricted clinicians updated" });
-  } catch {
+  } catch (err) {
+    console.error("updatePracticeRestricted ERROR:", err.message);
     res.status(500).json({ message: "Failed to update restricted clinicians" });
   }
 };
@@ -577,7 +605,7 @@ Core Prescribing Solutions
 
     res.json({ message: "System access request logged successfully", log });
   } catch (err) {
-    console.error("requestSystemAccess:", err);
+    console.error("requestSystemAccess ERROR:", err.message);
     res.status(500).json({ message: "Failed to process system access request" });
   }
 };
@@ -608,7 +636,8 @@ export const getContactHistory = async (req, res) => {
     ]);
 
     res.json({ logs, total, page: Number(page), pages: Math.ceil(total / Number(limit)) });
-  } catch {
+  } catch (err) {
+    console.error("getContactHistory ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch contact history" });
   }
 };
@@ -635,7 +664,8 @@ export const addContactHistory = async (req, res) => {
 
     const populated = await ContactHistory.findById(log._id).populate("createdBy", "name role").lean();
     res.status(201).json({ log: populated, message: "Log added" });
-  } catch {
+  } catch (err) {
+    console.error("addContactHistory ERROR:", err.message);
     res.status(500).json({ message: "Failed to add log" });
   }
 };
@@ -646,17 +676,18 @@ export const updateContactHistory = async (req, res) => {
     const log = await ContactHistory.findByIdAndUpdate(
       req.params.logId,
       {
-        ...(subject            && { subject }),
-        ...(notes !== undefined && { notes }),
-        ...(type               && { type }),
-        ...(date               && { date }),
-        ...(time               && { time }),
+        ...(subject             && { subject }),
+        ...(notes !== undefined  && { notes }),
+        ...(type                && { type }),
+        ...(date                && { date }),
+        ...(time                && { time }),
       },
       { new: true }
     ).populate("createdBy", "name role");
     if (!log) return res.status(404).json({ message: "Log not found" });
     res.json({ log, message: "Log updated" });
-  } catch {
+  } catch (err) {
+    console.error("updateContactHistory ERROR:", err.message);
     res.status(500).json({ message: "Failed to update log" });
   }
 };
@@ -668,7 +699,8 @@ export const toggleStarred = async (req, res) => {
     log.starred = !log.starred;
     await log.save();
     res.json({ log, starred: log.starred, message: log.starred ? "Starred" : "Unstarred" });
-  } catch {
+  } catch (err) {
+    console.error("toggleStarred ERROR:", err.message);
     res.status(500).json({ message: "Failed to toggle star" });
   }
 };
@@ -678,7 +710,8 @@ export const deleteContactHistory = async (req, res) => {
     const log = await ContactHistory.findByIdAndDelete(req.params.logId);
     if (!log) return res.status(404).json({ message: "Log not found" });
     res.json({ message: "Log deleted" });
-  } catch {
+  } catch (err) {
+    console.error("deleteContactHistory ERROR:", err.message);
     res.status(500).json({ message: "Failed to delete log" });
   }
 };
@@ -735,7 +768,7 @@ export const sendMassEmail = async (req, res) => {
 
     res.json({ message: `Email sent to ${recipientResults.length} recipient(s)` });
   } catch (err) {
-    console.error("sendMassEmail:", err);
+    console.error("sendMassEmail ERROR:", err.message);
     res.status(500).json({ message: "Failed to send email" });
   }
 };
@@ -773,7 +806,8 @@ export const searchClients = async (req, res) => {
         ...practices.map(p => ({ ...p, _type: "practice" })),
       ],
     });
-  } catch {
+  } catch (err) {
+    console.error("searchClients ERROR:", err.message);
     res.status(500).json({ message: "Search failed" });
   }
 };
