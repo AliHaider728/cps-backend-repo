@@ -1,14 +1,17 @@
 /**
  * clientController.js  —  CPS Client Management
  *
- * FINAL FULLY UPDATED & FIXED VERSION (31 Mar 2026)
- * 
+ * UPDATED (Apr 2026)
+ *
  * FIXED:
- *   • Cast to ObjectId failed for value "Fylde Coast Medical Services" 
- *   • getHierarchy + getPCNs now 100% defensive (manual federation attachment)
- *   • All previous improvements kept
+ *   • getContactHistory: entityId string → ObjectId cast (logs not showing bug)
+ *   • addContactHistory: entityId string → ObjectId cast
+ *   • requestSystemAccess: entityId string → ObjectId cast
+ *   • sendMassEmail: entityId string → ObjectId cast
+ *   • All previous fixes kept (CastError for federation names, defensive hierarchy)
  */
 
+import mongoose       from "mongoose";
 import ICB            from "../models/ICB.js";
 import Federation     from "../models/Federation.js";
 import PCN            from "../models/PCN.js";
@@ -17,6 +20,17 @@ import ContactHistory from "../models/ContactHistory.js";
 import User           from "../models/User.js";
 import nodemailer     from "nodemailer";
 import crypto         from "crypto";
+
+/* ─────────────────────────────────────────────────
+   HELPER: safe ObjectId cast
+───────────────────────────────────────────────── */
+const toObjectId = (id) => {
+  try {
+    return new mongoose.Types.ObjectId(id);
+  } catch {
+    return null;
+  }
+};
 
 /* ─────────────────────────────────────────────────
    EMAIL TRANSPORT
@@ -39,9 +53,9 @@ const recordView = async (Model, id, userId) => {
   } catch (_) {}
 };
 
-/*
+/* ─────────────────────────────────────────────────
    HIERARCHY — FULLY DEFENSIVE (CastError FIXED)
-*/
+───────────────────────────────────────────────── */
 export const getHierarchy = async (req, res) => {
   try {
     const [icbs, federationsRaw, pcnsRaw, practices] = await Promise.all([
@@ -54,7 +68,6 @@ export const getHierarchy = async (req, res) => {
         .lean(),
     ]);
 
-    // Federation maps (by _id and by name for dirty data)
     const fedMapById = {};
     const fedMapByName = {};
     for (const f of federationsRaw) {
@@ -62,7 +75,6 @@ export const getHierarchy = async (req, res) => {
       fedMapByName[f.name.trim().toLowerCase()] = f;
     }
 
-    // Practices by PCN
     const practicesByPCN = {};
     for (const pr of practices) {
       const key = String(pr.pcn);
@@ -70,7 +82,6 @@ export const getHierarchy = async (req, res) => {
       practicesByPCN[key].push(pr);
     }
 
-    // Enrich PCNs with federation (handles string names too)
     const pcnsByICB = {};
     for (const pcn of pcnsRaw) {
       const icbKey = String(pcn.icb?._id || pcn.icb);
@@ -78,14 +89,11 @@ export const getHierarchy = async (req, res) => {
 
       let federation = null;
       const fedField = pcn.federation;
-
       if (fedField) {
         if (typeof fedField === "string") {
-          if (/^[0-9a-fA-F]{24}$/.test(fedField)) {
-            federation = fedMapById[fedField];
-          } else {
-            federation = fedMapByName[fedField.trim().toLowerCase()];
-          }
+          federation = /^[0-9a-fA-F]{24}$/.test(fedField)
+            ? fedMapById[fedField]
+            : fedMapByName[fedField.trim().toLowerCase()];
         } else if (fedField._id) {
           federation = fedMapById[String(fedField._id)];
         }
@@ -120,9 +128,9 @@ export const getHierarchy = async (req, res) => {
   }
 };
 
-/*
-   GET ALL PCNs — ALSO FULLY DEFENSIVE
-*/
+/* ─────────────────────────────────────────────────
+   PCNs — FULLY DEFENSIVE
+───────────────────────────────────────────────── */
 export const getPCNs = async (req, res) => {
   try {
     const filter = { isActive: true };
@@ -145,19 +153,15 @@ export const getPCNs = async (req, res) => {
     const pcns = pcnsRaw.map(pcn => {
       let federation = null;
       const fedField = pcn.federation;
-
       if (fedField) {
         if (typeof fedField === "string") {
-          if (/^[0-9a-fA-F]{24}$/.test(fedField)) {
-            federation = fedMapById[fedField];
-          } else {
-            federation = fedMapByName[fedField.trim().toLowerCase()];
-          }
+          federation = /^[0-9a-fA-F]{24}$/.test(fedField)
+            ? fedMapById[fedField]
+            : fedMapByName[fedField.trim().toLowerCase()];
         } else if (fedField._id) {
           federation = fedMapById[String(fedField._id)];
         }
       }
-
       return { ...pcn, federation: federation || null };
     });
 
@@ -303,7 +307,7 @@ export const deleteFederation = async (req, res) => {
 };
 
 /* ─────────────────────────────────────────────────
-   PCN CRUD (getPCNById, create, update, delete etc.)
+   PCN CRUD
 ───────────────────────────────────────────────── */
 export const getPCNById = async (req, res) => {
   try {
@@ -321,7 +325,6 @@ export const getPCNById = async (req, res) => {
     pcn.practices = practices;
 
     recordView(PCN, req.params.id, req.user._id);
-
     res.json({ pcn });
   } catch (err) {
     console.error("getPCNById ERROR:", err.message, err.stack);
@@ -513,7 +516,6 @@ export const getPracticeById = async (req, res) => {
     if (!practice) return res.status(404).json({ message: "Practice not found" });
 
     recordView(Practice, req.params.id, req.user._id);
-
     res.json({ practice });
   } catch (err) {
     console.error("getPracticeById ERROR:", err.message);
@@ -578,61 +580,18 @@ export const updatePracticeRestricted = async (req, res) => {
 };
 
 /* ─────────────────────────────────────────────────
-   SYSTEM ACCESS + CONTACT HISTORY + MASS EMAIL
+   CONTACT HISTORY — ★ FIXED: entityId ObjectId cast
 ───────────────────────────────────────────────── */
-export const requestSystemAccess = async (req, res) => {
-  try {
-    const { entityType, entityId } = req.params;
-    const { systems, clinicianDetails, notes } = req.body;
-
-    if (!systems?.length)         return res.status(400).json({ message: "At least one system must be selected" });
-    if (!clinicianDetails?.name)  return res.status(400).json({ message: "Clinician name is required" });
-
-    const systemList = systems.join(", ");
-    const emailBody = `
-Dear Team,
-
-Please arrange system access for the following clinician:
-
-Name:              ${clinicianDetails.name}
-Clinician Type:    ${clinicianDetails.clinicianType || "N/A"}
-GPhC Number:       ${clinicianDetails.gphcNumber || "N/A"}
-Smart Card Number: ${clinicianDetails.smartCardNumber || "N/A"}
-Email:             ${clinicianDetails.email || "N/A"}
-Phone:             ${clinicianDetails.phone || "N/A"}
-
-Systems Required:  ${systemList}
-
-Additional Notes:  ${notes || "None"}
-
-Kind regards,
-Core Prescribing Solutions
-`.trim();
-
-    const log = await ContactHistory.create({
-      entityType,
-      entityId,
-      type:    "system_access",
-      subject: `System Access Request — ${clinicianDetails.name} — ${systemList}`,
-      notes:   emailBody,
-      date:    new Date(),
-      time:    new Date().toTimeString().slice(0, 5),
-      createdBy: req.user._id,
-    });
-
-    res.json({ message: "System access request logged successfully", log });
-  } catch (err) {
-    console.error("requestSystemAccess ERROR:", err.message);
-    res.status(500).json({ message: "Failed to process system access request" });
-  }
-};
-
 export const getContactHistory = async (req, res) => {
   try {
     const { entityType, entityId } = req.params;
     const { type, starred, page = 1, limit = 100 } = req.query;
 
-    const filter = { entityType, entityId };
+    // ★ KEY FIX: cast string → ObjectId so MongoDB query matches
+    const entityObjId = toObjectId(entityId);
+    if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
+
+    const filter = { entityType, entityId: entityObjId };
     if (type && type !== "all") filter.type = type;
     if (starred === "true")     filter.starred = true;
 
@@ -663,9 +622,13 @@ export const addContactHistory = async (req, res) => {
     if (!subject?.trim()) return res.status(400).json({ message: "Subject is required" });
     if (!type)            return res.status(400).json({ message: "Type is required" });
 
+    // ★ KEY FIX: cast string → ObjectId
+    const entityObjId = toObjectId(entityId);
+    if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
+
     const log = await ContactHistory.create({
       entityType,
-      entityId,
+      entityId: entityObjId,
       type,
       subject: subject.trim(),
       notes:   notes || "",
@@ -689,11 +652,11 @@ export const updateContactHistory = async (req, res) => {
     const log = await ContactHistory.findByIdAndUpdate(
       req.params.logId,
       {
-        ...(subject             && { subject }),
+        ...(subject              && { subject }),
         ...(notes !== undefined  && { notes }),
-        ...(type                && { type }),
-        ...(date                && { date }),
-        ...(time                && { time }),
+        ...(type                 && { type }),
+        ...(date                 && { date }),
+        ...(time                 && { time }),
       },
       { new: true }
     ).populate("createdBy", "name role");
@@ -729,6 +692,63 @@ export const deleteContactHistory = async (req, res) => {
   }
 };
 
+/* ─────────────────────────────────────────────────
+   SYSTEM ACCESS REQUEST
+───────────────────────────────────────────────── */
+export const requestSystemAccess = async (req, res) => {
+  try {
+    const { entityType, entityId } = req.params;
+    const { systems, clinicianDetails, notes } = req.body;
+
+    if (!systems?.length)        return res.status(400).json({ message: "At least one system must be selected" });
+    if (!clinicianDetails?.name) return res.status(400).json({ message: "Clinician name is required" });
+
+    // ★ FIX: cast entityId
+    const entityObjId = toObjectId(entityId);
+    if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
+
+    const systemList = systems.join(", ");
+    const emailBody = `
+Dear Team,
+
+Please arrange system access for the following clinician:
+
+Name:              ${clinicianDetails.name}
+Clinician Type:    ${clinicianDetails.clinicianType || "N/A"}
+GPhC Number:       ${clinicianDetails.gphcNumber || "N/A"}
+Smart Card Number: ${clinicianDetails.smartCardNumber || "N/A"}
+Email:             ${clinicianDetails.email || "N/A"}
+Phone:             ${clinicianDetails.phone || "N/A"}
+
+Systems Required:  ${systemList}
+
+Additional Notes:  ${notes || "None"}
+
+Kind regards,
+Core Prescribing Solutions
+`.trim();
+
+    const log = await ContactHistory.create({
+      entityType,
+      entityId: entityObjId,
+      type:    "system_access",
+      subject: `System Access Request — ${clinicianDetails.name} — ${systemList}`,
+      notes:   emailBody,
+      date:    new Date(),
+      time:    new Date().toTimeString().slice(0, 5),
+      createdBy: req.user._id,
+    });
+
+    res.json({ message: "System access request logged successfully", log });
+  } catch (err) {
+    console.error("requestSystemAccess ERROR:", err.message);
+    res.status(500).json({ message: "Failed to process system access request" });
+  }
+};
+
+/* ─────────────────────────────────────────────────
+   MASS EMAIL
+───────────────────────────────────────────────── */
 export const sendMassEmail = async (req, res) => {
   try {
     const { entityType, entityId } = req.params;
@@ -739,6 +759,10 @@ export const sendMassEmail = async (req, res) => {
 
     const valid = (recipients || []).filter(r => r.email?.includes("@"));
     if (!valid.length)    return res.status(400).json({ message: "At least one valid recipient email is required" });
+
+    // ★ FIX: cast entityId
+    const entityObjId = toObjectId(entityId);
+    if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
 
     const trackingId = crypto.randomUUID();
     const apiBase    = `${req.protocol}://${req.get("host")}`;
@@ -762,7 +786,7 @@ export const sendMassEmail = async (req, res) => {
 
     await ContactHistory.create({
       entityType,
-      entityId,
+      entityId: entityObjId,
       type:        "email",
       subject:     `[Mass Email] ${subject}`,
       notes:       body.replace(/<[^>]+>/g, "").slice(0, 500),
@@ -781,6 +805,9 @@ export const sendMassEmail = async (req, res) => {
   }
 };
 
+/* ─────────────────────────────────────────────────
+   EMAIL TRACKING PIXEL
+───────────────────────────────────────────────── */
 export const trackEmailOpen = async (req, res) => {
   try {
     await ContactHistory.findOneAndUpdate(
