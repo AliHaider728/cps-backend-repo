@@ -1,15 +1,19 @@
 import dotenv from "dotenv";
 dotenv.config();
-import mongoose       from "mongoose";
-import bcrypt         from "bcryptjs";
-import User           from "./models/User.js";
-import ICB            from "./models/ICB.js";
-import Federation     from "./models/Federation.js";
-import PCN            from "./models/PCN.js";
-import Practice       from "./models/Practice.js";
-import ContactHistory from "./models/ContactHistory.js";
+import mongoose          from "mongoose";
+import bcrypt            from "bcryptjs";
+import User              from "./models/User.js";
+import ICB               from "./models/ICB.js";
+import Federation        from "./models/Federation.js";
+import PCN               from "./models/PCN.js";
+import Practice          from "./models/Practice.js";
+import ContactHistory    from "./models/ContactHistory.js";
+import ComplianceDocument from "./models/ComplianceDocument.js";
+import DocumentGroup     from "./models/DocumentGroup.js";
 
-/* ── Users ── */
+// ─────────────────────────────────────────────────────────
+//  USERS
+// ─────────────────────────────────────────────────────────
 const USERS = [
   { name: "Super Admin",     email: "superadmin@coreprescribing.co.uk", password: "SuperAdmin@123",  role: "super_admin" },
   { name: "Sarah Director",  email: "director@coreprescribing.co.uk",   password: "Director@123",    role: "director"    },
@@ -21,7 +25,9 @@ const USERS = [
   { name: "Dr. Sara Malik",  email: "clinician2@coreprescribing.co.uk", password: "Clinician@123",   role: "clinician"   },
 ];
 
-/* ── ICBs ── */
+// ─────────────────────────────────────────────────────────
+//  ICBs
+// ─────────────────────────────────────────────────────────
 const ICBS = [
   { name: "NHS Greater Manchester ICB",         region: "North West",         code: "QOP" },
   { name: "NHS Lancashire & South Cumbria ICB", region: "North West",         code: "QE1" },
@@ -29,17 +35,21 @@ const ICBS = [
   { name: "NHS South Yorkshire ICB",            region: "Yorkshire & Humber", code: "QF7" },
 ];
 
-/* ── Federations ── */
+// ─────────────────────────────────────────────────────────
+//  FEDERATIONS
+// ─────────────────────────────────────────────────────────
 const FEDERATION_DATA = [
-  { icbName: "NHS Greater Manchester ICB", name: "Salford Together Federation",           type: "federation" },
-  { icbName: "NHS Greater Manchester ICB", name: "Manchester Health & Care Commissioning",type: "federation" },
-  { icbName: "NHS Greater Manchester ICB", name: "Stockport Together",                    type: "INT" },
+  { icbName: "NHS Greater Manchester ICB", name: "Salford Together Federation",            type: "federation" },
+  { icbName: "NHS Greater Manchester ICB", name: "Manchester Health & Care Commissioning", type: "federation" },
+  { icbName: "NHS Greater Manchester ICB", name: "Stockport Together",                     type: "INT"        },
   { icbName: "NHS Lancashire & South Cumbria ICB", name: "Lancashire & South Cumbria NHS Foundation Trust", type: "federation" },
-  { icbName: "NHS Lancashire & South Cumbria ICB", name: "Fylde Coast Medical Services",  type: "federation" },
+  { icbName: "NHS Lancashire & South Cumbria ICB", name: "Fylde Coast Medical Services",   type: "federation" },
   { icbName: "NHS Cheshire & Merseyside ICB",      name: "Cheshire & Wirral Foundation Trust", type: "federation" },
 ];
 
-/* ── PCNs ── */
+// ─────────────────────────────────────────────────────────
+//  PCNs
+// ─────────────────────────────────────────────────────────
 const PCN_DATA = [
   {
     icbName: "NHS Greater Manchester ICB",
@@ -54,8 +64,8 @@ const PCN_DATA = [
         notes: "Key PCN — 6 practices, high footfall area.",
         contacts: [
           { name: "Dr. Priya Sharma", role: "Clinical Director", email: "priya.sharma@salfordpcn.nhs.uk", phone: "0161 234 5678", type: "decision_maker" },
-          { name: "Kevin Walsh",      role: "PCN Manager",       email: "k.walsh@salfordpcn.nhs.uk",      phone: "0161 234 5679", type: "general" },
-          { name: "Rachel Green",     role: "Finance Lead",      email: "r.green@salfordpcn.nhs.uk",      phone: "0161 234 5680", type: "finance" },
+          { name: "Kevin Walsh",      role: "PCN Manager",       email: "k.walsh@salfordpcn.nhs.uk",      phone: "0161 234 5679", type: "general"        },
+          { name: "Rachel Green",     role: "Finance Lead",      email: "r.green@salfordpcn.nhs.uk",      phone: "0161 234 5680", type: "finance"        },
         ],
         requiredSystems: { emis: true, ice: true, accurx: true, docman: true, vpn: true },
       },
@@ -68,7 +78,7 @@ const PCN_DATA = [
         notes: "Growing PCN, recently added 2 new practices.",
         contacts: [
           { name: "Dr. Mohammed Iqbal", role: "Clinical Director", email: "m.iqbal@wythpcn.nhs.uk", phone: "0161 945 1234", type: "decision_maker" },
-          { name: "Sandra Lee",         role: "Ops Manager",       email: "s.lee@wythpcn.nhs.uk",   phone: "0161 945 1235", type: "operations" },
+          { name: "Sandra Lee",         role: "Ops Manager",       email: "s.lee@wythpcn.nhs.uk",   phone: "0161 945 1235", type: "operations"     },
         ],
         requiredSystems: { emis: true, accurx: true },
       },
@@ -87,7 +97,7 @@ const PCN_DATA = [
         notes: "Urban PCN — strong pharmacist engagement.",
         contacts: [
           { name: "Dr. Tom Brennan", role: "Clinical Director", email: "t.brennan@prestoncity.nhs.uk", phone: "01772 555 100", type: "decision_maker" },
-          { name: "Lucy Parker",     role: "Finance Contact",   email: "l.parker@prestoncity.nhs.uk",  phone: "01772 555 101", type: "finance" },
+          { name: "Lucy Parker",     role: "Finance Contact",   email: "l.parker@prestoncity.nhs.uk",  phone: "01772 555 101", type: "finance"        },
         ],
         requiredSystems: { systmOne: true, ice: true, accurx: true },
       },
@@ -106,8 +116,8 @@ const PCN_DATA = [
         notes: "High-demand urban PCN.",
         contacts: [
           { name: "Dr. Aarav Patel", role: "Clinical Director", email: "a.patel@livsouth.nhs.uk",  phone: "0151 233 4000", type: "decision_maker" },
-          { name: "Diane Morris",    role: "PCN Manager",       email: "d.morris@livsouth.nhs.uk", phone: "0151 233 4001", type: "general" },
-          { name: "James Wong",      role: "Finance Lead",      email: "j.wong@livsouth.nhs.uk",   phone: "0151 233 4002", type: "finance" },
+          { name: "Diane Morris",    role: "PCN Manager",       email: "d.morris@livsouth.nhs.uk", phone: "0151 233 4001", type: "general"        },
+          { name: "James Wong",      role: "Finance Lead",      email: "j.wong@livsouth.nhs.uk",   phone: "0151 233 4002", type: "finance"        },
         ],
         requiredSystems: { systmOne: true, accurx: true, docman: true },
       },
@@ -115,11 +125,13 @@ const PCN_DATA = [
   },
 ];
 
-/* ── Practices ── */
+// ─────────────────────────────────────────────────────────
+//  PRACTICES
+// ─────────────────────────────────────────────────────────
 const PRACTICE_DATA = {
   "Salford Central PCN": [
     {
-      name: "Pendleton Medical Centre",    odsCode: "P84001",
+      name: "Pendleton Medical Centre", odsCode: "P84001",
       address: "15 Broad Street", city: "Salford", postcode: "M6 5BN",
       fte: "0.5 FTE (20HRS/WEEK)", contractType: "ARRS",
       xeroCode: "PEN1", xeroCategory: "GPX",
@@ -135,7 +147,7 @@ const PRACTICE_DATA = {
       ],
     },
     {
-      name: "Weaste & Seedley Surgery",    odsCode: "P84002",
+      name: "Weaste & Seedley Surgery", odsCode: "P84002",
       address: "42 Liverpool Street", city: "Salford", postcode: "M5 4LT",
       fte: "0.4 FTE", contractType: "ARRS",
       xeroCode: "WEA1", xeroCategory: "GPX",
@@ -150,7 +162,7 @@ const PRACTICE_DATA = {
   ],
   "Preston City PCN": [
     {
-      name: "Fishergate Hill Surgery",    odsCode: "P82001",
+      name: "Fishergate Hill Surgery", odsCode: "P82001",
       address: "Fishergate Hill", city: "Preston", postcode: "PR1 8JD",
       fte: "0.6 FTE", contractType: "Direct",
       xeroCode: "FIS1", xeroCategory: "GPX",
@@ -164,7 +176,7 @@ const PRACTICE_DATA = {
       ],
     },
     {
-      name: "Larches Surgery",            odsCode: "P82002",
+      name: "Larches Surgery", odsCode: "P82002",
       address: "Blackpool Road", city: "Preston", postcode: "PR2 6AA",
       fte: "0.4 FTE", contractType: "Direct",
       xeroCode: "LAR1", xeroCategory: "GPX",
@@ -176,7 +188,7 @@ const PRACTICE_DATA = {
   ],
   "Liverpool South PCN": [
     {
-      name: "Speke Medical Centre",        odsCode: "P83001",
+      name: "Speke Medical Centre", odsCode: "P83001",
       address: "Speke Road", city: "Liverpool", postcode: "L24 2SQ",
       fte: "0.5 FTE", contractType: "ARRS",
       xeroCode: "SPE1", xeroCategory: "GPX",
@@ -192,25 +204,106 @@ const PRACTICE_DATA = {
   ],
 };
 
+// ─────────────────────────────────────────────────────────
+//  CONTACT HISTORY TEMPLATES
+// ─────────────────────────────────────────────────────────
 const HISTORY_TEMPLATES = [
-  { type: "meeting",   subject: "Monthly performance review",    notes: "Discussed Q1 KPIs. All targets met. Follow-up scheduled." },
-  { type: "call",      subject: "Clinician placement query",      notes: "PCN manager called regarding locum cover in March." },
-  { type: "email",     subject: "Contract renewal discussion",    notes: "Sent updated terms. Awaiting sign-off from Clinical Director." },
-  { type: "complaint", subject: "Complaint: delayed rota",        notes: "PCN reported delay in March rota. Resolved same day." },
-  { type: "note",      subject: "Internal note — billing query",  notes: "Finance contact queried invoice. Confirmed correct." },
-  { type: "document",  subject: "MOU signed and received",        notes: "MOU received and filed. Contract now complete." },
-  { type: "system_access", subject: "System access request sent", notes: "EMIS access requested for new clinical pharmacist." },
+  { type: "meeting",      subject: "Monthly performance review",    notes: "Discussed Q1 KPIs. All targets met. Follow-up scheduled."     },
+  { type: "call",         subject: "Clinician placement query",      notes: "PCN manager called regarding locum cover in March."            },
+  { type: "email",        subject: "Contract renewal discussion",    notes: "Sent updated terms. Awaiting sign-off from Clinical Director." },
+  { type: "complaint",    subject: "Complaint: delayed rota",        notes: "PCN reported delay in March rota. Resolved same day."          },
+  { type: "note",         subject: "Internal note — billing query",  notes: "Finance contact queried invoice. Confirmed correct."           },
+  { type: "document",     subject: "MOU signed and received",        notes: "MOU received and filed. Contract now complete."                },
+  { type: "system_access", subject: "System access request sent",   notes: "EMIS access requested for new clinical pharmacist."            },
 ];
 
-const rand    = arr  => arr[Math.floor(Math.random() * arr.length)];
-const daysAgo = n    => new Date(Date.now() - n * 86_400_000);
+// ─────────────────────────────────────────────────────────
+//  COMPLIANCE DOCUMENTS  (19 docs — CPS screenshots)
+// ─────────────────────────────────────────────────────────
+const COMPLIANCE_DOCS = [
+  { name: "CV",                                         displayOrder: 7,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "DBS Check/Update Service",                   displayOrder: 2,  mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
+  { name: "Declaration of Interests Form",              displayOrder: 4,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Enhanced Access - Key Contacts (Mon-Fri 6:30pm-8pm - Sat 8am-6:30pm)", displayOrder: 0, mandatory: true, expirable: false, active: true, defaultExpiryDays: 0, defaultReminderDays: 0 },
+  { name: "East Lancashire Alliance - Enhanced Access - Key Contacts",             displayOrder: 0, mandatory: true, expirable: false, active: true, defaultExpiryDays: 0, defaultReminderDays: 0 },
+  { name: "Enhanced DBS Certificate (cert only)",       displayOrder: 2,  mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
+  { name: "Enhanced DBS Certitifcate",                  displayOrder: 10, mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Fitness to Practise Form",                   displayOrder: 3,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Health Screening Form",                      displayOrder: 5,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Indemnity Insurance Certificate",            displayOrder: 11, mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
+  { name: "Proof of Address",                           displayOrder: 9,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Reference 1",                                displayOrder: 1,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Reference 2",                                displayOrder: 2,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Reference Contact Details",                  displayOrder: 12, mandatory: false, expirable: false, active: false, defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Right to Work",                              displayOrder: 8,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Right to Work Check (expired)",              displayOrder: 5,  mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
+  { name: "Signed Confidentiality Statement",           displayOrder: 2,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Signed Data Protection Statement",           displayOrder: 1,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Signed Non-Disclosure Agreement",            displayOrder: 6,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+];
 
-/* ─────────────────────────────────────────────── */
+// ─────────────────────────────────────────────────────────
+//  DOCUMENT GROUPS  (7 groups — CPS screenshots)
+// ─────────────────────────────────────────────────────────
+const DOCUMENT_GROUPS = [
+  {
+    name: "Archive/Expired",          displayOrder: 0, active: false,
+    docNames: ["Right to Work", "Indemnity Insurance Certificate"],
+  },
+  {
+    name: "Clinical Staff Documents", displayOrder: 1, active: true,
+    docNames: [
+      "CV", "DBS Check/Update Service", "Declaration of Interests Form",
+      "Enhanced Access - Key Contacts (Mon-Fri 6:30pm-8pm - Sat 8am-6:30pm)",
+      "East Lancashire Alliance - Enhanced Access - Key Contacts",
+      "Fitness to Practise Form", "Health Screening Form",
+      "Reference 1", "Reference 2", "Reference Contact Details",
+      "Signed Confidentiality Statement", "Signed Data Protection Statement",
+      "Signed Non-Disclosure Agreement",
+    ],
+  },
+  {
+    name: "DBS and Update",           displayOrder: 0, active: true,
+    docNames: ["DBS Check/Update Service", "Enhanced DBS Certificate (cert only)"],
+  },
+  {
+    name: "DBS cert - no update",     displayOrder: 0, active: true,
+    docNames: ["Enhanced DBS Certificate (cert only)"],
+  },
+  {
+    name: "Enhanced Access",          displayOrder: 0, active: true,
+    docNames: [
+      "Enhanced Access - Key Contacts (Mon-Fri 6:30pm-8pm - Sat 8am-6:30pm)",
+      "East Lancashire Alliance - Enhanced Access - Key Contacts",
+    ],
+  },
+  {
+    name: "Non-Clinical Staff",       displayOrder: 0, active: true,
+    docNames: [
+      "CV", "Signed Confidentiality Statement", "Signed Data Protection Statement",
+      "Reference 1", "Reference 2", "Proof of Address",
+    ],
+  },
+  {
+    name: "Right to Work Check (Expired)", displayOrder: 0, active: true,
+    docNames: ["Right to Work Check (expired)"],
+  },
+];
+
+// ─────────────────────────────────────────────────────────
+//  HELPERS
+// ─────────────────────────────────────────────────────────
+const rand    = arr => arr[Math.floor(Math.random() * arr.length)];
+const daysAgo = n   => new Date(Date.now() - n * 86_400_000);
+
+// ─────────────────────────────────────────────────────────
+//  MAIN
+// ─────────────────────────────────────────────────────────
 (async () => {
   await mongoose.connect(process.env.MONGODB_URI);
   console.log("✓ MongoDB connected\n");
 
-  /* 1. Users */
+  // ── 1. Users ──────────────────────────────────────────
   console.log("── Seeding Users ──");
   const seededUsers = [];
   for (const u of USERS) {
@@ -226,7 +319,7 @@ const daysAgo = n    => new Date(Date.now() - n * 86_400_000);
   const admin      = seededUsers.find(u => u.role === "super_admin");
   const clinicians = seededUsers.filter(u => u.role === "clinician");
 
-  /* 2. ICBs */
+  // ── 2. ICBs ───────────────────────────────────────────
   console.log("\n── Seeding ICBs ──");
   const icbMap = {};
   for (const d of ICBS) {
@@ -239,7 +332,7 @@ const daysAgo = n    => new Date(Date.now() - n * 86_400_000);
     console.log(`  ✓ ${d.name}`);
   }
 
-  /* 3. Federations */
+  // ── 3. Federations ────────────────────────────────────
   console.log("\n── Seeding Federations ──");
   const fedMap = {};
   for (const d of FEDERATION_DATA) {
@@ -254,7 +347,7 @@ const daysAgo = n    => new Date(Date.now() - n * 86_400_000);
     console.log(`  ✓ ${d.name} [${d.type}]`);
   }
 
-  /* 4. PCNs */
+  // ── 4. PCNs ───────────────────────────────────────────
   console.log("\n── Seeding PCNs ──");
   const pcnMap = {};
   for (const group of PCN_DATA) {
@@ -265,7 +358,9 @@ const daysAgo = n    => new Date(Date.now() - n * 86_400_000);
       const pcn = await PCN.findOneAndUpdate(
         { name: d.name },
         {
-          ...d, icb: icb._id, federation: fed?._id,
+          ...d,
+          icb: icb._id,
+          federation: fed?._id,
           federationName: group.federationName,
           restrictedClinicians: clinicians.length ? [clinicians[0]._id] : [],
           createdBy: admin._id,
@@ -277,7 +372,7 @@ const daysAgo = n    => new Date(Date.now() - n * 86_400_000);
     }
   }
 
-  /* 5. Practices */
+  // ── 5. Practices ──────────────────────────────────────
   console.log("\n── Seeding Practices ──");
   const practiceMap = {};
   for (const [pcnName, practices] of Object.entries(PRACTICE_DATA)) {
@@ -294,7 +389,7 @@ const daysAgo = n    => new Date(Date.now() - n * 86_400_000);
     }
   }
 
-  /* 6. Contact History */
+  // ── 6. Contact History ────────────────────────────────
   console.log("\n── Seeding Contact History ──");
   await ContactHistory.deleteMany({});
   for (const pcn of Object.values(pcnMap)) {
@@ -304,7 +399,7 @@ const daysAgo = n    => new Date(Date.now() - n * 86_400_000);
         entityType: "PCN", entityId: pcn._id,
         type: t.type, subject: t.subject, notes: t.notes,
         date: daysAgo(Math.floor(Math.random() * 90)),
-        time: `${String(Math.floor(Math.random()*8)+9).padStart(2,"0")}:${Math.random()>0.5?"00":"30"}`,
+        time: `${String(Math.floor(Math.random() * 8) + 9).padStart(2, "0")}:${Math.random() > 0.5 ? "00" : "30"}`,
         starred: i === 0,
         createdBy: admin._id,
       });
@@ -326,7 +421,47 @@ const daysAgo = n    => new Date(Date.now() - n * 86_400_000);
   }
   console.log("  ✓ Practice history seeded");
 
+  // ── 7. Compliance Documents ───────────────────────────
+  console.log("\n── Seeding Compliance Documents ──");
+  const docMap = {};
+  for (const d of COMPLIANCE_DOCS) {
+    const doc = await ComplianceDocument.findOneAndUpdate(
+      { name: d.name },
+      { ...d, createdBy: admin._id },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    docMap[d.name] = doc;
+    console.log(`  ✓ ${d.name}`);
+  }
+
+  // ── 8. Document Groups ────────────────────────────────
+  console.log("\n── Seeding Document Groups ──");
+  for (const g of DOCUMENT_GROUPS) {
+    const docIds = g.docNames
+      .map(n => docMap[n]?._id)
+      .filter(Boolean);
+
+    await DocumentGroup.findOneAndUpdate(
+      { name: g.name },
+      {
+        name: g.name,
+        displayOrder: g.displayOrder,
+        active: g.active,
+        documents: docIds,
+        createdBy: admin._id,
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    console.log(`  ✓ ${g.name} (${docIds.length} docs)`);
+  }
+
+  // ── Done ──────────────────────────────────────────────
   await mongoose.disconnect();
-  console.log("\n Seed complete!");
-  console.log(`  Users: ${USERS.length} | ICBs: ${ICBS.length} | Federations: ${Object.keys(fedMap).length} | PCNs: ${Object.keys(pcnMap).length} | Practices: ${Object.keys(practiceMap).length}`);
+  console.log("\n✓ Seed complete!");
+  console.log(
+    `  Users: ${USERS.length} | ICBs: ${ICBS.length} | ` +
+    `Federations: ${Object.keys(fedMap).length} | PCNs: ${Object.keys(pcnMap).length} | ` +
+    `Practices: ${Object.keys(practiceMap).length} | ` +
+    `Compliance Docs: ${COMPLIANCE_DOCS.length} | Document Groups: ${DOCUMENT_GROUPS.length}`
+  );
 })();
