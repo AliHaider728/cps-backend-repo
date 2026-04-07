@@ -72,6 +72,24 @@ const ComplianceDocMetaSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const GroupDocumentRecordSchema = new mongoose.Schema(
+  {
+    document:      { type: mongoose.Schema.Types.ObjectId, ref: "ComplianceDocument", required: true },
+    fileName:      { type: String, default: "" },
+    fileUrl:       { type: String, default: "" },
+    mimeType:      { type: String, default: "" },
+    fileSize:      { type: Number, default: 0 },
+    status:        { type: String, enum: ["pending", "uploaded", "expired"], default: "pending" },
+    uploadedAt:    { type: Date },
+    expiryDate:    { type: Date },
+    renewalDate:   { type: Date },
+    notes:         { type: String, default: "" },
+    uploadedBy:    { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    lastUpdatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  },
+  { _id: false }
+);
+
 const PracticeSchema = new mongoose.Schema(
   {
     // ── Core ─────────────────────────────────────────────────
@@ -138,7 +156,9 @@ const PracticeSchema = new mongoose.Schema(
     },
 
     // ── Documents ─────────────────────────────────────────────
-    documents: [DocumentSchema],
+    complianceGroup: { type: mongoose.Schema.Types.ObjectId, ref: "DocumentGroup", default: null },
+    groupDocuments:  { type: [GroupDocumentRecordSchema], default: [] },
+    documents:       [DocumentSchema],
 
     // ── Rota ──────────────────────────────────────────────────
     rotaVisible: { type: Boolean, default: true },

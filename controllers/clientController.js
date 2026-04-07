@@ -9,6 +9,9 @@
  *   • requestSystemAccess: entityId string → ObjectId cast
  *   • sendMassEmail: entityId string → ObjectId cast
  *   • All previous fixes kept (CastError for federation names, defensive hierarchy)
+ *
+ * NEW (Apr 2026):
+ *   • getICBById: now returns federations + pcns (with practices) for ICBDetailPage
  */
 
 import mongoose       from "mongoose";
@@ -31,6 +34,13 @@ const toObjectId = (id) => {
     return null;
   }
 };
+
+const normalizeComplianceGroup = (payload = {}) => ({
+  ...payload,
+  ...(Object.prototype.hasOwnProperty.call(payload, "complianceGroup") && {
+    complianceGroup: payload.complianceGroup || null,
+  }),
+});
 
 /* ─────────────────────────────────────────────────
    EMAIL TRANSPORT
@@ -137,7 +147,10 @@ export const getPCNs = async (req, res) => {
     if (req.query.icb)        filter.icb        = req.query.icb;
     if (req.query.federation) filter.federation = req.query.federation;
 
-    const pcnsRaw = await PCN.find(filter).sort({ name: 1 }).lean();
+    const pcnsRaw = await PCN.find(filter)
+      .populate("complianceGroup", "name")
+      .sort({ name: 1 })
+      .lean();
 
     const federations = await Federation.find({ isActive: true })
       .select("name type icb")
@@ -185,11 +198,53 @@ export const getICBs = async (req, res) => {
   }
 };
 
+/* ─────────────────────────────────────────────────
+   ✅ UPDATED: getICBById
+   Now returns federations + pcns (with practices)
+   so ICBDetailPage can show full drill-down
+───────────────────────────────────────────────── */
 export const getICBById = async (req, res) => {
   try {
     const icb = await ICB.findById(req.params.id).lean();
     if (!icb) return res.status(404).json({ message: "ICB not found" });
-    res.json({ icb });
+
+    // Fetch federations and PCNs in parallel
+    const [federations, pcnsRaw] = await Promise.all([
+      Federation.find({ icb: req.params.id, isActive: true })
+        .select("name type notes")
+        .sort({ name: 1 })
+        .lean(),
+      PCN.find({ icb: req.params.id, isActive: true })
+        .populate("federation", "name type")
+        .select("name contractType annualSpend federation xeroCode")
+        .sort({ name: 1 })
+        .lean(),
+    ]);
+
+    // Attach practices to each PCN
+    const practicesByPCN = {};
+    if (pcnsRaw.length > 0) {
+      const pcnIds = pcnsRaw.map(p => p._id);
+      const allPractices = await Practice.find({
+        pcn: { $in: pcnIds },
+        isActive: true,
+      })
+        .select("name odsCode fte contractType pcn")
+        .lean();
+
+      for (const pr of allPractices) {
+        const key = String(pr.pcn);
+        if (!practicesByPCN[key]) practicesByPCN[key] = [];
+        practicesByPCN[key].push(pr);
+      }
+    }
+
+    const pcns = pcnsRaw.map(pcn => ({
+      ...pcn,
+      practices: practicesByPCN[String(pcn._id)] || [],
+    }));
+
+    res.json({ icb: { ...icb, federations, pcns } });
   } catch (err) {
     console.error("getICBById ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch ICB" });
@@ -314,6 +369,11 @@ export const getPCNById = async (req, res) => {
     const pcn = await PCN.findById(req.params.id)
       .populate("icb", "name region code")
       .populate("federation", "name type")
+      .populate({
+        path: "complianceGroup",
+        select: "name active displayOrder documents",
+        populate: { path: "documents", select: "name mandatory expirable displayOrder defaultExpiryDays defaultReminderDays active" },
+      })
       .populate("activeClinicians", "name email role")
       .populate("restrictedClinicians", "name email role")
       .lean();
@@ -337,10 +397,12 @@ export const createPCN = async (req, res) => {
     const { name, icb } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: "PCN name is required" });
     if (!icb)          return res.status(400).json({ message: "ICB is required" });
-    const pcn = await PCN.create({ ...req.body, name: name.trim(), createdBy: req.user._id });
+    const payload = normalizeComplianceGroup(req.body);
+    const pcn = await PCN.create({ ...payload, name: name.trim(), createdBy: req.user._id });
     const populated = await PCN.findById(pcn._id)
       .populate("icb", "name")
       .populate("federation", "name type")
+      .populate("complianceGroup", "name")
       .lean();
     res.status(201).json({ pcn: populated, message: "PCN created" });
   } catch (err) {
@@ -351,11 +413,21 @@ export const createPCN = async (req, res) => {
 
 export const updatePCN = async (req, res) => {
   try {
-    const pcn = await PCN.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true })
+    const existing = await PCN.findById(req.params.id).select("complianceGroup");
+    if (!existing) return res.status(404).json({ message: "PCN not found" });
+
+    const payload = normalizeComplianceGroup(req.body);
+    if (Object.prototype.hasOwnProperty.call(payload, "complianceGroup")) {
+      const previousGroup = existing.complianceGroup ? String(existing.complianceGroup) : "";
+      const nextGroup = payload.complianceGroup ? String(payload.complianceGroup) : "";
+      if (previousGroup !== nextGroup) payload.groupDocuments = [];
+    }
+
+    const pcn = await PCN.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true })
       .populate("icb", "name region")
       .populate("federation", "name type")
+      .populate("complianceGroup", "name")
       .lean();
-    if (!pcn) return res.status(404).json({ message: "PCN not found" });
     res.json({ pcn, message: "PCN updated" });
   } catch (err) {
     console.error("updatePCN ERROR:", err.message);
@@ -497,6 +569,7 @@ export const getPractices = async (req, res) => {
     if (req.query.pcn) filter.pcn = req.query.pcn;
     const practices = await Practice.find(filter)
       .populate("pcn", "name")
+      .populate("complianceGroup", "name")
       .sort({ name: 1 })
       .lean();
     res.json({ practices });
@@ -510,6 +583,11 @@ export const getPracticeById = async (req, res) => {
   try {
     const practice = await Practice.findById(req.params.id)
       .populate("pcn", "name icb")
+      .populate({
+        path: "complianceGroup",
+        select: "name active displayOrder documents",
+        populate: { path: "documents", select: "name mandatory expirable displayOrder defaultExpiryDays defaultReminderDays active" },
+      })
       .populate("linkedClinicians", "name email role")
       .populate("restrictedClinicians", "name email role")
       .lean();
@@ -528,8 +606,12 @@ export const createPractice = async (req, res) => {
     const { name, pcn } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: "Practice name is required" });
     if (!pcn)          return res.status(400).json({ message: "PCN is required" });
-    const practice = await Practice.create({ ...req.body, name: name.trim(), createdBy: req.user._id });
-    const populated = await Practice.findById(practice._id).populate("pcn", "name").lean();
+    const payload = normalizeComplianceGroup(req.body);
+    const practice = await Practice.create({ ...payload, name: name.trim(), createdBy: req.user._id });
+    const populated = await Practice.findById(practice._id)
+      .populate("pcn", "name")
+      .populate("complianceGroup", "name")
+      .lean();
     res.status(201).json({ practice: populated, message: "Practice created" });
   } catch (err) {
     console.error("createPractice ERROR:", err.message);
@@ -539,12 +621,22 @@ export const createPractice = async (req, res) => {
 
 export const updatePractice = async (req, res) => {
   try {
-    const practice = await Practice.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true })
+    const existing = await Practice.findById(req.params.id).select("complianceGroup");
+    if (!existing) return res.status(404).json({ message: "Practice not found" });
+
+    const payload = normalizeComplianceGroup(req.body);
+    if (Object.prototype.hasOwnProperty.call(payload, "complianceGroup")) {
+      const previousGroup = existing.complianceGroup ? String(existing.complianceGroup) : "";
+      const nextGroup = payload.complianceGroup ? String(payload.complianceGroup) : "";
+      if (previousGroup !== nextGroup) payload.groupDocuments = [];
+    }
+
+    const practice = await Practice.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true })
       .populate("pcn", "name")
+      .populate("complianceGroup", "name")
       .populate("linkedClinicians", "name email role")
       .populate("restrictedClinicians", "name email role")
       .lean();
-    if (!practice) return res.status(404).json({ message: "Practice not found" });
     res.json({ practice, message: "Practice updated" });
   } catch (err) {
     console.error("updatePractice ERROR:", err.message);
@@ -587,7 +679,6 @@ export const getContactHistory = async (req, res) => {
     const { entityType, entityId } = req.params;
     const { type, starred, page = 1, limit = 100 } = req.query;
 
-    // ★ KEY FIX: cast string → ObjectId so MongoDB query matches
     const entityObjId = toObjectId(entityId);
     if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
 
@@ -622,7 +713,6 @@ export const addContactHistory = async (req, res) => {
     if (!subject?.trim()) return res.status(400).json({ message: "Subject is required" });
     if (!type)            return res.status(400).json({ message: "Type is required" });
 
-    // ★ KEY FIX: cast string → ObjectId
     const entityObjId = toObjectId(entityId);
     if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
 
@@ -703,7 +793,6 @@ export const requestSystemAccess = async (req, res) => {
     if (!systems?.length)        return res.status(400).json({ message: "At least one system must be selected" });
     if (!clinicianDetails?.name) return res.status(400).json({ message: "Clinician name is required" });
 
-    // ★ FIX: cast entityId
     const entityObjId = toObjectId(entityId);
     if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
 
@@ -760,7 +849,6 @@ export const sendMassEmail = async (req, res) => {
     const valid = (recipients || []).filter(r => r.email?.includes("@"));
     if (!valid.length)    return res.status(400).json({ message: "At least one valid recipient email is required" });
 
-    // ★ FIX: cast entityId
     const entityObjId = toObjectId(entityId);
     if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
 

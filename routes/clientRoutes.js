@@ -29,6 +29,16 @@ import {
   sendMassEmail, trackEmailOpen,
 
 } from "../controllers/clientController.js";
+import {
+  getComplianceStatus,
+  upsertComplianceDoc,
+  approveComplianceDoc,
+  rejectComplianceDoc,
+  getExpiringDocs,
+  runExpiryCheck,
+  getEntityDocuments,
+  upsertEntityDocument,
+} from "../controllers/complianceController.js";
 
 const router = Router();
 
@@ -75,6 +85,16 @@ router.post  ("/practice",         ...admin,    createPractice);
 router.put   ("/practice/:id",     ...admin,    updatePractice);
 router.delete("/practice/:id",     ...superOnly,deletePractice);
 router.patch ("/practice/:id/restricted", ...admin, updatePracticeRestricted);
+
+router.get   ("/:entityType/:entityId/documents",             ...adminFin, getEntityDocuments);
+router.patch ("/:entityType/:entityId/documents/:documentId", ...admin,    upsertEntityDocument);
+
+router.get   ("/:entityType/:entityId/compliance/status",          ...adminFin, getComplianceStatus);
+router.patch ("/:entityType/:entityId/compliance/:docKey",         ...admin,    upsertComplianceDoc);
+router.post  ("/:entityType/:entityId/compliance/:docKey/approve", ...admin,    approveComplianceDoc);
+router.post  ("/:entityType/:entityId/compliance/:docKey/reject",  ...admin,    rejectComplianceDoc);
+router.get   ("/compliance/expiring",                              ...adminFin, getExpiringDocs);
+router.post  ("/compliance/run-expiry",                            ...admin,    runExpiryCheck);
 
 // ── System Access Request  
 router.post("/:entityType/:entityId/system-access-request", ...admin, requestSystemAccess);

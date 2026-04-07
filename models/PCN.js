@@ -78,6 +78,24 @@ const ComplianceDocMetaSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const GroupDocumentRecordSchema = new mongoose.Schema(
+  {
+    document:      { type: mongoose.Schema.Types.ObjectId, ref: "ComplianceDocument", required: true },
+    fileName:      { type: String, default: "" },
+    fileUrl:       { type: String, default: "" },
+    mimeType:      { type: String, default: "" },
+    fileSize:      { type: Number, default: 0 },
+    status:        { type: String, enum: ["pending", "uploaded", "expired"], default: "pending" },
+    uploadedAt:    { type: Date },
+    expiryDate:    { type: Date },
+    renewalDate:   { type: Date },
+    notes:         { type: String, default: "" },
+    uploadedBy:    { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    lastUpdatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  },
+  { _id: false }
+);
+
 const PCNSchema = new mongoose.Schema(
   {
     // ── Core identity ──────────────────────────────────────
@@ -142,7 +160,9 @@ const PCNSchema = new mongoose.Schema(
     },
 
     // ── Meta ───────────────────────────────────────────────
-    notes:    { type: String, default: "" },
+    complianceGroup: { type: mongoose.Schema.Types.ObjectId, ref: "DocumentGroup", default: null },
+    groupDocuments:  { type: [GroupDocumentRecordSchema], default: [] },
+    notes:           { type: String, default: "" },
     isActive: { type: Boolean, default: true },
     createdBy:{ type: mongoose.Schema.Types.ObjectId, ref: "User" },
   },
