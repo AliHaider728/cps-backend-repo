@@ -38,6 +38,8 @@ import {
   runExpiryCheck,
   getEntityDocuments,
   upsertEntityDocument,
+  addEntityDocumentUploads,
+  updateEntityDocumentUpload,
 } from "../controllers/complianceController.js";
 
 const router = Router();
@@ -88,6 +90,8 @@ router.patch ("/practice/:id/restricted", ...admin, updatePracticeRestricted);
 
 router.get   ("/:entityType/:entityId/documents",             ...adminFin, getEntityDocuments);
 router.patch ("/:entityType/:entityId/documents/:documentId", ...admin,    upsertEntityDocument);
+router.post  ("/:entityType/:entityId/documents/:groupId/:documentId/uploads", ...admin, addEntityDocumentUploads);
+router.patch ("/:entityType/:entityId/documents/:groupId/:documentId/uploads/:uploadId", ...admin, updateEntityDocumentUpload);
 
 router.get   ("/:entityType/:entityId/compliance/status",          ...adminFin, getComplianceStatus);
 router.patch ("/:entityType/:entityId/compliance/:docKey",         ...admin,    upsertComplianceDoc);

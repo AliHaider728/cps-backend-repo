@@ -9,9 +9,10 @@
  * - Cron-ready expiry check
  */
 
-import PCN            from "../models/PCN.js";
-import Practice       from "../models/Practice.js";
-import nodemailer     from "nodemailer";
+import mongoose   from "mongoose";
+import PCN        from "../models/PCN.js";
+import Practice   from "../models/Practice.js";
+import nodemailer from "nodemailer";
 
 const transporter = nodemailer.createTransport({
   host:   process.env.EMAIL_HOST,
@@ -96,56 +97,133 @@ function computeDocumentStatus(record, docDef) {
   return record.status === "expired" ? "expired" : "uploaded";
 }
 
+function buildRecordKey(groupId, documentId) {
+  return `${String(groupId)}:${String(documentId)}`;
+}
+
+function computeUploadStatus(upload, docDef) {
+  if (!upload?.fileUrl) return "pending";
+  if (docDef?.expirable && upload.expiryDate && new Date(upload.expiryDate) < new Date()) return "expired";
+  return upload.status === "expired" ? "expired" : "uploaded";
+}
+
+function getRecordUploads(record = {}, docDef) {
+  const uploads = Array.isArray(record.uploads) && record.uploads.length > 0
+    ? record.uploads
+    : (record.fileUrl
+        ? [{
+            uploadId: record.uploadId || `legacy-${String(record.group || "nogroup")}-${String(record.document || "nodoc")}`,
+            fileName: record.fileName || "",
+            fileUrl: record.fileUrl || "",
+            mimeType: record.mimeType || "",
+            fileSize: record.fileSize || 0,
+            uploadedAt: record.uploadedAt || null,
+            expiryDate: record.expiryDate || null,
+            renewalDate: record.renewalDate || null,
+            notes: record.notes || "",
+            reference: record.reference || "",
+            uploadedBy: record.uploadedBy || null,
+            status: computeUploadStatus(record, docDef),
+          }]
+        : []);
+
+  return uploads
+    .map((upload) => ({
+      ...upload,
+      status: computeUploadStatus(upload, docDef),
+    }))
+    .sort((a, b) => new Date(b.uploadedAt || 0) - new Date(a.uploadedAt || 0));
+}
+
 async function getEntityDocumentContext(entityType, entityId) {
   const normalizedType = normalizeEntityType(entityType);
   const Model = getModel(normalizedType);
-  const entity = await Model.findById(entityId)
-    .populate({
-      path: "complianceGroup",
+  let query = Model.findById(entityId).populate({
+    path: "complianceGroup",
+    select: "name active displayOrder documents",
+    populate: {
+      path: "documents",
+      select: "name displayOrder mandatory expirable active defaultExpiryDays defaultReminderDays",
+    },
+  });
+
+  if (normalizedType === "PCN") {
+    query = query.populate({
+      path: "complianceGroups",
       select: "name active displayOrder documents",
       populate: {
         path: "documents",
         select: "name displayOrder mandatory expirable active defaultExpiryDays defaultReminderDays",
       },
-    })
-    .lean();
+    });
+  }
 
-  if (!entity) return { normalizedType, entity: null, documents: [] };
+  const entity = await query.lean();
 
-  const groupDocs = (entity.complianceGroup?.documents || [])
-    .filter((doc) => doc && doc.active !== false)
+  if (!entity) return { normalizedType, entity: null, documents: [], usedDefaultDocuments: false };
+
+  const selectedGroups = normalizedType === "PCN"
+    ? ((entity.complianceGroups && entity.complianceGroups.length > 0)
+        ? entity.complianceGroups
+        : (entity.complianceGroup ? [entity.complianceGroup] : []))
+    : (entity.complianceGroup ? [entity.complianceGroup] : []);
+
+  const groupDocMap = new Map();
+  for (const group of selectedGroups) {
+    for (const doc of group?.documents || []) {
+      if (!doc || doc.active === false) continue;
+      groupDocMap.set(String(doc._id), doc);
+    }
+  }
+
+  let groupDocs = Array.from(groupDocMap.values())
     .sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0) || a.name.localeCompare(b.name));
 
-  return { normalizedType, entity, documents: groupDocs };
+  return { normalizedType, entity, documents: groupDocs, usedDefaultDocuments: false };
 }
 
-function buildEntityDocumentsPayload(entity, documents) {
+function buildEntityDocumentsPayload(entity, documents, options = {}) {
   const recordMap = new Map(
-    (entity.groupDocuments || []).map((record) => [String(record.document), record])
+    (entity.groupDocuments || []).map((record) => [buildRecordKey(record.group, record.document), record])
   );
+  const groupList = (entity.complianceGroups && entity.complianceGroups.length > 0)
+    ? entity.complianceGroups
+    : (entity.complianceGroup ? [entity.complianceGroup] : []);
 
-  const rows = documents.map((doc) => {
-    const record = recordMap.get(String(doc._id)) || null;
-    const status = computeDocumentStatus(record, doc);
+  const groups = groupList.map((group) => {
+    const docsForGroup = (group.documents || [])
+      .filter((doc) => doc && doc.active !== false)
+      .sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0) || a.name.localeCompare(b.name))
+      .map((doc) => {
+        const record = recordMap.get(buildRecordKey(group._id, doc._id)) || null;
+        const uploads = getRecordUploads(record, doc);
+        const latestUpload = uploads[0] || null;
+        const status = latestUpload ? latestUpload.status : "pending";
+        return {
+          groupId: String(group._id),
+          groupName: group.name,
+          documentId: String(doc._id),
+          name: doc.name,
+          mandatory: !!doc.mandatory,
+          expirable: !!doc.expirable,
+          defaultExpiryDays: doc.defaultExpiryDays ?? null,
+          defaultReminderDays: doc.defaultReminderDays ?? null,
+          uploadCount: uploads.length,
+          latestUpload,
+          status,
+          uploads,
+        };
+      });
+
     return {
-      documentId: String(doc._id),
-      name: doc.name,
-      mandatory: !!doc.mandatory,
-      expirable: !!doc.expirable,
-      defaultExpiryDays: doc.defaultExpiryDays ?? null,
-      defaultReminderDays: doc.defaultReminderDays ?? null,
-      fileName: record?.fileName || "",
-      fileUrl: record?.fileUrl || "",
-      mimeType: record?.mimeType || "",
-      fileSize: record?.fileSize || 0,
-      uploadedAt: record?.uploadedAt || null,
-      uploadedBy: record?.uploadedBy || null,
-      status,
-      expiryDate: record?.expiryDate || null,
-      renewalDate: record?.renewalDate || null,
-      notes: record?.notes || "",
+      groupId: String(group._id),
+      groupName: group.name,
+      displayOrder: group.displayOrder ?? 0,
+      documents: docsForGroup,
     };
   });
+
+  const rows = groups.flatMap((group) => group.documents);
 
   return {
     complianceGroup: entity.complianceGroup
@@ -156,6 +234,16 @@ function buildEntityDocumentsPayload(entity, documents) {
           displayOrder: entity.complianceGroup.displayOrder,
         }
       : null,
+    complianceGroups: (entity.complianceGroups || [])
+      .filter(Boolean)
+      .map((group) => ({
+        _id: group._id,
+        name: group.name,
+        active: group.active,
+        displayOrder: group.displayOrder,
+      })),
+    usedDefaultDocuments: !!options.usedDefaultDocuments,
+    groups,
     documents: rows,
     summary: {
       total: rows.length,
@@ -168,7 +256,7 @@ function buildEntityDocumentsPayload(entity, documents) {
 
 export const getEntityDocuments = async (req, res) => {
   try {
-    const { normalizedType, entity, documents } = await getEntityDocumentContext(
+    const { normalizedType, entity, documents, usedDefaultDocuments } = await getEntityDocumentContext(
       req.params.entityType,
       req.params.entityId
     );
@@ -179,7 +267,7 @@ export const getEntityDocuments = async (req, res) => {
       entityType: normalizedType,
       entityId: entity._id,
       entityName: entity.name,
-      ...buildEntityDocumentsPayload(entity, documents),
+      ...buildEntityDocumentsPayload(entity, documents, { usedDefaultDocuments }),
     });
   } catch (err) {
     console.error("getEntityDocuments ERROR:", err.message);
@@ -187,69 +275,94 @@ export const getEntityDocuments = async (req, res) => {
   }
 };
 
-export const upsertEntityDocument = async (req, res) => {
+function buildSelectedGroups(entity) {
+  return (entity.complianceGroups && entity.complianceGroups.length > 0)
+    ? entity.complianceGroups
+    : (entity.complianceGroup ? [entity.complianceGroup] : []);
+}
+
+function findGroupAndDocument(entity, groupId, documentId) {
+  const selectedGroups = buildSelectedGroups(entity);
+  const targetGroup = selectedGroups.find((group) => String(group._id) === String(groupId));
+  if (!targetGroup) return { targetGroup: null, targetDoc: null };
+  const targetDoc = (targetGroup.documents || []).find((doc) => String(doc._id) === String(documentId));
+  return { targetGroup, targetDoc };
+}
+
+function makeUploadEntry(payload, userId, docDef) {
+  const entry = {
+    uploadId: new mongoose.Types.ObjectId().toString(),
+    fileName: payload.fileName || "",
+    fileUrl: payload.fileUrl || "",
+    mimeType: payload.mimeType || "",
+    fileSize: payload.fileSize || 0,
+    uploadedAt: new Date(),
+    expiryDate: payload.expiryDate ? new Date(payload.expiryDate) : null,
+    renewalDate: payload.renewalDate ? new Date(payload.renewalDate) : null,
+    notes: payload.notes || "",
+    reference: payload.reference || "",
+    uploadedBy: userId,
+  };
+  if (!entry.expiryDate && docDef?.expirable && docDef.defaultExpiryDays) {
+    entry.expiryDate = new Date(Date.now() + docDef.defaultExpiryDays * 24 * 60 * 60 * 1000);
+  }
+  entry.status = computeUploadStatus(entry, docDef);
+  return entry;
+}
+
+export const addEntityDocumentUploads = async (req, res) => {
   try {
     const { normalizedType, entity, documents } = await getEntityDocumentContext(
       req.params.entityType,
       req.params.entityId
     );
     if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
-    if (!entity.complianceGroup?._id) {
+    const selectedGroupCount = entity.complianceGroups?.length || (entity.complianceGroup?._id ? 1 : 0);
+    if (!selectedGroupCount) {
       return res.status(400).json({ message: "Select a compliance group before uploading documents" });
     }
 
-    const documentId = String(req.params.documentId);
-    const docDef = documents.find((doc) => String(doc._id) === documentId);
-    if (!docDef) return res.status(404).json({ message: "Document is not part of the selected compliance group" });
+    const { groupId, documentId } = req.params;
+    const { targetGroup, targetDoc } = findGroupAndDocument(entity, groupId, documentId);
+    if (!targetGroup) return res.status(404).json({ message: "Document group is not assigned to this entity" });
+    if (!targetDoc) return res.status(404).json({ message: "Document is not part of the selected group" });
 
-    const {
-      fileName,
-      fileUrl,
-      mimeType,
-      fileSize,
-      expiryDate,
-      renewalDate,
-      notes,
-      clearFile,
-    } = req.body;
+    const uploadsPayload = Array.isArray(req.body.uploads) ? req.body.uploads : [];
+    if (uploadsPayload.length === 0) {
+      return res.status(400).json({ message: "At least one upload is required" });
+    }
 
     const records = [...(entity.groupDocuments || [])];
-    const recordIndex = records.findIndex((record) => String(record.document) === documentId);
-    const existing = recordIndex >= 0 ? records[recordIndex] : { document: req.params.documentId };
+    const recordIndex = records.findIndex(
+      (record) => String(record.group) === String(groupId) && String(record.document) === String(documentId)
+    );
+    const existing = recordIndex >= 0 ? records[recordIndex] : { group: groupId, document: documentId };
+    const nextUploads = [
+      ...getRecordUploads(existing, targetDoc),
+      ...uploadsPayload
+        .filter((upload) => upload?.fileUrl)
+        .map((upload) => makeUploadEntry(upload, req.user._id, targetDoc)),
+    ];
 
+    const latestUpload = nextUploads[0] || null;
     const nextRecord = {
       ...existing,
-      document: req.params.documentId,
-      fileName: fileName !== undefined ? fileName : existing.fileName || "",
-      fileUrl: fileUrl !== undefined ? fileUrl : existing.fileUrl || "",
-      mimeType: mimeType !== undefined ? mimeType : existing.mimeType || "",
-      fileSize: fileSize !== undefined ? fileSize : existing.fileSize || 0,
-      expiryDate: expiryDate !== undefined ? (expiryDate ? new Date(expiryDate) : null) : existing.expiryDate || null,
-      renewalDate: renewalDate !== undefined ? (renewalDate ? new Date(renewalDate) : null) : existing.renewalDate || null,
-      notes: notes !== undefined ? notes : existing.notes || "",
-      uploadedBy: existing.uploadedBy || null,
-      uploadedAt: existing.uploadedAt || null,
+      group: groupId,
+      document: documentId,
+      uploads: nextUploads,
+      fileName: latestUpload?.fileName || "",
+      fileUrl: latestUpload?.fileUrl || "",
+      mimeType: latestUpload?.mimeType || "",
+      fileSize: latestUpload?.fileSize || 0,
+      uploadedAt: latestUpload?.uploadedAt || null,
+      expiryDate: latestUpload?.expiryDate || null,
+      renewalDate: latestUpload?.renewalDate || null,
+      notes: latestUpload?.notes || "",
+      reference: latestUpload?.reference || "",
+      uploadedBy: latestUpload?.uploadedBy || null,
       lastUpdatedBy: req.user._id,
+      status: latestUpload?.status || "pending",
     };
-
-    if (clearFile) {
-      nextRecord.fileName = "";
-      nextRecord.fileUrl = "";
-      nextRecord.mimeType = "";
-      nextRecord.fileSize = 0;
-      nextRecord.uploadedAt = null;
-      nextRecord.uploadedBy = null;
-      nextRecord.status = "pending";
-    } else if (fileUrl) {
-      nextRecord.uploadedAt = new Date();
-      nextRecord.uploadedBy = req.user._id;
-      if (!nextRecord.expiryDate && docDef.expirable && docDef.defaultExpiryDays) {
-        nextRecord.expiryDate = new Date(Date.now() + docDef.defaultExpiryDays * 24 * 60 * 60 * 1000);
-      }
-      nextRecord.status = computeDocumentStatus(nextRecord, docDef);
-    } else {
-      nextRecord.status = computeDocumentStatus(nextRecord, docDef);
-    }
 
     if (recordIndex >= 0) records[recordIndex] = nextRecord;
     else records.push(nextRecord);
@@ -263,12 +376,123 @@ export const upsertEntityDocument = async (req, res) => {
 
     const refreshed = await getEntityDocumentContext(req.params.entityType, req.params.entityId);
     res.json({
-      message: "Document updated",
+      message: "Uploads added",
       entityType: normalizedType,
       entityId: req.params.entityId,
       entityName: refreshed.entity?.name,
-      ...buildEntityDocumentsPayload(refreshed.entity, refreshed.documents),
+      ...buildEntityDocumentsPayload(refreshed.entity, refreshed.documents, {
+        usedDefaultDocuments: refreshed.usedDefaultDocuments,
+      }),
     });
+  } catch (err) {
+    console.error("addEntityDocumentUploads ERROR:", err.message, err.stack);
+    res.status(500).json({ message: "Failed to add uploads" });
+  }
+};
+
+export const updateEntityDocumentUpload = async (req, res) => {
+  try {
+    const { normalizedType, entity } = await getEntityDocumentContext(
+      req.params.entityType,
+      req.params.entityId
+    );
+    if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
+
+    const { groupId, documentId, uploadId } = req.params;
+    const selectedGroups = buildSelectedGroups(entity);
+    const targetGroup = selectedGroups.find((group) => String(group._id) === String(groupId));
+    if (!targetGroup) return res.status(404).json({ message: "Document group is not assigned to this entity" });
+    const targetDoc = (targetGroup.documents || []).find((doc) => String(doc._id) === String(documentId));
+    if (!targetDoc) return res.status(404).json({ message: "Document is not part of the selected group" });
+
+    const records = [...(entity.groupDocuments || [])];
+    const recordIndex = records.findIndex(
+      (record) => String(record.group) === String(groupId) && String(record.document) === String(documentId)
+    );
+    if (recordIndex < 0) return res.status(404).json({ message: "Upload record not found" });
+
+    const record = { ...records[recordIndex] };
+    const uploads = getRecordUploads(record, targetDoc).map((upload) => ({ ...upload }));
+    const uploadIndex = uploads.findIndex((upload) => String(upload.uploadId) === String(uploadId));
+    if (uploadIndex < 0) return res.status(404).json({ message: "Upload not found" });
+
+    const existingUpload = uploads[uploadIndex];
+    const nextUpload = {
+      ...existingUpload,
+      ...(req.body.expiryDate !== undefined && { expiryDate: req.body.expiryDate ? new Date(req.body.expiryDate) : null }),
+      ...(req.body.renewalDate !== undefined && { renewalDate: req.body.renewalDate ? new Date(req.body.renewalDate) : null }),
+      ...(req.body.notes !== undefined && { notes: req.body.notes || "" }),
+      ...(req.body.reference !== undefined && { reference: req.body.reference || "" }),
+    };
+    nextUpload.status = computeUploadStatus(nextUpload, targetDoc);
+    uploads[uploadIndex] = nextUpload;
+    uploads.sort((a, b) => new Date(b.uploadedAt || 0) - new Date(a.uploadedAt || 0));
+
+    const latestUpload = uploads[0] || null;
+    records[recordIndex] = {
+      ...record,
+      uploads,
+      fileName: latestUpload?.fileName || "",
+      fileUrl: latestUpload?.fileUrl || "",
+      mimeType: latestUpload?.mimeType || "",
+      fileSize: latestUpload?.fileSize || 0,
+      uploadedAt: latestUpload?.uploadedAt || null,
+      expiryDate: latestUpload?.expiryDate || null,
+      renewalDate: latestUpload?.renewalDate || null,
+      notes: latestUpload?.notes || "",
+      reference: latestUpload?.reference || "",
+      uploadedBy: latestUpload?.uploadedBy || null,
+      lastUpdatedBy: req.user._id,
+      status: latestUpload?.status || "pending",
+    };
+
+    const Model = getModel(normalizedType);
+    await Model.findByIdAndUpdate(
+      req.params.entityId,
+      { $set: { groupDocuments: records } },
+      { new: true, runValidators: false }
+    );
+
+    const refreshed = await getEntityDocumentContext(req.params.entityType, req.params.entityId);
+    res.json({
+      message: "Upload updated",
+      entityType: normalizedType,
+      entityId: req.params.entityId,
+      entityName: refreshed.entity?.name,
+      ...buildEntityDocumentsPayload(refreshed.entity, refreshed.documents, {
+        usedDefaultDocuments: refreshed.usedDefaultDocuments,
+      }),
+    });
+  } catch (err) {
+    console.error("updateEntityDocumentUpload ERROR:", err.message, err.stack);
+    res.status(500).json({ message: "Failed to update upload" });
+  }
+};
+
+export const upsertEntityDocument = async (req, res) => {
+  try {
+    const documentId = String(req.params.documentId);
+    const { normalizedType, entity, documents } = await getEntityDocumentContext(
+      req.params.entityType,
+      req.params.entityId
+    );
+    if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
+    const groupList = buildSelectedGroups(entity);
+    const targetGroup = groupList.find((group) => (group.documents || []).some((doc) => String(doc._id) === documentId));
+    if (!targetGroup) return res.status(404).json({ message: "Document is not part of the selected compliance group" });
+
+    req.params.groupId = String(targetGroup._id);
+    req.body.uploads = [{
+      fileName: req.body.fileName,
+      fileUrl: req.body.fileUrl,
+      mimeType: req.body.mimeType,
+      fileSize: req.body.fileSize,
+      expiryDate: req.body.expiryDate,
+      renewalDate: req.body.renewalDate,
+      notes: req.body.notes,
+      reference: req.body.reference,
+    }];
+    return addEntityDocumentUploads(req, res);
   } catch (err) {
     console.error("upsertEntityDocument ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to update document" });

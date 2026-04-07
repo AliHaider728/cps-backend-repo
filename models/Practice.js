@@ -74,6 +74,7 @@ const ComplianceDocMetaSchema = new mongoose.Schema(
 
 const GroupDocumentRecordSchema = new mongoose.Schema(
   {
+    group:         { type: mongoose.Schema.Types.ObjectId, ref: "DocumentGroup", required: true },
     document:      { type: mongoose.Schema.Types.ObjectId, ref: "ComplianceDocument", required: true },
     fileName:      { type: String, default: "" },
     fileUrl:       { type: String, default: "" },
@@ -86,6 +87,22 @@ const GroupDocumentRecordSchema = new mongoose.Schema(
     notes:         { type: String, default: "" },
     uploadedBy:    { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     lastUpdatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    uploads: [
+      {
+        uploadId:    { type: String, required: true },
+        fileName:    { type: String, default: "" },
+        fileUrl:     { type: String, default: "" },
+        mimeType:    { type: String, default: "" },
+        fileSize:    { type: Number, default: 0 },
+        status:      { type: String, enum: ["pending", "uploaded", "expired"], default: "pending" },
+        uploadedAt:  { type: Date, default: Date.now },
+        expiryDate:  { type: Date },
+        renewalDate: { type: Date },
+        notes:       { type: String, default: "" },
+        reference:   { type: String, default: "" },
+        uploadedBy:  { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      },
+    ],
   },
   { _id: false }
 );

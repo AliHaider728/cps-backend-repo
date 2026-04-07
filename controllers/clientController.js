@@ -35,12 +35,29 @@ const toObjectId = (id) => {
   }
 };
 
-const normalizeComplianceGroup = (payload = {}) => ({
-  ...payload,
-  ...(Object.prototype.hasOwnProperty.call(payload, "complianceGroup") && {
-    complianceGroup: payload.complianceGroup || null,
-  }),
-});
+const normalizeComplianceGroup = (payload = {}) => {
+  const next = { ...payload };
+
+  if (Object.prototype.hasOwnProperty.call(payload, "complianceGroups")) {
+    const complianceGroups = Array.from(
+      new Set(
+        (Array.isArray(payload.complianceGroups) ? payload.complianceGroups : [payload.complianceGroups])
+          .map((value) => String(value || "").trim())
+          .filter(Boolean)
+      )
+    );
+    next.complianceGroups = complianceGroups;
+    next.complianceGroup = complianceGroups[0] || null;
+    return next;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(payload, "complianceGroup")) {
+    next.complianceGroup = payload.complianceGroup || null;
+    next.complianceGroups = next.complianceGroup ? [next.complianceGroup] : [];
+  }
+
+  return next;
+};
 
 /* ─────────────────────────────────────────────────
    EMAIL TRANSPORT
@@ -149,6 +166,7 @@ export const getPCNs = async (req, res) => {
 
     const pcnsRaw = await PCN.find(filter)
       .populate("complianceGroup", "name")
+      .populate("complianceGroups", "name")
       .sort({ name: 1 })
       .lean();
 
@@ -369,6 +387,7 @@ export const getPCNById = async (req, res) => {
     const pcn = await PCN.findById(req.params.id)
       .populate("icb", "name region code")
       .populate("federation", "name type")
+      .populate("complianceGroups", "name active displayOrder")
       .populate({
         path: "complianceGroup",
         select: "name active displayOrder documents",
@@ -403,6 +422,7 @@ export const createPCN = async (req, res) => {
       .populate("icb", "name")
       .populate("federation", "name type")
       .populate("complianceGroup", "name")
+      .populate("complianceGroups", "name")
       .lean();
     res.status(201).json({ pcn: populated, message: "PCN created" });
   } catch (err) {
@@ -413,20 +433,30 @@ export const createPCN = async (req, res) => {
 
 export const updatePCN = async (req, res) => {
   try {
-    const existing = await PCN.findById(req.params.id).select("complianceGroup");
+    const existing = await PCN.findById(req.params.id).select("complianceGroup complianceGroups");
     if (!existing) return res.status(404).json({ message: "PCN not found" });
 
     const payload = normalizeComplianceGroup(req.body);
-    if (Object.prototype.hasOwnProperty.call(payload, "complianceGroup")) {
-      const previousGroup = existing.complianceGroup ? String(existing.complianceGroup) : "";
-      const nextGroup = payload.complianceGroup ? String(payload.complianceGroup) : "";
-      if (previousGroup !== nextGroup) payload.groupDocuments = [];
+    if (
+      Object.prototype.hasOwnProperty.call(payload, "complianceGroups") ||
+      Object.prototype.hasOwnProperty.call(payload, "complianceGroup")
+    ) {
+      const previousGroups = [
+        ...(existing.complianceGroups || []).map((groupId) => String(groupId)),
+        ...(!(existing.complianceGroups || []).length && existing.complianceGroup ? [String(existing.complianceGroup)] : []),
+      ].sort();
+      const nextGroups = [
+        ...(payload.complianceGroups || []).map((groupId) => String(groupId)),
+        ...(!(payload.complianceGroups || []).length && payload.complianceGroup ? [String(payload.complianceGroup)] : []),
+      ].sort();
+      if (JSON.stringify(previousGroups) !== JSON.stringify(nextGroups)) payload.groupDocuments = [];
     }
 
     const pcn = await PCN.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true })
       .populate("icb", "name region")
       .populate("federation", "name type")
       .populate("complianceGroup", "name")
+      .populate("complianceGroups", "name")
       .lean();
     res.json({ pcn, message: "PCN updated" });
   } catch (err) {
