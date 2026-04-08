@@ -11,6 +11,9 @@
  * FIXED (Apr 2026):
  *   • buildSelectedGroups: mongoose.isValidObjectId(group) → group._id check only
  *     (was passing whole object instead of string ID — caused 500 crash)
+ *   • getComplianceStatus / upsertComplianceDoc / approveComplianceDoc / rejectComplianceDoc:
+ *     now call normalizeEntityType() before getModel() — raw lowercase "pcn"/"practice"
+ *     was throwing "Invalid entityType" → 500 crash
  */
 
 import mongoose   from "mongoose";
@@ -559,16 +562,17 @@ export const upsertEntityDocument = async (req, res) => {
 
 /* ────────────────────────────────────────────────────────────────────
    GET /api/clients/:entityType/:entityId/compliance/status
-   Returns a full compliance status summary
+   ✅ FIXED: normalizeEntityType() added — raw "pcn"/"practice" was crashing getModel()
 ──────────────────────────────────────────────────────────────────── */
 export const getComplianceStatus = async (req, res) => {
   try {
     const { entityType, entityId } = req.params;
-    const Model    = getModel(entityType);
-    const docTypes = getDocTypes(entityType);
+    const normalizedType = normalizeEntityType(entityType); // ✅ FIXED
+    const Model    = getModel(normalizedType);              // ✅ was: getModel(entityType)
+    const docTypes = getDocTypes(normalizedType);           // ✅ was: getDocTypes(entityType)
 
     const entity = await Model.findById(entityId).lean();
-    if (!entity) return res.status(404).json({ message: `${entityType} not found` });
+    if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
 
     const complianceDocs = entity.complianceDocs || {};
     const score = calcScore(complianceDocs, docTypes);
@@ -593,21 +597,22 @@ export const getComplianceStatus = async (req, res) => {
     res.json({ ...score, docs, entityName: entity.name });
   } catch (err) {
     console.error("getComplianceStatus ERROR:", err.message);
-    res.status(500).json({ message: "Failed to get compliance status" });
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to get compliance status" });
   }
 };
 
 /* ────────────────────────────────────────────────────────────────────
    PATCH /api/clients/:entityType/:entityId/compliance/:docKey
-   Upload or update a compliance document's metadata
+   ✅ FIXED: normalizeEntityType() added
 ──────────────────────────────────────────────────────────────────── */
 export const upsertComplianceDoc = async (req, res) => {
   try {
     const { entityType, entityId, docKey } = req.params;
-    const Model = getModel(entityType);
+    const normalizedType = normalizeEntityType(entityType); // ✅ FIXED
+    const Model = getModel(normalizedType);                 // ✅ was: getModel(entityType)
 
     const entity = await Model.findById(entityId);
-    if (!entity) return res.status(404).json({ message: `${entityType} not found` });
+    if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
 
     const existing = entity.complianceDocs?.[docKey] || {};
     const {
@@ -615,7 +620,6 @@ export const upsertComplianceDoc = async (req, res) => {
       expiryDate, renewalDate, notes, status
     } = req.body;
 
-    // Build new meta — preserve existing fields not in body
     const newMeta = {
       ...existing,
       ...(fileName   !== undefined && { fileName }),
@@ -625,12 +629,10 @@ export const upsertComplianceDoc = async (req, res) => {
       ...(notes      !== undefined && { notes }),
       ...(expiryDate !== undefined && { expiryDate: expiryDate ? new Date(expiryDate) : null }),
       ...(renewalDate!== undefined && { renewalDate: renewalDate ? new Date(renewalDate) : null }),
-      // If new file uploaded, reset to pending
       ...(fileUrl && fileUrl !== existing.fileUrl && {
         status:     "pending",
         uploadedAt: new Date(),
         version:    (existing.version || 0) + 1,
-        // Archive previous version
         history: [
           ...(existing.history || []),
           ...(existing.fileUrl ? [{
@@ -642,11 +644,9 @@ export const upsertComplianceDoc = async (req, res) => {
           }] : []),
         ],
       }),
-      // Allow direct status set if no new file
       ...(!fileUrl && status !== undefined && { status }),
     };
 
-    // Also toggle the boolean flag if verified
     const updatePayload = {
       [`complianceDocs.${docKey}`]: newMeta,
     };
@@ -668,17 +668,19 @@ export const upsertComplianceDoc = async (req, res) => {
     });
   } catch (err) {
     console.error("upsertComplianceDoc ERROR:", err.message, err.stack);
-    res.status(500).json({ message: "Failed to update compliance document" });
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to update compliance document" });
   }
 };
 
 /* ────────────────────────────────────────────────────────────────────
    POST /api/clients/:entityType/:entityId/compliance/:docKey/approve
+   ✅ FIXED: normalizeEntityType() added
 ──────────────────────────────────────────────────────────────────── */
 export const approveComplianceDoc = async (req, res) => {
   try {
     const { entityType, entityId, docKey } = req.params;
-    const Model = getModel(entityType);
+    const normalizedType = normalizeEntityType(entityType); // ✅ FIXED
+    const Model = getModel(normalizedType);                 // ✅ was: getModel(entityType)
 
     const updated = await Model.findByIdAndUpdate(
       entityId,
@@ -694,17 +696,18 @@ export const approveComplianceDoc = async (req, res) => {
       { new: true }
     ).lean();
 
-    if (!updated) return res.status(404).json({ message: `${entityType} not found` });
+    if (!updated) return res.status(404).json({ message: `${normalizedType} not found` });
 
     res.json({ message: "Document approved", complianceDocs: updated.complianceDocs });
   } catch (err) {
     console.error("approveComplianceDoc ERROR:", err.message);
-    res.status(500).json({ message: "Failed to approve document" });
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to approve document" });
   }
 };
 
 /* ────────────────────────────────────────────────────────────────────
    POST /api/clients/:entityType/:entityId/compliance/:docKey/reject
+   ✅ FIXED: normalizeEntityType() added
 ──────────────────────────────────────────────────────────────────── */
 export const rejectComplianceDoc = async (req, res) => {
   try {
@@ -713,7 +716,8 @@ export const rejectComplianceDoc = async (req, res) => {
 
     if (!reason?.trim()) return res.status(400).json({ message: "Rejection reason is required" });
 
-    const Model = getModel(entityType);
+    const normalizedType = normalizeEntityType(entityType); // ✅ FIXED
+    const Model = getModel(normalizedType);                 // ✅ was: getModel(entityType)
 
     const updated = await Model.findByIdAndUpdate(
       entityId,
@@ -727,7 +731,7 @@ export const rejectComplianceDoc = async (req, res) => {
       { new: true }
     ).lean();
 
-    if (!updated) return res.status(404).json({ message: `${entityType} not found` });
+    if (!updated) return res.status(404).json({ message: `${normalizedType} not found` });
 
     // Send rejection email if contacts exist
     try {
@@ -754,7 +758,7 @@ export const rejectComplianceDoc = async (req, res) => {
     res.json({ message: "Document rejected", complianceDocs: updated.complianceDocs });
   } catch (err) {
     console.error("rejectComplianceDoc ERROR:", err.message);
-    res.status(500).json({ message: "Failed to reject document" });
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to reject document" });
   }
 };
 

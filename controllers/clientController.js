@@ -260,7 +260,7 @@ export const getICBs = async (req, res) => {
 };
 
 /* ─────────────────────────────────────────────────
-   ✅ UPDATED: getICBById
+    UPDATED: getICBById
    Now returns federations + pcns (with practices)
    so ICBDetailPage can show full drill-down
 ───────────────────────────────────────────────── */
@@ -430,7 +430,7 @@ export const getPCNById = async (req, res) => {
     const pcn = await PCN.findById(req.params.id)
       .populate("icb", "name region code")
       .populate("federation", "name type")
-      // ✅ FIXED: complianceGroups ab documents ke saath deep populate hoga
+      //  FIXED: complianceGroups ab documents ke saath deep populate hoga
       // Pehle sirf "name active displayOrder" tha — documents field missing tha
       // Iski wajah se buildSelectedGroups mein group.documents = undefined → crash
       .populate({
