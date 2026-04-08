@@ -7,6 +7,10 @@
  * - Get compliance status
  * - Expiry alerts
  * - Cron-ready expiry check
+ *
+ * FIXED (Apr 2026):
+ *   • buildSelectedGroups: mongoose.isValidObjectId(group) → group._id check only
+ *     (was passing whole object instead of string ID — caused 500 crash)
  */
 
 import mongoose   from "mongoose";
@@ -295,6 +299,11 @@ export const getEntityDocuments = async (req, res) => {
   }
 };
 
+/* ─────────────────────────────────────────────────
+   ✅ FIXED: buildSelectedGroups
+   BUG: mongoose.isValidObjectId(group) — whole object pass ho raha tha
+   FIX: sirf group._id check karo, object already filter ho chuka hai upar
+───────────────────────────────────────────────── */
 function buildSelectedGroups(entity) {
   const rawGroups = (entity.complianceGroups && entity.complianceGroups.length > 0)
     ? entity.complianceGroups
@@ -302,10 +311,10 @@ function buildSelectedGroups(entity) {
 
   return rawGroups
     .filter(Boolean)
-    .filter((group) => typeof group === "object")
-    .filter((group) => group._id || mongoose.isValidObjectId(group))
+    .filter((group) => typeof group === "object" && group !== null)
+    .filter((group) => group._id) // ✅ fixed: was mongoose.isValidObjectId(group) — wrong!
     .map((group) => ({
-      _id: group._id || group,
+      _id: group._id,
       name: group.name || "Unknown group",
       active: group.active ?? false,
       displayOrder: group.displayOrder ?? 0,

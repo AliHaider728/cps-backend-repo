@@ -9,6 +9,9 @@
  *   • requestSystemAccess: entityId string → ObjectId cast
  *   • sendMassEmail: entityId string → ObjectId cast
  *   • All previous fixes kept (CastError for federation names, defensive hierarchy)
+ *   • getPCNById: complianceGroups now deep-populated with documents
+ *     (was only fetching "name active displayOrder" — documents field missing
+ *      caused buildSelectedGroups to get undefined documents → 500 crash)
  *
  * NEW (Apr 2026):
  *   • getICBById: now returns federations + pcns (with practices) for ICBDetailPage
@@ -427,7 +430,17 @@ export const getPCNById = async (req, res) => {
     const pcn = await PCN.findById(req.params.id)
       .populate("icb", "name region code")
       .populate("federation", "name type")
-      .populate("complianceGroups", "name active displayOrder")
+      // ✅ FIXED: complianceGroups ab documents ke saath deep populate hoga
+      // Pehle sirf "name active displayOrder" tha — documents field missing tha
+      // Iski wajah se buildSelectedGroups mein group.documents = undefined → crash
+      .populate({
+        path: "complianceGroups",
+        select: "name active displayOrder documents",
+        populate: {
+          path: "documents",
+          select: "name mandatory expirable displayOrder defaultExpiryDays defaultReminderDays active",
+        },
+      })
       .populate({
         path: "complianceGroup",
         select: "name active displayOrder documents",

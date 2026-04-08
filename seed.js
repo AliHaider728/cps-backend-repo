@@ -11,6 +11,8 @@ import ContactHistory    from "./models/ContactHistory.js";
 import ComplianceDocument from "./models/ComplianceDocument.js";
 import DocumentGroup     from "./models/DocumentGroup.js";
 
+const preserveAuditLogs = !process.argv.includes("--reset-audit");
+
 // ─────────────────────────────────────────────────────────
 //  USERS
 // ─────────────────────────────────────────────────────────
@@ -404,7 +406,7 @@ const daysAgo = n   => new Date(Date.now() - n * 86_400_000);
         createdBy: admin._id,
       });
     }
-    console.log(`  ✓ History → ${pcn.name}`);
+    console.log(` ✓ History → ${pcn.name}`);
   }
   for (const practice of Object.values(practiceMap)) {
     for (let i = 0; i < 3; i++) {

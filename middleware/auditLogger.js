@@ -1,5 +1,22 @@
 import AuditLog from "../models/AuditLog.js";
 
+export const getRequestIp = (req) => {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.split(",")[0].trim();
+  }
+
+  if (Array.isArray(forwarded) && forwarded.length > 0) {
+    return String(forwarded[0]).trim();
+  }
+
+  if (req.ip && req.ip !== "::1") {
+    return req.ip;
+  }
+
+  return "unknown";
+};
+
 /**
  * logAudit — call this anywhere in a controller to record an action.
  *
@@ -20,7 +37,7 @@ export const logAudit = async (req, action, resource, opts = {}) => {
       detail:     opts.detail     ?? "",
       before:     opts.before     ?? undefined,
       after:      opts.after      ?? undefined,
-      ip:         req.ip ?? req.headers["x-forwarded-for"] ?? "unknown",
+      ip:         opts.ip ?? getRequestIp(req),
       userAgent:  req.headers["user-agent"] ?? "",
       status:     opts.status     ?? "success",
     });

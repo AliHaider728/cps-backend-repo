@@ -2,7 +2,7 @@ import jwt from "jsonwebtoken";
 import { rateLimit, ipKeyGenerator } from "express-rate-limit";
 import User from "../models/User.js";
 import AuditLog from "../models/AuditLog.js";
-import { logAudit } from "../middleware/auditLogger.js";
+import { getRequestIp, logAudit } from "../middleware/auditLogger.js";
 import { sendWelcomeEmail } from "../utils/sendEmail.js";
 
 // ── Per-IP login rate limiter  
@@ -52,7 +52,7 @@ export const login = async (req, res) => {
         action:    "LOGIN_FAILED",
         resource:  "User",
         detail:    `Failed login attempt for: ${email}`,
-        ip:        req.ip ?? req.headers["x-forwarded-for"] ?? "unknown",
+        ip:        getRequestIp(req),
         userAgent: req.headers["user-agent"] ?? "",
         status:    "fail",
       });
