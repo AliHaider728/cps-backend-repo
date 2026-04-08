@@ -19,6 +19,8 @@
 import mongoose   from "mongoose";
 import PCN        from "../models/PCN.js";
 import Practice   from "../models/Practice.js";
+import DocumentGroup from "../models/DocumentGroup.js";
+import ComplianceDocument from "../models/ComplianceDocument.js";
 import nodemailer from "nodemailer";
 
 const transporter = nodemailer.createTransport({
@@ -115,6 +117,37 @@ function normalizeEntityType(entityType = "") {
   throw createHttpError(400, "Invalid entityType");
 }
 
+function normalizePopulatedDoc(doc) {
+  if (!doc || typeof doc !== "object") return null;
+  const docId = doc._id || doc.id;
+  if (!docId) return null;
+  return {
+    _id: docId,
+    name: doc.name || "Unnamed document",
+    displayOrder: doc.displayOrder ?? 0,
+    mandatory: !!doc.mandatory,
+    expirable: !!doc.expirable,
+    active: doc.active !== false,
+    defaultExpiryDays: doc.defaultExpiryDays ?? null,
+    defaultReminderDays: doc.defaultReminderDays ?? null,
+  };
+}
+
+function normalizePopulatedGroup(group) {
+  if (!group || typeof group !== "object") return null;
+  const groupId = group._id || group.id;
+  if (!groupId) return null;
+  return {
+    _id: groupId,
+    name: group.name || "Unknown group",
+    active: group.active ?? false,
+    displayOrder: group.displayOrder ?? 0,
+    documents: Array.isArray(group.documents)
+      ? group.documents.map(normalizePopulatedDoc).filter(Boolean)
+      : [],
+  };
+}
+
 function computeDocumentStatus(record, docDef) {
   if (!record?.fileUrl) return "pending";
   if (docDef?.expirable && record.expiryDate && new Date(record.expiryDate) < new Date()) return "expired";
@@ -162,6 +195,9 @@ function getRecordUploads(record = {}, docDef) {
 async function getEntityDocumentContext(entityType, entityId) {
   const normalizedType = normalizeEntityType(entityType);
   ensureValidObjectId(entityId, `${normalizedType} id`);
+  // Import refs above so nested populate is reliable on serverless cold starts.
+  void DocumentGroup;
+  void ComplianceDocument;
   const Model = getModel(normalizedType);
   let query = Model.findById(entityId).populate({
     path: "complianceGroup",
@@ -183,7 +219,18 @@ async function getEntityDocumentContext(entityType, entityId) {
     });
   }
 
-  const entity = await query.lean();
+  let entity;
+  try {
+    entity = await query.lean();
+  } catch (err) {
+    console.error("getEntityDocumentContext populate ERROR:", {
+      message: err.message,
+      stack: err.stack,
+      entityType: normalizedType,
+      entityId,
+    });
+    throw err;
+  }
 
   if (!entity) return { normalizedType, entity: null, documents: [], usedDefaultDocuments: false };
 
@@ -197,7 +244,7 @@ async function getEntityDocumentContext(entityType, entityId) {
     }
   }
 
-  let groupDocs = Array.from(groupDocMap.values())
+  const groupDocs = Array.from(groupDocMap.values())
     .sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0) || a.name.localeCompare(b.name));
 
   return { normalizedType, entity, documents: groupDocs, usedDefaultDocuments: false };
@@ -208,6 +255,7 @@ function buildEntityDocumentsPayload(entity, documents, options = {}) {
     (entity.groupDocuments || []).map((record) => [buildRecordKey(record.group, record.document), record])
   );
   const groupList = buildSelectedGroups(entity);
+  const primaryGroup = normalizePopulatedGroup(entity.complianceGroup);
 
   const groups = groupList.map((group) => {
     const docsForGroup = (group.documents || [])
@@ -245,22 +293,20 @@ function buildEntityDocumentsPayload(entity, documents, options = {}) {
   const rows = groups.flatMap((group) => group.documents);
 
   return {
-    complianceGroup: entity.complianceGroup
+    complianceGroup: primaryGroup
       ? {
-          _id: entity.complianceGroup._id || entity.complianceGroup,
-          name: entity.complianceGroup.name || "Unknown group",
-          active: entity.complianceGroup.active ?? false,
-          displayOrder: entity.complianceGroup.displayOrder ?? 0,
+          _id: primaryGroup._id,
+          name: primaryGroup.name,
+          active: primaryGroup.active,
+          displayOrder: primaryGroup.displayOrder,
         }
       : null,
-    complianceGroups: (entity.complianceGroups || [])
-      .filter(Boolean)
-      .map((group) => ({
-        _id: group._id,
-        name: group.name,
-        active: group.active,
-        displayOrder: group.displayOrder,
-      })),
+    complianceGroups: groupList.map((group) => ({
+      _id: group._id,
+      name: group.name,
+      active: group.active,
+      displayOrder: group.displayOrder,
+    })),
     usedDefaultDocuments: !!options.usedDefaultDocuments,
     groups,
     documents: rows,
@@ -313,16 +359,8 @@ function buildSelectedGroups(entity) {
     : (entity.complianceGroup ? [entity.complianceGroup] : []);
 
   return rawGroups
-    .filter(Boolean)
-    .filter((group) => typeof group === "object" && group !== null)
-    .filter((group) => group._id) // ✅ fixed: was mongoose.isValidObjectId(group) — wrong!
-    .map((group) => ({
-      _id: group._id,
-      name: group.name || "Unknown group",
-      active: group.active ?? false,
-      displayOrder: group.displayOrder ?? 0,
-      documents: Array.isArray(group.documents) ? group.documents.filter(Boolean) : [],
-    }));
+    .map(normalizePopulatedGroup)
+    .filter(Boolean);
 }
 
 function findGroupAndDocument(entity, groupId, documentId) {
