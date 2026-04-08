@@ -23,6 +23,7 @@ import ContactHistory from "../models/ContactHistory.js";
 import User           from "../models/User.js";
 import nodemailer     from "nodemailer";
 import crypto         from "crypto";
+import { logAudit }   from "../middleware/auditLogger.js";
 
 /* ─────────────────────────────────────────────────
    HELPER: safe ObjectId cast
@@ -33,6 +34,45 @@ const toObjectId = (id) => {
   } catch {
     return null;
   }
+};
+
+const validateObjectIdOr400 = (id, label = "id") => {
+  const objectId = toObjectId(id);
+  if (!objectId) {
+    const error = new Error(`Invalid ${label}`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return objectId;
+};
+
+const safeJson = (value) => JSON.parse(JSON.stringify(value ?? null));
+
+const formatComplianceGroupDetail = (beforeGroups = [], afterGroups = []) => {
+  const beforeText = beforeGroups.length ? beforeGroups.join(", ") : "none";
+  const afterText = afterGroups.length ? afterGroups.join(", ") : "none";
+  return `Compliance groups changed from [${beforeText}] to [${afterText}]`;
+};
+
+const normalizeEntityType = (entityType = "") => {
+  const normalized = String(entityType).trim().toLowerCase();
+  if (normalized === "pcn") return "PCN";
+  if (normalized === "practice") return "Practice";
+  if (normalized === "federation") return "Federation";
+  if (normalized === "icb") return "ICB";
+  const error = new Error("Invalid entityType");
+  error.statusCode = 400;
+  throw error;
+};
+
+const getEntityModelByType = (entityType) => {
+  if (entityType === "PCN") return PCN;
+  if (entityType === "Practice") return Practice;
+  if (entityType === "Federation") return Federation;
+  if (entityType === "ICB") return ICB;
+  const error = new Error("Invalid entityType");
+  error.statusCode = 400;
+  throw error;
 };
 
 const normalizeComplianceGroup = (payload = {}) => {
@@ -424,16 +464,27 @@ export const createPCN = async (req, res) => {
       .populate("complianceGroup", "name")
       .populate("complianceGroups", "name")
       .lean();
+    await logAudit(req, "CREATE_CLIENT", "PCN", {
+      resourceId: pcn._id,
+      detail: `PCN created: ${pcn.name}`,
+      after: safeJson(populated),
+    });
     res.status(201).json({ pcn: populated, message: "PCN created" });
   } catch (err) {
     console.error("createPCN ERROR:", err.message);
-    res.status(500).json({ message: "Failed to create PCN" });
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to create PCN" });
   }
 };
 
 export const updatePCN = async (req, res) => {
   try {
-    const existing = await PCN.findById(req.params.id).select("complianceGroup complianceGroups");
+    validateObjectIdOr400(req.params.id, "PCN id");
+    const existing = await PCN.findById(req.params.id)
+      .populate("icb", "name region")
+      .populate("federation", "name type")
+      .populate("complianceGroup", "name")
+      .populate("complianceGroups", "name")
+      .lean();
     if (!existing) return res.status(404).json({ message: "PCN not found" });
 
     const payload = normalizeComplianceGroup(req.body);
@@ -458,23 +509,47 @@ export const updatePCN = async (req, res) => {
       .populate("complianceGroup", "name")
       .populate("complianceGroups", "name")
       .lean();
+    const beforeGroups = (existing.complianceGroups?.length ? existing.complianceGroups : (existing.complianceGroup ? [existing.complianceGroup] : []))
+      .map((group) => group?.name)
+      .filter(Boolean);
+    const afterGroups = (pcn.complianceGroups?.length ? pcn.complianceGroups : (pcn.complianceGroup ? [pcn.complianceGroup] : []))
+      .map((group) => group?.name)
+      .filter(Boolean);
+    await logAudit(req, "UPDATE_CLIENT", "PCN", {
+      resourceId: pcn._id,
+      detail: beforeGroups.join("|") !== afterGroups.join("|")
+        ? formatComplianceGroupDetail(beforeGroups, afterGroups)
+        : `PCN updated: ${pcn.name}`,
+      before: safeJson(existing),
+      after: safeJson(pcn),
+    });
     res.json({ pcn, message: "PCN updated" });
   } catch (err) {
     console.error("updatePCN ERROR:", err.message);
-    res.status(500).json({ message: "Failed to update PCN" });
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to update PCN" });
   }
 };
 
 export const deletePCN = async (req, res) => {
   try {
+    validateObjectIdOr400(req.params.id, "PCN id");
     const practiceCount = await Practice.countDocuments({ pcn: req.params.id, isActive: true });
     if (practiceCount > 0)
       return res.status(409).json({ message: `Cannot delete — ${practiceCount} active practice(s) are linked` });
+    const existing = await PCN.findById(req.params.id).lean();
     await PCN.findByIdAndUpdate(req.params.id, { isActive: false });
+    if (existing) {
+      await logAudit(req, "DELETE_CLIENT", "PCN", {
+        resourceId: existing._id,
+        detail: `PCN soft-deleted: ${existing.name}`,
+        before: safeJson(existing),
+        after: { isActive: false },
+      });
+    }
     res.json({ message: "PCN deleted" });
   } catch (err) {
     console.error("deletePCN ERROR:", err.message);
-    res.status(500).json({ message: "Failed to delete PCN" });
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to delete PCN" });
   }
 };
 
@@ -642,16 +717,27 @@ export const createPractice = async (req, res) => {
       .populate("pcn", "name")
       .populate("complianceGroup", "name")
       .lean();
+    await logAudit(req, "CREATE_CLIENT", "Practice", {
+      resourceId: practice._id,
+      detail: `Practice created: ${practice.name}`,
+      after: safeJson(populated),
+    });
     res.status(201).json({ practice: populated, message: "Practice created" });
   } catch (err) {
     console.error("createPractice ERROR:", err.message);
-    res.status(500).json({ message: "Failed to create practice" });
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to create practice" });
   }
 };
 
 export const updatePractice = async (req, res) => {
   try {
-    const existing = await Practice.findById(req.params.id).select("complianceGroup");
+    validateObjectIdOr400(req.params.id, "Practice id");
+    const existing = await Practice.findById(req.params.id)
+      .populate("pcn", "name")
+      .populate("complianceGroup", "name")
+      .populate("linkedClinicians", "name email role")
+      .populate("restrictedClinicians", "name email role")
+      .lean();
     if (!existing) return res.status(404).json({ message: "Practice not found" });
 
     const payload = normalizeComplianceGroup(req.body);
@@ -667,20 +753,40 @@ export const updatePractice = async (req, res) => {
       .populate("linkedClinicians", "name email role")
       .populate("restrictedClinicians", "name email role")
       .lean();
+    const beforeGroups = existing.complianceGroup?.name ? [existing.complianceGroup.name] : [];
+    const afterGroups = practice.complianceGroup?.name ? [practice.complianceGroup.name] : [];
+    await logAudit(req, "UPDATE_CLIENT", "Practice", {
+      resourceId: practice._id,
+      detail: beforeGroups.join("|") !== afterGroups.join("|")
+        ? formatComplianceGroupDetail(beforeGroups, afterGroups)
+        : `Practice updated: ${practice.name}`,
+      before: safeJson(existing),
+      after: safeJson(practice),
+    });
     res.json({ practice, message: "Practice updated" });
   } catch (err) {
     console.error("updatePractice ERROR:", err.message);
-    res.status(500).json({ message: "Failed to update practice" });
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to update practice" });
   }
 };
 
 export const deletePractice = async (req, res) => {
   try {
+    validateObjectIdOr400(req.params.id, "Practice id");
+    const existing = await Practice.findById(req.params.id).lean();
     await Practice.findByIdAndUpdate(req.params.id, { isActive: false });
+    if (existing) {
+      await logAudit(req, "DELETE_CLIENT", "Practice", {
+        resourceId: existing._id,
+        detail: `Practice soft-deleted: ${existing.name}`,
+        before: safeJson(existing),
+        after: { isActive: false },
+      });
+    }
     res.json({ message: "Practice deleted" });
   } catch (err) {
     console.error("deletePractice ERROR:", err.message);
-    res.status(500).json({ message: "Failed to delete practice" });
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to delete practice" });
   }
 };
 
@@ -706,11 +812,16 @@ export const updatePracticeRestricted = async (req, res) => {
 ───────────────────────────────────────────────── */
 export const getContactHistory = async (req, res) => {
   try {
-    const { entityType, entityId } = req.params;
+    const entityType = normalizeEntityType(req.params.entityType);
+    const { entityId } = req.params;
     const { type, starred, page = 1, limit = 100 } = req.query;
 
     const entityObjId = toObjectId(entityId);
     if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
+
+    const EntityModel = getEntityModelByType(entityType);
+    const entityExists = await EntityModel.exists({ _id: entityObjId });
+    if (!entityExists) return res.status(404).json({ message: `${entityType} not found` });
 
     const filter = { entityType, entityId: entityObjId };
     if (type && type !== "all") filter.type = type;
@@ -731,13 +842,14 @@ export const getContactHistory = async (req, res) => {
     res.json({ logs, total, page: Number(page), pages: Math.ceil(total / Number(limit)) });
   } catch (err) {
     console.error("getContactHistory ERROR:", err.message);
-    res.status(500).json({ message: "Failed to fetch contact history" });
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to fetch contact history" });
   }
 };
 
 export const addContactHistory = async (req, res) => {
   try {
-    const { entityType, entityId } = req.params;
+    const entityType = normalizeEntityType(req.params.entityType);
+    const { entityId } = req.params;
     const { type, subject, notes, date, time, attachments } = req.body;
 
     if (!subject?.trim()) return res.status(400).json({ message: "Subject is required" });
@@ -745,6 +857,9 @@ export const addContactHistory = async (req, res) => {
 
     const entityObjId = toObjectId(entityId);
     if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
+    const EntityModel = getEntityModelByType(entityType);
+    const entityExists = await EntityModel.exists({ _id: entityObjId });
+    if (!entityExists) return res.status(404).json({ message: `${entityType} not found` });
 
     const log = await ContactHistory.create({
       entityType,
@@ -762,7 +877,7 @@ export const addContactHistory = async (req, res) => {
     res.status(201).json({ log: populated, message: "Log added" });
   } catch (err) {
     console.error("addContactHistory ERROR:", err.message);
-    res.status(500).json({ message: "Failed to add log" });
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to add log" });
   }
 };
 
