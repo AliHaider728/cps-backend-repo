@@ -52,6 +52,23 @@ const PCN_DOC_TYPES = [
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
+function createHttpError(statusCode, message, details = {}) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  error.details = details;
+  return error;
+}
+
+function isValidObjectId(value) {
+  return mongoose.Types.ObjectId.isValid(String(value));
+}
+
+function ensureValidObjectId(value, label) {
+  if (!isValidObjectId(value)) {
+    throw createHttpError(400, `Invalid ${label}`);
+  }
+}
+
 function getModel(entityType) {
   if (entityType === "PCN") return PCN;
   if (entityType === "Practice") return Practice;
@@ -88,7 +105,7 @@ function normalizeEntityType(entityType = "") {
   const normalized = String(entityType).toLowerCase();
   if (normalized === "pcn") return "PCN";
   if (normalized === "practice") return "Practice";
-  throw new Error("Invalid entityType");
+  throw createHttpError(400, "Invalid entityType");
 }
 
 function computeDocumentStatus(record, docDef) {
@@ -137,6 +154,7 @@ function getRecordUploads(record = {}, docDef) {
 
 async function getEntityDocumentContext(entityType, entityId) {
   const normalizedType = normalizeEntityType(entityType);
+  ensureValidObjectId(entityId, `${normalizedType} id`);
   const Model = getModel(normalizedType);
   let query = Model.findById(entityId).populate({
     path: "complianceGroup",
@@ -162,11 +180,7 @@ async function getEntityDocumentContext(entityType, entityId) {
 
   if (!entity) return { normalizedType, entity: null, documents: [], usedDefaultDocuments: false };
 
-  const selectedGroups = normalizedType === "PCN"
-    ? ((entity.complianceGroups && entity.complianceGroups.length > 0)
-        ? entity.complianceGroups
-        : (entity.complianceGroup ? [entity.complianceGroup] : []))
-    : (entity.complianceGroup ? [entity.complianceGroup] : []);
+  const selectedGroups = buildSelectedGroups(entity);
 
   const groupDocMap = new Map();
   for (const group of selectedGroups) {
@@ -186,9 +200,7 @@ function buildEntityDocumentsPayload(entity, documents, options = {}) {
   const recordMap = new Map(
     (entity.groupDocuments || []).map((record) => [buildRecordKey(record.group, record.document), record])
   );
-  const groupList = (entity.complianceGroups && entity.complianceGroups.length > 0)
-    ? entity.complianceGroups
-    : (entity.complianceGroup ? [entity.complianceGroup] : []);
+  const groupList = buildSelectedGroups(entity);
 
   const groups = groupList.map((group) => {
     const docsForGroup = (group.documents || [])
@@ -228,10 +240,10 @@ function buildEntityDocumentsPayload(entity, documents, options = {}) {
   return {
     complianceGroup: entity.complianceGroup
       ? {
-          _id: entity.complianceGroup._id,
-          name: entity.complianceGroup.name,
-          active: entity.complianceGroup.active,
-          displayOrder: entity.complianceGroup.displayOrder,
+          _id: entity.complianceGroup._id || entity.complianceGroup,
+          name: entity.complianceGroup.name || "Unknown group",
+          active: entity.complianceGroup.active ?? false,
+          displayOrder: entity.complianceGroup.displayOrder ?? 0,
         }
       : null,
     complianceGroups: (entity.complianceGroups || [])
@@ -270,18 +282,40 @@ export const getEntityDocuments = async (req, res) => {
       ...buildEntityDocumentsPayload(entity, documents, { usedDefaultDocuments }),
     });
   } catch (err) {
-    console.error("getEntityDocuments ERROR:", err.message);
-    res.status(500).json({ message: "Failed to fetch documents" });
+    console.error("getEntityDocuments ERROR:", {
+      message: err.message,
+      stack: err.stack,
+      entityType: req.params.entityType,
+      entityId: req.params.entityId,
+      details: err.details || null,
+    });
+    res.status(err.statusCode || 500).json({
+      message: err.statusCode ? err.message : "Failed to fetch documents",
+    });
   }
 };
 
 function buildSelectedGroups(entity) {
-  return (entity.complianceGroups && entity.complianceGroups.length > 0)
+  const rawGroups = (entity.complianceGroups && entity.complianceGroups.length > 0)
     ? entity.complianceGroups
     : (entity.complianceGroup ? [entity.complianceGroup] : []);
+
+  return rawGroups
+    .filter(Boolean)
+    .filter((group) => typeof group === "object")
+    .filter((group) => group._id || mongoose.isValidObjectId(group))
+    .map((group) => ({
+      _id: group._id || group,
+      name: group.name || "Unknown group",
+      active: group.active ?? false,
+      displayOrder: group.displayOrder ?? 0,
+      documents: Array.isArray(group.documents) ? group.documents.filter(Boolean) : [],
+    }));
 }
 
 function findGroupAndDocument(entity, groupId, documentId) {
+  ensureValidObjectId(groupId, "group id");
+  ensureValidObjectId(documentId, "document id");
   const selectedGroups = buildSelectedGroups(entity);
   const targetGroup = selectedGroups.find((group) => String(group._id) === String(groupId));
   if (!targetGroup) return { targetGroup: null, targetDoc: null };
@@ -312,12 +346,12 @@ function makeUploadEntry(payload, userId, docDef) {
 
 export const addEntityDocumentUploads = async (req, res) => {
   try {
-    const { normalizedType, entity, documents } = await getEntityDocumentContext(
+    const { normalizedType, entity } = await getEntityDocumentContext(
       req.params.entityType,
       req.params.entityId
     );
     if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
-    const selectedGroupCount = entity.complianceGroups?.length || (entity.complianceGroup?._id ? 1 : 0);
+    const selectedGroupCount = buildSelectedGroups(entity).length;
     if (!selectedGroupCount) {
       return res.status(400).json({ message: "Select a compliance group before uploading documents" });
     }
@@ -385,8 +419,15 @@ export const addEntityDocumentUploads = async (req, res) => {
       }),
     });
   } catch (err) {
-    console.error("addEntityDocumentUploads ERROR:", err.message, err.stack);
-    res.status(500).json({ message: "Failed to add uploads" });
+    console.error("addEntityDocumentUploads ERROR:", {
+      message: err.message,
+      stack: err.stack,
+      entityType: req.params.entityType,
+      entityId: req.params.entityId,
+      groupId: req.params.groupId,
+      documentId: req.params.documentId,
+    });
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to add uploads" });
   }
 };
 
@@ -464,8 +505,16 @@ export const updateEntityDocumentUpload = async (req, res) => {
       }),
     });
   } catch (err) {
-    console.error("updateEntityDocumentUpload ERROR:", err.message, err.stack);
-    res.status(500).json({ message: "Failed to update upload" });
+    console.error("updateEntityDocumentUpload ERROR:", {
+      message: err.message,
+      stack: err.stack,
+      entityType: req.params.entityType,
+      entityId: req.params.entityId,
+      groupId: req.params.groupId,
+      documentId: req.params.documentId,
+      uploadId: req.params.uploadId,
+    });
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to update upload" });
   }
 };
 
