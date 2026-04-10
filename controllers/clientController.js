@@ -12,6 +12,8 @@
  *   • getPCNById: complianceGroups now deep-populated with documents
  *     (was only fetching "name active displayOrder" — documents field missing
  *      caused buildSelectedGroups to get undefined documents → 500 crash)
+ *   • getPCNs: icb now populated with name/region/code
+ *     (was missing — caused ICB badge to not show in PCNListPage)
  *
  * NEW (Apr 2026):
  *   • getICBById: now returns federations + pcns (with practices) for ICBDetailPage
@@ -200,6 +202,9 @@ export const getHierarchy = async (req, res) => {
 
 /* ─────────────────────────────────────────────────
    PCNs — FULLY DEFENSIVE
+   ★ FIXED: .populate("icb", "name region code") added
+     Pehle ICB populate nahi hota tha — PCNListPage mein
+     ICB badge nahi dikhta tha kyunki pcn.icb sirf ObjectId thi
 ───────────────────────────────────────────────── */
 export const getPCNs = async (req, res) => {
   try {
@@ -208,6 +213,7 @@ export const getPCNs = async (req, res) => {
     if (req.query.federation) filter.federation = req.query.federation;
 
     const pcnsRaw = await PCN.find(filter)
+      .populate("icb", "name region code")   // ← FIXED: yeh line add ki
       .populate("complianceGroup", "name")
       .populate("complianceGroups", "name")
       .sort({ name: 1 })
@@ -269,7 +275,6 @@ export const getICBById = async (req, res) => {
     const icb = await ICB.findById(req.params.id).lean();
     if (!icb) return res.status(404).json({ message: "ICB not found" });
 
-    // Fetch federations and PCNs in parallel
     const [federations, pcnsRaw] = await Promise.all([
       Federation.find({ icb: req.params.id, isActive: true })
         .select("name type notes")
@@ -282,7 +287,6 @@ export const getICBById = async (req, res) => {
         .lean(),
     ]);
 
-    // Attach practices to each PCN
     const practicesByPCN = {};
     if (pcnsRaw.length > 0) {
       const pcnIds = pcnsRaw.map(p => p._id);
@@ -430,9 +434,6 @@ export const getPCNById = async (req, res) => {
     const pcn = await PCN.findById(req.params.id)
       .populate("icb", "name region code")
       .populate("federation", "name type")
-      //  FIXED: complianceGroups ab documents ke saath deep populate hoga
-      // Pehle sirf "name active displayOrder" tha — documents field missing tha
-      // Iski wajah se buildSelectedGroups mein group.documents = undefined → crash
       .populate({
         path: "complianceGroups",
         select: "name active displayOrder documents",
