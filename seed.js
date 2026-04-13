@@ -11,8 +11,6 @@ import ContactHistory    from "./models/ContactHistory.js";
 import ComplianceDocument from "./models/ComplianceDocument.js";
 import DocumentGroup     from "./models/DocumentGroup.js";
 
-const preserveAuditLogs = !process.argv.includes("--reset-audit");
-
 // ─────────────────────────────────────────────────────────
 //  USERS
 // ─────────────────────────────────────────────────────────
@@ -298,6 +296,42 @@ const DOCUMENT_GROUPS = [
 const rand    = arr => arr[Math.floor(Math.random() * arr.length)];
 const daysAgo = n   => new Date(Date.now() - n * 86_400_000);
 
+const makeSeedGroupRecord = ({ groupId, documentId, documentName, expirable, uploadedBy, daysBack = 10 }) => {
+  const uploadedAt = daysAgo(daysBack);
+  const expiryDate = expirable ? new Date(Date.now() + 180 * 86_400_000) : null;
+  const upload = {
+    uploadId: new mongoose.Types.ObjectId().toString(),
+    fileName: `${String(documentName || "document").toLowerCase().replace(/[^a-z0-9]+/g, "_")}.pdf`,
+    fileUrl: `https://files.cps.local/${String(groupId)}/${String(documentId)}/${Date.now()}.pdf`,
+    mimeType: "application/pdf",
+    fileSize: 180000 + Math.floor(Math.random() * 70000),
+    status: "uploaded",
+    uploadedAt,
+    expiryDate,
+    renewalDate: null,
+    notes: "Seeded upload record",
+    reference: `SEED-${String(documentId).slice(-6).toUpperCase()}`,
+    uploadedBy,
+  };
+
+  return {
+    group: groupId,
+    document: documentId,
+    fileName: upload.fileName,
+    fileUrl: upload.fileUrl,
+    mimeType: upload.mimeType,
+    fileSize: upload.fileSize,
+    status: upload.status,
+    uploadedAt: upload.uploadedAt,
+    expiryDate: upload.expiryDate,
+    renewalDate: null,
+    notes: upload.notes,
+    uploadedBy,
+    lastUpdatedBy: uploadedBy,
+    uploads: [upload],
+  };
+};
+
 // ─────────────────────────────────────────────────────────
 //  MAIN
 // ─────────────────────────────────────────────────────────
@@ -438,12 +472,13 @@ const daysAgo = n   => new Date(Date.now() - n * 86_400_000);
 
   // ── 8. Document Groups ────────────────────────────────
   console.log("\n── Seeding Document Groups ──");
+  const groupMap = {};
   for (const g of DOCUMENT_GROUPS) {
     const docIds = g.docNames
       .map(n => docMap[n]?._id)
       .filter(Boolean);
 
-    await DocumentGroup.findOneAndUpdate(
+    const storedGroup = await DocumentGroup.findOneAndUpdate(
       { name: g.name },
       {
         name: g.name,
@@ -454,10 +489,88 @@ const daysAgo = n   => new Date(Date.now() - n * 86_400_000);
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
+    groupMap[g.name] = storedGroup;
     console.log(`  ✓ ${g.name} (${docIds.length} docs)`);
   }
 
   // ── Done ──────────────────────────────────────────────
+  console.log("\nAssigning compliance groups and seeded groupDocuments...");
+  const docsById = {};
+  for (const doc of Object.values(docMap)) docsById[String(doc._id)] = doc;
+
+  const pcnPrimaryGroup = groupMap["Clinical Staff Documents"];
+  const pcnSecondaryGroup = groupMap["DBS and Update"];
+  const practicePrimaryGroup = groupMap["Non-Clinical Staff"] || pcnPrimaryGroup || null;
+
+  for (const pcn of Object.values(pcnMap)) {
+    const selectedGroups = [pcnPrimaryGroup, pcnSecondaryGroup].filter(Boolean);
+    const selectedGroupIds = selectedGroups.map((group) => group._id);
+    const seededRecords = [];
+
+    for (const group of selectedGroups) {
+      const docIds = (group.documents || []).map((id) => String(id)).filter(Boolean);
+      if (!docIds.length) continue;
+      const firstDocId = docIds[0];
+      const docDef = docsById[firstDocId];
+      seededRecords.push(
+        makeSeedGroupRecord({
+          groupId: group._id,
+          documentId: firstDocId,
+          documentName: docDef?.name || "Document",
+          expirable: !!docDef?.expirable,
+          uploadedBy: admin._id,
+          daysBack: 7,
+        })
+      );
+    }
+
+    await PCN.findByIdAndUpdate(
+      pcn._id,
+      {
+        $set: {
+          complianceGroups: selectedGroupIds,
+          complianceGroup: selectedGroupIds[0] || null,
+          groupDocuments: seededRecords,
+        },
+      },
+      { new: true, runValidators: false }
+    );
+    console.log(`  Seeded PCN groups -> ${pcn.name}`);
+  }
+
+  for (const practice of Object.values(practiceMap)) {
+    const seededRecords = [];
+    if (practicePrimaryGroup) {
+      const docIds = (practicePrimaryGroup.documents || []).map((id) => String(id)).filter(Boolean);
+      if (docIds.length > 0) {
+        const firstDocId = docIds[0];
+        const docDef = docsById[firstDocId];
+        seededRecords.push(
+          makeSeedGroupRecord({
+            groupId: practicePrimaryGroup._id,
+            documentId: firstDocId,
+            documentName: docDef?.name || "Document",
+            expirable: !!docDef?.expirable,
+            uploadedBy: admin._id,
+            daysBack: 5,
+          })
+        );
+      }
+    }
+
+    await Practice.findByIdAndUpdate(
+      practice._id,
+      {
+        $set: {
+          complianceGroup: practicePrimaryGroup?._id || null,
+          groupDocuments: seededRecords,
+        },
+      },
+      { new: true, runValidators: false }
+    );
+    console.log(`  Seeded Practice group -> ${practice.name}`);
+  }
+
   await mongoose.disconnect();
   console.log("\n✓ Seed complete!");
   console.log(
@@ -467,3 +580,6 @@ const daysAgo = n   => new Date(Date.now() - n * 86_400_000);
     `Compliance Docs: ${COMPLIANCE_DOCS.length} | Document Groups: ${DOCUMENT_GROUPS.length}`
   );
 })();
+
+
+

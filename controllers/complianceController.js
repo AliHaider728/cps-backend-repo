@@ -22,6 +22,7 @@ import Practice   from "../models/Practice.js";
 import DocumentGroup from "../models/DocumentGroup.js";
 import ComplianceDocument from "../models/ComplianceDocument.js";
 import nodemailer from "nodemailer";
+import { logAudit } from "../middleware/auditLogger.js";
 
 const transporter = nodemailer.createTransport({
   host:   process.env.EMAIL_HOST,
@@ -66,6 +67,27 @@ function createHttpError(statusCode, message, details = {}) {
   error.statusCode = statusCode;
   error.details = details;
   return error;
+}
+
+function isDatabaseUnavailableError(err) {
+  if (!err) return false;
+  const knownNames = new Set([
+    "MongoServerSelectionError",
+    "MongoNetworkError",
+    "MongooseServerSelectionError",
+    "DisconnectedError",
+  ]);
+  if (knownNames.has(err.name)) return true;
+  const msg = String(err.message || "").toLowerCase();
+  return msg.includes("buffering timed out") || msg.includes("topology was destroyed");
+}
+
+function toHttpError(err, fallbackMessage) {
+  if (err?.statusCode) return err;
+  if (isDatabaseUnavailableError(err)) {
+    return createHttpError(503, "Database connection unavailable");
+  }
+  return createHttpError(500, fallbackMessage);
 }
 
 function isValidObjectId(value) {
@@ -199,16 +221,20 @@ async function getEntityDocumentContext(entityType, entityId) {
   void DocumentGroup;
   void ComplianceDocument;
   const Model = getModel(normalizedType);
-  let query = Model.findById(entityId).populate({
-    path: "complianceGroup",
-    select: "name active displayOrder documents",
-    populate: {
-      path: "documents",
-      select: "name displayOrder mandatory expirable active defaultExpiryDays defaultReminderDays",
-    },
-  });
+  let query = Model.findById(entityId);
 
-  if (normalizedType === "PCN") {
+  if (Model.schema.path("complianceGroup")) {
+    query = query.populate({
+      path: "complianceGroup",
+      select: "name active displayOrder documents",
+      populate: {
+        path: "documents",
+        select: "name displayOrder mandatory expirable active defaultExpiryDays defaultReminderDays",
+      },
+    });
+  }
+
+  if (normalizedType === "PCN" && Model.schema.path("complianceGroups")) {
     query = query.populate({
       path: "complianceGroups",
       select: "name active displayOrder documents",
@@ -229,7 +255,7 @@ async function getEntityDocumentContext(entityType, entityId) {
       entityType: normalizedType,
       entityId,
     });
-    throw err;
+    throw toHttpError(err, "Failed to fetch documents");
   }
 
   if (!entity) return { normalizedType, entity: null, documents: [], usedDefaultDocuments: false };
@@ -335,15 +361,17 @@ export const getEntityDocuments = async (req, res) => {
       ...buildEntityDocumentsPayload(entity, documents, { usedDefaultDocuments }),
     });
   } catch (err) {
+    const httpErr = toHttpError(err, "Failed to fetch documents");
     console.error("getEntityDocuments ERROR:", {
-      message: err.message,
-      stack: err.stack,
+      message: httpErr.message,
+      stack: err.stack || httpErr.stack,
       entityType: req.params.entityType,
       entityId: req.params.entityId,
+      statusCode: httpErr.statusCode,
       details: err.details || null,
     });
-    res.status(err.statusCode || 500).json({
-      message: err.statusCode ? err.message : "Failed to fetch documents",
+    res.status(httpErr.statusCode).json({
+      message: httpErr.message,
     });
   }
 };
@@ -458,6 +486,18 @@ export const addEntityDocumentUploads = async (req, res) => {
       { new: true, runValidators: false }
     );
 
+    await logAudit(req, "DOCUMENT_UPLOAD", "ClientDocument", {
+      resourceId: req.params.entityId,
+      detail: `${normalizedType} document uploaded (group: ${groupId}, document: ${documentId}, files: ${uploadsPayload.length})`,
+      after: {
+        entityType: normalizedType,
+        entityId: req.params.entityId,
+        groupId,
+        documentId,
+        uploadCount: nextUploads.length,
+      },
+    });
+
     const refreshed = await getEntityDocumentContext(req.params.entityType, req.params.entityId);
     res.json({
       message: "Uploads added",
@@ -469,15 +509,17 @@ export const addEntityDocumentUploads = async (req, res) => {
       }),
     });
   } catch (err) {
+    const httpErr = toHttpError(err, "Failed to add uploads");
     console.error("addEntityDocumentUploads ERROR:", {
-      message: err.message,
-      stack: err.stack,
+      message: httpErr.message,
+      stack: err.stack || httpErr.stack,
       entityType: req.params.entityType,
       entityId: req.params.entityId,
       groupId: req.params.groupId,
       documentId: req.params.documentId,
+      statusCode: httpErr.statusCode,
     });
-    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to add uploads" });
+    res.status(httpErr.statusCode).json({ message: httpErr.message });
   }
 };
 
@@ -544,6 +586,18 @@ export const updateEntityDocumentUpload = async (req, res) => {
       { new: true, runValidators: false }
     );
 
+    await logAudit(req, "DOCUMENT_UPDATE", "ClientDocument", {
+      resourceId: req.params.entityId,
+      detail: `${normalizedType} document upload updated (group: ${groupId}, document: ${documentId}, upload: ${uploadId})`,
+      after: {
+        entityType: normalizedType,
+        entityId: req.params.entityId,
+        groupId,
+        documentId,
+        uploadId,
+      },
+    });
+
     const refreshed = await getEntityDocumentContext(req.params.entityType, req.params.entityId);
     res.json({
       message: "Upload updated",
@@ -555,16 +609,116 @@ export const updateEntityDocumentUpload = async (req, res) => {
       }),
     });
   } catch (err) {
+    const httpErr = toHttpError(err, "Failed to update upload");
     console.error("updateEntityDocumentUpload ERROR:", {
-      message: err.message,
-      stack: err.stack,
+      message: httpErr.message,
+      stack: err.stack || httpErr.stack,
       entityType: req.params.entityType,
       entityId: req.params.entityId,
       groupId: req.params.groupId,
       documentId: req.params.documentId,
       uploadId: req.params.uploadId,
+      statusCode: httpErr.statusCode,
     });
-    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to update upload" });
+    res.status(httpErr.statusCode).json({ message: httpErr.message });
+  }
+};
+
+export const deleteEntityDocumentUpload = async (req, res) => {
+  try {
+    const { normalizedType, entity } = await getEntityDocumentContext(
+      req.params.entityType,
+      req.params.entityId
+    );
+    if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
+
+    const { groupId, documentId, uploadId } = req.params;
+    ensureValidObjectId(groupId, "group id");
+    ensureValidObjectId(documentId, "document id");
+    if (!uploadId) return res.status(400).json({ message: "Invalid upload id" });
+
+    const selectedGroups = buildSelectedGroups(entity);
+    const targetGroup = selectedGroups.find((group) => String(group._id) === String(groupId));
+    if (!targetGroup) return res.status(404).json({ message: "Document group is not assigned to this entity" });
+    const targetDoc = (targetGroup.documents || []).find((doc) => String(doc._id) === String(documentId));
+    if (!targetDoc) return res.status(404).json({ message: "Document is not part of the selected group" });
+
+    const records = [...(entity.groupDocuments || [])];
+    const recordIndex = records.findIndex(
+      (record) => String(record.group) === String(groupId) && String(record.document) === String(documentId)
+    );
+    if (recordIndex < 0) return res.status(404).json({ message: "Upload record not found" });
+
+    const record = { ...records[recordIndex] };
+    const uploads = getRecordUploads(record, targetDoc)
+      .filter((upload) => String(upload.uploadId) !== String(uploadId));
+    const removed = uploads.length !== getRecordUploads(record, targetDoc).length;
+    if (!removed) return res.status(404).json({ message: "Upload not found" });
+
+    if (uploads.length === 0) {
+      records.splice(recordIndex, 1);
+    } else {
+      const latestUpload = uploads[0] || null;
+      records[recordIndex] = {
+        ...record,
+        uploads,
+        fileName: latestUpload?.fileName || "",
+        fileUrl: latestUpload?.fileUrl || "",
+        mimeType: latestUpload?.mimeType || "",
+        fileSize: latestUpload?.fileSize || 0,
+        uploadedAt: latestUpload?.uploadedAt || null,
+        expiryDate: latestUpload?.expiryDate || null,
+        renewalDate: latestUpload?.renewalDate || null,
+        notes: latestUpload?.notes || "",
+        reference: latestUpload?.reference || "",
+        uploadedBy: latestUpload?.uploadedBy || null,
+        lastUpdatedBy: req.user._id,
+        status: latestUpload?.status || "pending",
+      };
+    }
+
+    const Model = getModel(normalizedType);
+    await Model.findByIdAndUpdate(
+      req.params.entityId,
+      { $set: { groupDocuments: records } },
+      { new: true, runValidators: false }
+    );
+
+    await logAudit(req, "DOCUMENT_DELETE", "ClientDocument", {
+      resourceId: req.params.entityId,
+      detail: `${normalizedType} document upload deleted (group: ${groupId}, document: ${documentId}, upload: ${uploadId})`,
+      after: {
+        entityType: normalizedType,
+        entityId: req.params.entityId,
+        groupId,
+        documentId,
+        uploadId,
+      },
+    });
+
+    const refreshed = await getEntityDocumentContext(req.params.entityType, req.params.entityId);
+    res.json({
+      message: "Upload deleted",
+      entityType: normalizedType,
+      entityId: req.params.entityId,
+      entityName: refreshed.entity?.name,
+      ...buildEntityDocumentsPayload(refreshed.entity, refreshed.documents, {
+        usedDefaultDocuments: refreshed.usedDefaultDocuments,
+      }),
+    });
+  } catch (err) {
+    const httpErr = toHttpError(err, "Failed to delete upload");
+    console.error("deleteEntityDocumentUpload ERROR:", {
+      message: httpErr.message,
+      stack: err.stack || httpErr.stack,
+      entityType: req.params.entityType,
+      entityId: req.params.entityId,
+      groupId: req.params.groupId,
+      documentId: req.params.documentId,
+      uploadId: req.params.uploadId,
+      statusCode: httpErr.statusCode,
+    });
+    res.status(httpErr.statusCode).json({ message: httpErr.message });
   }
 };
 
@@ -593,8 +747,9 @@ export const upsertEntityDocument = async (req, res) => {
     }];
     return addEntityDocumentUploads(req, res);
   } catch (err) {
-    console.error("upsertEntityDocument ERROR:", err.message, err.stack);
-    res.status(500).json({ message: "Failed to update document" });
+    const httpErr = toHttpError(err, "Failed to update document");
+    console.error("upsertEntityDocument ERROR:", httpErr.message, err.stack || httpErr.stack);
+    res.status(httpErr.statusCode).json({ message: httpErr.message });
   }
 };
 

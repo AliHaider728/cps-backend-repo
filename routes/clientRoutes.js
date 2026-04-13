@@ -27,6 +27,7 @@ import {
   upsertEntityDocument,
   addEntityDocumentUploads,
   updateEntityDocumentUpload,
+  deleteEntityDocumentUpload,
 } from "../controllers/complianceController.js";
 
 const router = Router();
@@ -83,6 +84,7 @@ router.get   ("/:entityType/:entityId/documents",                               
 router.patch ("/:entityType/:entityId/documents/:documentId",                                  ...admin,    upsertEntityDocument);
 router.post  ("/:entityType/:entityId/documents/:groupId/:documentId/uploads",                 ...admin,    addEntityDocumentUploads);
 router.patch ("/:entityType/:entityId/documents/:groupId/:documentId/uploads/:uploadId",       ...admin,    updateEntityDocumentUpload);
+router.delete("/:entityType/:entityId/documents/:groupId/:documentId/uploads/:uploadId",       ...admin,    deleteEntityDocumentUpload);
 
 // ── Entity Compliance (dynamic routes)
 router.get ("/:entityType/:entityId/compliance/status",         ...adminFin, getComplianceStatus);
