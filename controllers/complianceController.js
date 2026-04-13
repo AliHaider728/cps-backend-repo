@@ -14,6 +14,8 @@
  *   • getComplianceStatus / upsertComplianceDoc / approveComplianceDoc / rejectComplianceDoc:
  *     now call normalizeEntityType() before getModel() — raw lowercase "pcn"/"practice"
  *     was throwing "Invalid entityType" → 500 crash
+ *   • getRecordUploads: record = record ?? {} added — null was bypassing default param
+ *     causing "Cannot read properties of null (reading 'uploads')" → 500 crash
  */
 
 import mongoose   from "mongoose";
@@ -186,7 +188,11 @@ function computeUploadStatus(upload, docDef) {
   return upload.status === "expired" ? "expired" : "uploaded";
 }
 
-function getRecordUploads(record = {}, docDef) {
+// ✅ FIXED: record = record ?? {} — null was bypassing default param `record = {}`
+// causing "Cannot read properties of null (reading 'uploads')" → 500 crash
+function getRecordUploads(record, docDef) {
+  record = record ?? {}; // ✅ handles both null and undefined safely
+
   const uploads = Array.isArray(record.uploads) && record.uploads.length > 0
     ? record.uploads
     : (record.fileUrl
@@ -296,7 +302,9 @@ function buildEntityDocumentsPayload(entity, documents, options = {}) {
       .filter((doc) => doc && doc.active !== false)
       .sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0) || a.name.localeCompare(b.name))
       .map((doc) => {
-        const record = recordMap.get(buildRecordKey(group._id, doc._id)) || null;
+        // ✅ FIXED: was `|| null` — null bypasses default param in getRecordUploads
+        // Now using `|| undefined` so the default {} kicks in properly
+        const record = recordMap.get(buildRecordKey(group._id, doc._id)) || undefined;
         const uploads = getRecordUploads(record, doc);
         const latestUpload = uploads[0] || null;
         const status = latestUpload ? latestUpload.status : "pending";
