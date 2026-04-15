@@ -188,6 +188,14 @@ function computeUploadStatus(upload, docDef) {
   return upload.status === "expired" ? "expired" : "uploaded";
 }
 
+function normalizeUploadForDocument(upload, docDef) {
+  if (!upload || typeof upload !== "object") return upload;
+  return {
+    ...upload,
+    expiryDate: docDef?.expirable ? (upload.expiryDate || null) : null,
+  };
+}
+
 //   FIXED: record = record ?? {} — null was bypassing default param `record = {}`
 // causing "Cannot read properties of null (reading 'uploads')" → 500 crash
 function getRecordUploads(record, docDef) {
@@ -213,10 +221,13 @@ function getRecordUploads(record, docDef) {
         : []);
 
   return uploads
-    .map((upload) => ({
-      ...upload,
-      status: computeUploadStatus(upload, docDef),
-    }))
+    .map((upload) => {
+      const normalizedUpload = normalizeUploadForDocument(upload, docDef);
+      return {
+        ...normalizedUpload,
+        status: computeUploadStatus(normalizedUpload, docDef),
+      };
+    })
     .sort((a, b) => new Date(b.uploadedAt || 0) - new Date(a.uploadedAt || 0));
 }
 
@@ -470,7 +481,7 @@ function makeUploadEntry(payload, userId, docDef) {
     mimeType: payload.mimeType || "",
     fileSize: payload.fileSize || 0,
     uploadedAt: new Date(),
-    expiryDate: payload.expiryDate ? new Date(payload.expiryDate) : null,
+    expiryDate: docDef?.expirable && payload.expiryDate ? new Date(payload.expiryDate) : null,
     renewalDate: payload.renewalDate ? new Date(payload.renewalDate) : null,
     notes: payload.notes || "",
     reference: payload.reference || "",
@@ -479,8 +490,9 @@ function makeUploadEntry(payload, userId, docDef) {
   if (!entry.expiryDate && docDef?.expirable && docDef.defaultExpiryDays) {
     entry.expiryDate = new Date(Date.now() + docDef.defaultExpiryDays * 24 * 60 * 60 * 1000);
   }
-  entry.status = computeUploadStatus(entry, docDef);
-  return entry;
+  const normalizedEntry = normalizeUploadForDocument(entry, docDef);
+  normalizedEntry.status = computeUploadStatus(normalizedEntry, docDef);
+  return normalizedEntry;
 }
 
 export const addEntityDocumentUploads = async (req, res) => {
@@ -613,13 +625,16 @@ export const updateEntityDocumentUpload = async (req, res) => {
     const existingUpload = uploads[uploadIndex];
     const nextUpload = {
       ...existingUpload,
-      ...(req.body.expiryDate !== undefined && { expiryDate: req.body.expiryDate ? new Date(req.body.expiryDate) : null }),
+      ...(req.body.expiryDate !== undefined && {
+        expiryDate: targetDoc?.expirable && req.body.expiryDate ? new Date(req.body.expiryDate) : null,
+      }),
       ...(req.body.renewalDate !== undefined && { renewalDate: req.body.renewalDate ? new Date(req.body.renewalDate) : null }),
       ...(req.body.notes !== undefined && { notes: req.body.notes || "" }),
       ...(req.body.reference !== undefined && { reference: req.body.reference || "" }),
     };
-    nextUpload.status = computeUploadStatus(nextUpload, targetDoc);
-    uploads[uploadIndex] = nextUpload;
+    const normalizedUpload = normalizeUploadForDocument(nextUpload, targetDoc);
+    normalizedUpload.status = computeUploadStatus(normalizedUpload, targetDoc);
+    uploads[uploadIndex] = normalizedUpload;
     uploads.sort((a, b) => new Date(b.uploadedAt || 0) - new Date(a.uploadedAt || 0));
 
     const latestUpload = uploads[0] || null;
