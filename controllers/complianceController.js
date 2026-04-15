@@ -188,10 +188,10 @@ function computeUploadStatus(upload, docDef) {
   return upload.status === "expired" ? "expired" : "uploaded";
 }
 
-// ✅ FIXED: record = record ?? {} — null was bypassing default param `record = {}`
+//   FIXED: record = record ?? {} — null was bypassing default param `record = {}`
 // causing "Cannot read properties of null (reading 'uploads')" → 500 crash
 function getRecordUploads(record, docDef) {
-  record = record ?? {}; // ✅ handles both null and undefined safely
+  record = record ?? {}; //   handles both null and undefined safely
 
   const uploads = Array.isArray(record.uploads) && record.uploads.length > 0
     ? record.uploads
@@ -302,7 +302,7 @@ function buildEntityDocumentsPayload(entity, documents, options = {}) {
       .filter((doc) => doc && doc.active !== false)
       .sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0) || a.name.localeCompare(b.name))
       .map((doc) => {
-        // ✅ FIXED: was `|| null` — null bypasses default param in getRecordUploads
+        //   FIXED: was `|| null` — null bypasses default param in getRecordUploads
         // Now using `|| undefined` so the default {} kicks in properly
         const record = recordMap.get(buildRecordKey(group._id, doc._id)) || undefined;
         const uploads = getRecordUploads(record, doc);
@@ -438,7 +438,7 @@ export const getEntityDocuments = async (req, res) => {
 };
 
 /* ─────────────────────────────────────────────────
-   ✅ FIXED: buildSelectedGroups
+     FIXED: buildSelectedGroups
    BUG: mongoose.isValidObjectId(group) — whole object pass ho raha tha
    FIX: sirf group._id check karo, object already filter ho chuka hai upar
 ───────────────────────────────────────────────── */
@@ -816,14 +816,14 @@ export const upsertEntityDocument = async (req, res) => {
 
 /* ────────────────────────────────────────────────────────────────────
    GET /api/clients/:entityType/:entityId/compliance/status
-   ✅ FIXED: normalizeEntityType() added — raw "pcn"/"practice" was crashing getModel()
+     FIXED: normalizeEntityType() added — raw "pcn"/"practice" was crashing getModel()
 ──────────────────────────────────────────────────────────────────── */
 export const getComplianceStatus = async (req, res) => {
   try {
     const { entityType, entityId } = req.params;
-    const normalizedType = normalizeEntityType(entityType); // ✅ FIXED
-    const Model    = getModel(normalizedType);              // ✅ was: getModel(entityType)
-    const docTypes = getDocTypes(normalizedType);           // ✅ was: getDocTypes(entityType)
+    const normalizedType = normalizeEntityType(entityType); //   FIXED
+    const Model    = getModel(normalizedType);              //   was: getModel(entityType)
+    const docTypes = getDocTypes(normalizedType);           //   was: getDocTypes(entityType)
 
     const entity = await Model.findById(entityId).lean();
     if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
@@ -857,13 +857,13 @@ export const getComplianceStatus = async (req, res) => {
 
 /* ────────────────────────────────────────────────────────────────────
    PATCH /api/clients/:entityType/:entityId/compliance/:docKey
-   ✅ FIXED: normalizeEntityType() added
+     FIXED: normalizeEntityType() added
 ──────────────────────────────────────────────────────────────────── */
 export const upsertComplianceDoc = async (req, res) => {
   try {
     const { entityType, entityId, docKey } = req.params;
-    const normalizedType = normalizeEntityType(entityType); // ✅ FIXED
-    const Model = getModel(normalizedType);                 // ✅ was: getModel(entityType)
+    const normalizedType = normalizeEntityType(entityType); //   FIXED
+    const Model = getModel(normalizedType);                 //   was: getModel(entityType)
 
     const entity = await Model.findById(entityId);
     if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
@@ -928,13 +928,13 @@ export const upsertComplianceDoc = async (req, res) => {
 
 /* ────────────────────────────────────────────────────────────────────
    POST /api/clients/:entityType/:entityId/compliance/:docKey/approve
-   ✅ FIXED: normalizeEntityType() added
+     FIXED: normalizeEntityType() added
 ──────────────────────────────────────────────────────────────────── */
 export const approveComplianceDoc = async (req, res) => {
   try {
     const { entityType, entityId, docKey } = req.params;
-    const normalizedType = normalizeEntityType(entityType); // ✅ FIXED
-    const Model = getModel(normalizedType);                 // ✅ was: getModel(entityType)
+    const normalizedType = normalizeEntityType(entityType); //   FIXED
+    const Model = getModel(normalizedType);                 //   was: getModel(entityType)
 
     const updated = await Model.findByIdAndUpdate(
       entityId,
@@ -961,7 +961,7 @@ export const approveComplianceDoc = async (req, res) => {
 
 /* ────────────────────────────────────────────────────────────────────
    POST /api/clients/:entityType/:entityId/compliance/:docKey/reject
-   ✅ FIXED: normalizeEntityType() added
+     FIXED: normalizeEntityType() added
 ──────────────────────────────────────────────────────────────────── */
 export const rejectComplianceDoc = async (req, res) => {
   try {
@@ -970,8 +970,8 @@ export const rejectComplianceDoc = async (req, res) => {
 
     if (!reason?.trim()) return res.status(400).json({ message: "Rejection reason is required" });
 
-    const normalizedType = normalizeEntityType(entityType); // ✅ FIXED
-    const Model = getModel(normalizedType);                 // ✅ was: getModel(entityType)
+    const normalizedType = normalizeEntityType(entityType); //   FIXED
+    const Model = getModel(normalizedType);                 //   was: getModel(entityType)
 
     const updated = await Model.findByIdAndUpdate(
       entityId,
