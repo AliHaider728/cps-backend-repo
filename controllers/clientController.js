@@ -19,7 +19,6 @@
  *   • getICBById: now returns federations + pcns (with practices) for ICBDetailPage
  */
 
-import mongoose       from "mongoose";
 import ICB            from "../models/ICB.js";
 import Federation     from "../models/Federation.js";
 import PCN            from "../models/PCN.js";
@@ -29,16 +28,13 @@ import User           from "../models/User.js";
 import nodemailer     from "nodemailer";
 import crypto         from "crypto";
 import { logAudit }   from "../middleware/auditLogger.js";
+import { normalizeId } from "../lib/ids.js";
 
 /* ─────────────────────────────────────────────────
    HELPER: safe ObjectId cast
 ───────────────────────────────────────────────── */
 const toObjectId = (id) => {
-  try {
-    return new mongoose.Types.ObjectId(id);
-  } catch {
-    return null;
-  }
+  return normalizeId(id);
 };
 
 const validateObjectIdOr400 = (id, label = "id") => {

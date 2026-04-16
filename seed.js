@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
 dotenv.config();
-import mongoose          from "mongoose";
 import bcrypt            from "bcryptjs";
+import connectDB, { disconnectDB } from "./config/db.js";
 import User              from "./models/User.js";
 import ICB               from "./models/ICB.js";
 import Federation        from "./models/Federation.js";
@@ -10,6 +10,7 @@ import Practice          from "./models/Practice.js";
 import ContactHistory    from "./models/ContactHistory.js";
 import ComplianceDocument from "./models/ComplianceDocument.js";
 import DocumentGroup     from "./models/DocumentGroup.js";
+import { createId } from "./lib/ids.js";
 
 // ─────────────────────────────────────────────────────────
 //  USERS
@@ -300,7 +301,7 @@ const makeSeedGroupRecord = ({ groupId, documentId, documentName, expirable, upl
   const uploadedAt = daysAgo(daysBack);
   const expiryDate = expirable ? new Date(Date.now() + 180 * 86_400_000) : null;
   const upload = {
-    uploadId: new mongoose.Types.ObjectId().toString(),
+    uploadId: createId(),
     fileName: `${String(documentName || "document").toLowerCase().replace(/[^a-z0-9]+/g, "_")}.pdf`,
     fileUrl: `https://files.cps.local/${String(groupId)}/${String(documentId)}/${Date.now()}.pdf`,
     mimeType: "application/pdf",
@@ -335,9 +336,9 @@ const makeSeedGroupRecord = ({ groupId, documentId, documentName, expirable, upl
 // ─────────────────────────────────────────────────────────
 //  MAIN
 // ─────────────────────────────────────────────────────────
-(async () => {
-  await mongoose.connect(process.env.MONGODB_URI);
-  console.log("✓ MongoDB connected\n");
+export async function runSeed() {
+  await connectDB();
+  console.log("✓ Postgres connected\n");
 
   // ── 1. Users ──────────────────────────────────────────
   console.log("── Seeding Users ──");
@@ -571,7 +572,7 @@ const makeSeedGroupRecord = ({ groupId, documentId, documentName, expirable, upl
     console.log(`  Seeded Practice group -> ${practice.name}`);
   }
 
-  await mongoose.disconnect();
+  await disconnectDB();
   console.log("\n✓ Seed complete!");
   console.log(
     `  Users: ${USERS.length} | ICBs: ${ICBS.length} | ` +
@@ -579,7 +580,14 @@ const makeSeedGroupRecord = ({ groupId, documentId, documentName, expirable, upl
     `Practices: ${Object.keys(practiceMap).length} | ` +
     `Compliance Docs: ${COMPLIANCE_DOCS.length} | Document Groups: ${DOCUMENT_GROUPS.length}`
   );
-})();
+}
+
+if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1].replace(/\\/g, "/")}`).href) {
+  runSeed().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
 
 
 

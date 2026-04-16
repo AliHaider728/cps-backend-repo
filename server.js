@@ -4,8 +4,8 @@ dotenv.config();
 import express from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
-import mongoose from "mongoose";
-import connectDB from "./config/db.js";
+import { pathToFileURL } from "url";
+import connectDB, { isDbConnected } from "./config/db.js";
 import authRoutes from "./routes/authRoutes.js";
 import auditRoutes from "./routes/auditRoutes.js";
 import clientRoutes from "./routes/clientRoutes.js";
@@ -16,7 +16,7 @@ const app = express();
 app.set("trust proxy", 1);
 
 connectDB().catch((err) => {
-  console.error("[startup] Initial MongoDB connection failed:", err.message);
+  console.error("[startup] Initial database connection failed:", err.message);
 });
 
 const ALLOWED_ORIGINS = [
@@ -70,7 +70,7 @@ app.get("/", (_, res) =>
   res.json({
     message: "CPS API running",
     version: "1.0.0",
-    database: mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+    database: isDbConnected() ? "connected" : "disconnected",
   })
 );
 
@@ -86,9 +86,76 @@ app.use((err, req, res, _next) => {
   });
 });
 
-if (process.env.NODE_ENV !== "production") {
-  const PORT = process.env.PORT || 5000;
-  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const DEFAULT_PORT = Number(process.env.PORT) || 5000;
+const SERVER_KEY = "__cps_backend_server__";
+const STARTING_KEY = "__cps_backend_server_starting__";
+
+function isDirectRun() {
+  if (!process.argv[1]) return false;
+  return import.meta.url === pathToFileURL(process.argv[1]).href;
+}
+
+function attachShutdownHandlers(server) {
+  if (server.__shutdownHandlersAttached) return;
+  server.__shutdownHandlersAttached = true;
+
+  const closeServer = (signal, next) => {
+    if (!globalThis[SERVER_KEY]) {
+      if (typeof next === "function") next();
+      return;
+    }
+
+    console.log(`[server] Shutting down on ${signal}`);
+    server.close(() => {
+      globalThis[SERVER_KEY] = null;
+      if (typeof next === "function") next();
+    });
+  };
+
+  process.once("SIGINT", () => closeServer("SIGINT", () => process.exit(0)));
+  process.once("SIGTERM", () => closeServer("SIGTERM", () => process.exit(0)));
+  process.once("SIGUSR2", () => closeServer("SIGUSR2", () => process.kill(process.pid, "SIGUSR2")));
+}
+
+export async function startServer(port = DEFAULT_PORT) {
+  if (globalThis[SERVER_KEY]) {
+    return globalThis[SERVER_KEY];
+  }
+
+  if (globalThis[STARTING_KEY]) {
+    return globalThis[STARTING_KEY];
+  }
+
+  globalThis[STARTING_KEY] = new Promise((resolve, reject) => {
+    const server = app.listen(port);
+
+    server.once("listening", () => {
+      console.log(`Server running on port ${port}`);
+      globalThis[SERVER_KEY] = server;
+      globalThis[STARTING_KEY] = null;
+      attachShutdownHandlers(server);
+      resolve(server);
+    });
+
+    server.once("error", (err) => {
+      globalThis[STARTING_KEY] = null;
+      if (err.code === "EADDRINUSE") {
+        console.warn(`[server] Port ${port} is already in use. Another backend instance is likely running, so this process will not crash.`);
+        resolve(null);
+        return;
+      }
+      reject(err);
+    });
+  });
+
+  return globalThis[STARTING_KEY];
+}
+
+if (process.env.NODE_ENV !== "production" && isDirectRun()) {
+  startServer().catch((err) => {
+    console.error("[server] Failed to start:", err.stack || err.message);
+    process.exit(1);
+  });
 }
 
 export default app;

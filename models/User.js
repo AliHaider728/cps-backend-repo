@@ -1,47 +1,40 @@
-import mongoose from "mongoose";
-import bcrypt from "bcryptjs";
+import { createModel, hashPasswordIfNeeded } from "../lib/model.js";
 
-const UserSchema = new mongoose.Schema(
-  {
-    name:      { type: String, required: true, trim: true },
-    email:     { type: String, required: true, unique: true, lowercase: true, trim: true },
-    password:  { type: String, required: true, minlength: 6, select: false },
-    role: {
-      type: String,
-      enum: ["super_admin", "director", "ops_manager", "finance", "training", "workforce", "clinician"],
-      required: true,
-    },
-    isActive:           { type: Boolean, default: true },
-    mustChangePassword: { type: Boolean, default: false },
-    lastLogin:          { type: Date },
-    createdBy:          { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-
-    // ── GDPR ──
-    anonymisedAt: { type: Date,    default: null },
-    isAnonymised: { type: Boolean, default: false },
+const User = createModel({
+  modelName: "User",
+  hiddenFields: ["password"],
+  defaults: {
+    name: "",
+    email: "",
+    password: "",
+    role: "clinician",
+    isActive: true,
+    mustChangePassword: false,
+    isAnonymised: false,
+    createdBy: null,
+    lastLogin: null,
   },
-  { timestamps: true }
-);
-
-// NOTE: No manual index needed — email has unique:true which creates index automatically
-
-UserSchema.pre("save", async function (next) {
-  if (!this.isModified("password")) return next();
-  this.password = await bcrypt.hash(this.password, 12);
-  next();
+  beforeSave: async (document) => {
+    if (document.email) {
+      document.email = String(document.email).trim().toLowerCase();
+    }
+    await hashPasswordIfNeeded(document);
+  },
+  documentMethods: {
+    async matchPassword(entered) {
+      const bcrypt = await import("bcryptjs");
+      return bcrypt.default.compare(entered, this.password || "");
+    },
+    async anonymise() {
+      this.name = "Anonymised User";
+      this.email = `anonymised-${this._id}@example.local`;
+      this.password = "";
+      this.isAnonymised = true;
+      this.isActive = false;
+      await this.save();
+      return this;
+    },
+  },
 });
 
-UserSchema.methods.matchPassword = async function (entered) {
-  return bcrypt.compare(entered, this.password);
-};
-
-UserSchema.methods.anonymise = async function () {
-  this.name          = "Anonymised User";
-  this.email         = `anon_${this._id}@deleted.internal`;
-  this.isActive      = false;
-  this.isAnonymised  = true;
-  this.anonymisedAt  = new Date();
-  await this.save({ validateBeforeSave: false });
-};
-
-export default mongoose.model("User", UserSchema);
+export default User;

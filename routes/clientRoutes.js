@@ -4,6 +4,7 @@
 import { Router } from "express";
 import { verifyToken } from "../middleware/auth.js";
 import { allowRoles  } from "../middleware/roleCheck.js";
+import { upload } from "../middleware/upload.js";
 import {
   getHierarchy, searchClients,
   getICBs, getICBById, createICB, updateICB, deleteICB,
@@ -81,14 +82,14 @@ router.post("/compliance/run-expiry", ...admin,    runExpiryCheck);
 
 // ── Entity Documents (dynamic routes)
 router.get   ("/:entityType/:entityId/documents",                                              ...adminFin, getEntityDocuments);
-router.patch ("/:entityType/:entityId/documents/:documentId",                                  ...admin,    upsertEntityDocument);
-router.post  ("/:entityType/:entityId/documents/:groupId/:documentId/uploads",                 ...admin,    addEntityDocumentUploads);
+router.patch ("/:entityType/:entityId/documents/:documentId",                                  ...admin,    upload.single("file"), upsertEntityDocument);
+router.post  ("/:entityType/:entityId/documents/:groupId/:documentId/uploads",                 ...admin,    upload.array("files"), addEntityDocumentUploads);
 router.patch ("/:entityType/:entityId/documents/:groupId/:documentId/uploads/:uploadId",       ...admin,    updateEntityDocumentUpload);
 router.delete("/:entityType/:entityId/documents/:groupId/:documentId/uploads/:uploadId",       ...admin,    deleteEntityDocumentUpload);
 
 // ── Entity Compliance (dynamic routes)
 router.get ("/:entityType/:entityId/compliance/status",         ...adminFin, getComplianceStatus);
-router.patch("/:entityType/:entityId/compliance/:docKey",        ...admin,    upsertComplianceDoc);
+router.patch("/:entityType/:entityId/compliance/:docKey",        ...admin,    upload.single("file"), upsertComplianceDoc);
 router.post ("/:entityType/:entityId/compliance/:docKey/approve",...admin,    approveComplianceDoc);
 router.post ("/:entityType/:entityId/compliance/:docKey/reject", ...admin,    rejectComplianceDoc);
 

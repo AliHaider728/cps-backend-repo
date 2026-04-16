@@ -1,25 +1,24 @@
-import mongoose from "mongoose";
+import { createModel } from "../lib/model.js";
 
-const AuditLogSchema = new mongoose.Schema(
-  {
-    user:       { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
-    userName:   { type: String, default: "System" },
-    userRole:   { type: String, default: "system" },
-    action:     { type: String, required: true },       // e.g. LOGIN, CREATE_USER
-    resource:   { type: String, required: true },       // e.g. User, PCN, Practice
-    resourceId: { type: String, default: null },
-    detail:     { type: String, default: "" },          // human-readable summary
-    before:     { type: mongoose.Schema.Types.Mixed },  // snapshot before change
-    after:      { type: mongoose.Schema.Types.Mixed },  // snapshot after change
-    ip:         { type: String, default: "unknown" },
-    userAgent:  { type: String, default: "" },
-    status:     { type: String, enum: ["success", "fail"], default: "success" },
+const AuditLog = createModel({
+  modelName: "AuditLog",
+  refs: {
+    user: { model: "User" },
   },
-  { timestamps: true }
-);
+  defaults: {
+    user: null,
+    userName: "System",
+    userRole: "system",
+    action: "",
+    resource: "",
+    resourceId: null,
+    detail: "",
+    before: null,
+    after: null,
+    ip: "",
+    userAgent: "",
+    status: "success",
+  },
+});
 
-AuditLogSchema.index({ createdAt: -1 });
-AuditLogSchema.index({ user: 1 });
-AuditLogSchema.index({ action: 1 });
-
-export default mongoose.model("AuditLog", AuditLogSchema);
+export default AuditLog;

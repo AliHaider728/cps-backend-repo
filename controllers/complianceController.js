@@ -9,7 +9,7 @@
  * - Cron-ready expiry check
  *
  * FIXED (Apr 2026):
- *   • buildSelectedGroups: mongoose.isValidObjectId(group) → group._id check only
+ *   • buildSelectedGroups: group._id → group._id check only
  *     (was passing whole object instead of string ID — caused 500 crash)
  *   • getComplianceStatus / upsertComplianceDoc / approveComplianceDoc / rejectComplianceDoc:
  *     now call normalizeEntityType() before getModel() — raw lowercase "pcn"/"practice"
@@ -18,13 +18,14 @@
  *     causing "Cannot read properties of null (reading 'uploads')" → 500 crash
  */
 
-import mongoose   from "mongoose";
 import PCN        from "../models/PCN.js";
 import Practice   from "../models/Practice.js";
 import DocumentGroup from "../models/DocumentGroup.js";
 import ComplianceDocument from "../models/ComplianceDocument.js";
 import nodemailer from "nodemailer";
 import { logAudit } from "../middleware/auditLogger.js";
+import { createId, isValidId } from "../lib/ids.js";
+import { uploadBufferToStorage } from "../lib/supabase.js";
 
 const transporter = nodemailer.createTransport({
   host:   process.env.EMAIL_HOST,
@@ -74,10 +75,8 @@ function createHttpError(statusCode, message, details = {}) {
 function isDatabaseUnavailableError(err) {
   if (!err) return false;
   const knownNames = new Set([
-    "MongoServerSelectionError",
-    "MongoNetworkError",
-    "MongooseServerSelectionError",
-    "DisconnectedError",
+    "DatabaseConnectionError",
+    "PostgresError",
   ]);
   if (knownNames.has(err.name)) return true;
   const msg = String(err.message || "").toLowerCase();
@@ -93,7 +92,7 @@ function toHttpError(err, fallbackMessage) {
 }
 
 function isValidObjectId(value) {
-  return mongoose.Types.ObjectId.isValid(String(value));
+  return isValidId(String(value || ""));
 }
 
 function ensureValidObjectId(value, label) {
@@ -238,20 +237,16 @@ async function getEntityDocumentContext(entityType, entityId) {
   void DocumentGroup;
   void ComplianceDocument;
   const Model = getModel(normalizedType);
-  let query = Model.findById(entityId);
+  let query = Model.findById(entityId).populate({
+    path: "complianceGroup",
+    select: "name active displayOrder documents",
+    populate: {
+      path: "documents",
+      select: "name displayOrder mandatory expirable active defaultExpiryDays defaultReminderDays",
+    },
+  });
 
-  if (Model.schema.path("complianceGroup")) {
-    query = query.populate({
-      path: "complianceGroup",
-      select: "name active displayOrder documents",
-      populate: {
-        path: "documents",
-        select: "name displayOrder mandatory expirable active defaultExpiryDays defaultReminderDays",
-      },
-    });
-  }
-
-  if (normalizedType === "PCN" && Model.schema.path("complianceGroups")) {
+  if (normalizedType === "PCN") {
     query = query.populate({
       path: "complianceGroups",
       select: "name active displayOrder documents",
@@ -377,7 +372,7 @@ export const getEntityDocuments = async (req, res) => {
     const { entityType, entityId } = req.params;
     console.log("[documents] getEntityDocuments INCOMING", { entityType, entityId });
 
-    if (!mongoose.Types.ObjectId.isValid(String(entityId || ""))) {
+    if (!isValidId(String(entityId || ""))) {
       console.warn("[documents] getEntityDocuments INVALID_ID", { entityType, entityId });
       return res.status(400).json({ message: "Invalid ID" });
     }
@@ -450,7 +445,7 @@ export const getEntityDocuments = async (req, res) => {
 
 /* ─────────────────────────────────────────────────
      FIXED: buildSelectedGroups
-   BUG: mongoose.isValidObjectId(group) — whole object pass ho raha tha
+   BUG: group._id — whole object pass ho raha tha
    FIX: sirf group._id check karo, object already filter ho chuka hai upar
 ───────────────────────────────────────────────── */
 function buildSelectedGroups(entity) {
@@ -475,7 +470,7 @@ function findGroupAndDocument(entity, groupId, documentId) {
 
 function makeUploadEntry(payload, userId, docDef) {
   const entry = {
-    uploadId: new mongoose.Types.ObjectId().toString(),
+    uploadId: createId(),
     fileName: payload.fileName || "",
     fileUrl: payload.fileUrl || "",
     mimeType: payload.mimeType || "",
@@ -495,6 +490,33 @@ function makeUploadEntry(payload, userId, docDef) {
   return normalizedEntry;
 }
 
+async function getMultipartUploads(req) {
+  const files = Array.isArray(req.files)
+    ? req.files
+    : (req.file ? [req.file] : []);
+
+  return Promise.all(
+    files.map(async (file) => {
+      const uploaded = await uploadBufferToStorage({
+        buffer: file.buffer,
+        contentType: file.mimetype || "application/octet-stream",
+        fileName: file.originalname || "upload.bin",
+      });
+
+      return {
+        fileName: file.originalname || "upload.bin",
+        fileUrl: uploaded.publicUrl,
+        mimeType: file.mimetype || "application/octet-stream",
+        fileSize: file.size || 0,
+        expiryDate: req.body.expiryDate || null,
+        renewalDate: req.body.renewalDate || null,
+        notes: req.body.notes || "",
+        reference: req.body.reference || "",
+      };
+    })
+  );
+}
+
 export const addEntityDocumentUploads = async (req, res) => {
   try {
     const { normalizedType, entity } = await getEntityDocumentContext(
@@ -512,7 +534,7 @@ export const addEntityDocumentUploads = async (req, res) => {
     if (!targetGroup) return res.status(404).json({ message: "Document group is not assigned to this entity" });
     if (!targetDoc) return res.status(404).json({ message: "Document is not part of the selected group" });
 
-    const uploadsPayload = Array.isArray(req.body.uploads) ? req.body.uploads : [];
+    const uploadsPayload = await getMultipartUploads(req);
     if (uploadsPayload.length === 0) {
       return res.status(400).json({ message: "At least one upload is required" });
     }
@@ -524,9 +546,7 @@ export const addEntityDocumentUploads = async (req, res) => {
     const existing = recordIndex >= 0 ? records[recordIndex] : { group: groupId, document: documentId };
     const nextUploads = [
       ...getRecordUploads(existing, targetDoc),
-      ...uploadsPayload
-        .filter((upload) => upload?.fileUrl)
-        .map((upload) => makeUploadEntry(upload, req.user._id, targetDoc)),
+      ...uploadsPayload.map((upload) => makeUploadEntry(upload, req.user._id, targetDoc)),
     ];
 
     const latestUpload = nextUploads[0] || null;
@@ -811,16 +831,6 @@ export const upsertEntityDocument = async (req, res) => {
     if (!targetGroup) return res.status(404).json({ message: "Document is not part of the selected compliance group" });
 
     req.params.groupId = String(targetGroup._id);
-    req.body.uploads = [{
-      fileName: req.body.fileName,
-      fileUrl: req.body.fileUrl,
-      mimeType: req.body.mimeType,
-      fileSize: req.body.fileSize,
-      expiryDate: req.body.expiryDate,
-      renewalDate: req.body.renewalDate,
-      notes: req.body.notes,
-      reference: req.body.reference,
-    }];
     return addEntityDocumentUploads(req, res);
   } catch (err) {
     const httpErr = toHttpError(err, "Failed to update document");
@@ -884,21 +894,40 @@ export const upsertComplianceDoc = async (req, res) => {
     if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
 
     const existing = entity.complianceDocs?.[docKey] || {};
+    const uploadedFile = req.file
+      ? await (async () => {
+          const uploaded = await uploadBufferToStorage({
+            buffer: req.file.buffer,
+            contentType: req.file.mimetype || "application/octet-stream",
+            fileName: req.file.originalname || "upload.bin",
+          });
+          return {
+            fileName: req.file.originalname || "upload.bin",
+            fileUrl: uploaded.publicUrl,
+            mimeType: req.file.mimetype || "application/octet-stream",
+            fileSize: req.file.size || 0,
+          };
+        })()
+      : null;
     const {
-      fileName, fileUrl, mimeType, fileSize,
+      fileName, mimeType, fileSize,
       expiryDate, renewalDate, notes, status
     } = req.body;
+    const nextFileUrl = uploadedFile?.fileUrl;
+    const nextFileName = uploadedFile?.fileName ?? fileName;
+    const nextMimeType = uploadedFile?.mimeType ?? mimeType;
+    const nextFileSize = uploadedFile?.fileSize ?? fileSize;
 
     const newMeta = {
       ...existing,
-      ...(fileName   !== undefined && { fileName }),
-      ...(fileUrl    !== undefined && { fileUrl }),
-      ...(mimeType   !== undefined && { mimeType }),
-      ...(fileSize   !== undefined && { fileSize }),
+      ...(nextFileName !== undefined && { fileName: nextFileName }),
+      ...(nextFileUrl !== undefined && { fileUrl: nextFileUrl }),
+      ...(nextMimeType !== undefined && { mimeType: nextMimeType }),
+      ...(nextFileSize !== undefined && { fileSize: nextFileSize }),
       ...(notes      !== undefined && { notes }),
       ...(expiryDate !== undefined && { expiryDate: expiryDate ? new Date(expiryDate) : null }),
       ...(renewalDate!== undefined && { renewalDate: renewalDate ? new Date(renewalDate) : null }),
-      ...(fileUrl && fileUrl !== existing.fileUrl && {
+      ...(nextFileUrl && nextFileUrl !== existing.fileUrl && {
         status:     "pending",
         uploadedAt: new Date(),
         version:    (existing.version || 0) + 1,
@@ -913,7 +942,7 @@ export const upsertComplianceDoc = async (req, res) => {
           }] : []),
         ],
       }),
-      ...(!fileUrl && status !== undefined && { status }),
+      ...(!nextFileUrl && status !== undefined && { status }),
     };
 
     const updatePayload = {
@@ -1162,3 +1191,4 @@ export const runExpiryCheck = async (req, res) => {
     res.status(500).json({ message: "Failed to run expiry check" });
   }
 };
+

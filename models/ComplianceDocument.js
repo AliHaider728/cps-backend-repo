@@ -1,20 +1,25 @@
-import mongoose from "mongoose";
+import { createModel } from "../lib/model.js";
 
-const ComplianceDocumentSchema = new mongoose.Schema(
-  {
-    name:               { type: String, required: true, trim: true },
-    displayOrder:       { type: Number, default: 0 },
-    mandatory:          { type: Boolean, default: true },
-    expirable:          { type: Boolean, default: false },
-    active:             { type: Boolean, default: true },
-    defaultExpiryDays:  { type: Number, default: 365 },
-    defaultReminderDays:{ type: Number, default: 28 },
-    createdBy:          { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+const ComplianceDocument = createModel({
+  modelName: "ComplianceDocument",
+  defaults: {
+    name: "",
+    description: "",
+    category: "other",
+    applicableTo: ["Clinician"],
+    displayOrder: 0,
+    mandatory: true,
+    expirable: false,
+    active: true,
+    defaultExpiryDays: 365,
+    reminderDays: [30, 14, 7, 0],
+    autoSendOnBooking: false,
+    preStartRequired: false,
+    templateFileUrl: "",
+    templateFileName: "",
+    createdBy: null,
+    updatedBy: null,
   },
-  { timestamps: true }
-);
+});
 
-ComplianceDocumentSchema.index({ name: "text" });
-ComplianceDocumentSchema.index({ active: 1, displayOrder: 1 });
-
-export default mongoose.model("ComplianceDocument", ComplianceDocumentSchema);
+export default ComplianceDocument;

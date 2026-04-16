@@ -1,41 +1,83 @@
-import mongoose from "mongoose";
+import dotenv from "dotenv";
+import { Pool } from "pg";
 
-let cachedConnectionPromise = null;
+dotenv.config();
 
-function getMongoUri() {
-  const uri = process.env.MONGODB_URI;
-  if (!uri) {
-    throw new Error("MONGODB_URI is not configured");
+let pool;
+let initPromise;
+let connected = false;
+
+function getDatabaseUrl() {
+  const value = process.env.DATABASE_URL;
+  if (!value) {
+    throw new Error("DATABASE_URL is not configured");
   }
-  return uri;
+  return value;
+}
+
+function getPool() {
+  if (!pool) {
+    pool = new Pool({
+      connectionString: getDatabaseUrl(),
+      ssl: { rejectUnauthorized: false },
+      max: 10,
+    });
+  }
+  return pool;
 }
 
 export function isDbConnected() {
-  return mongoose.connection.readyState === 1;
+  return connected;
+}
+
+export async function query(text, params = []) {
+  const client = getPool();
+  return client.query(text, params);
+}
+
+async function ensureSchema() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS app_records (
+      model TEXT NOT NULL,
+      id TEXT NOT NULL,
+      data JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (model, id)
+    );
+  `);
+
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_app_records_model_updated
+    ON app_records (model, updated_at DESC);
+  `);
 }
 
 const connectDB = async () => {
-  if (isDbConnected()) {
-    return mongoose.connection;
-  }
-
-  if (!cachedConnectionPromise) {
-    const mongoUri = getMongoUri();
-    cachedConnectionPromise = mongoose.connect(mongoUri, {
-      serverSelectionTimeoutMS: 10000,
-      maxPoolSize: 10,
+  if (!initPromise) {
+    initPromise = (async () => {
+      const client = getPool();
+      await client.query("SELECT 1");
+      await ensureSchema();
+      connected = true;
+      return client;
+    })().catch((err) => {
+      connected = false;
+      initPromise = null;
+      throw err;
     });
   }
 
-  try {
-    const conn = await cachedConnectionPromise;
-    console.log(`[db] MongoDB connected: ${conn.connection.host}`);
-    return conn.connection;
-  } catch (err) {
-    cachedConnectionPromise = null;
-    console.error("[db] MongoDB connection failed:", err.message);
-    throw err;
-  }
+  return initPromise;
 };
+
+export async function disconnectDB() {
+  if (pool) {
+    await pool.end();
+    pool = null;
+  }
+  initPromise = null;
+  connected = false;
+}
 
 export default connectDB;
