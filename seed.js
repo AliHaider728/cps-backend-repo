@@ -1,18 +1,135 @@
+/**
+ * @file seed.js
+ * @description Populates the PostgreSQL database (app_records table) with
+ *              realistic demo data for all CPS entities.
+ *
+ *              Previously this file used Mongoose models — it has been fully
+ *              migrated to raw PostgreSQL queries so seed data lands in the
+ *              same app_records table that the API reads from.
+ *
+ * Run locally:  node seed.js
+ * Run via npm:  npm run seed
+ */
+
 import dotenv from "dotenv";
 dotenv.config();
-import bcrypt            from "bcryptjs";
-import connectDB, { disconnectDB } from "./config/db.js";
-import User              from "./models/User.js";
-import ICB               from "./models/ICB.js";
-import Federation        from "./models/Federation.js";
-import PCN               from "./models/PCN.js";
-import Practice          from "./models/Practice.js";
-import ContactHistory    from "./models/ContactHistory.js";
-import ComplianceDocument from "./models/ComplianceDocument.js";
-import DocumentGroup     from "./models/DocumentGroup.js";
+
+import bcrypt    from "bcryptjs";
+import { v4 as uuidv4 } from "uuid";
+import { initDB, query, disconnectDB } from "./config/db.js";
 import { createId } from "./lib/ids.js";
 
-//  USERS
+// ─────────────────────────────────────────────────────────────────────────────
+// STRUCTURED LOGGER  (no emojis — matches server.js convention)
+// ─────────────────────────────────────────────────────────────────────────────
+const log = {
+  info:  (msg, ...a) => console.log(`[INFO]  ${msg}`, ...a),
+  ok:    (msg, ...a) => console.log(`[OK]    ${msg}`, ...a),
+  warn:  (msg, ...a) => console.warn(`[WARN]  ${msg}`, ...a),
+  error: (msg, ...a) => console.error(`[ERROR] ${msg}`, ...a),
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GENERIC app_records HELPERS
+// All entities live in a single table:
+//   app_records (model TEXT, id UUID, data JSONB, created_at, updated_at)
+//
+// upsertRecord  — insert or update by a JSONB field value (e.g. email, name)
+// findByField   — SELECT one row WHERE data->>'field' = value
+// findById      — SELECT one row WHERE id = $id
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Insert a new row into app_records.
+ * @param {string} model   - Entity type key (e.g. 'user', 'icb', 'pcn')
+ * @param {object} payload - Data to store in the JSONB data column
+ * @returns {object} { id, ...payload }
+ */
+async function insertRecord(model, payload) {
+  const id        = uuidv4();
+  const timestamp = new Date().toISOString();
+  const data      = { ...payload, createdAt: timestamp, updatedAt: timestamp };
+
+  await query(
+    `INSERT INTO app_records (model, id, data, created_at, updated_at)
+     VALUES ($1, $2, $3::jsonb, NOW(), NOW())`,
+    [model, id, JSON.stringify(data)]
+  );
+
+  return { _id: id, id, ...data };
+}
+
+/**
+ * Update an existing row's data column by merging a patch object.
+ * @param {string} model
+ * @param {string} id
+ * @param {object} patch
+ */
+async function updateRecord(model, id, patch) {
+  const data = { ...patch, updatedAt: new Date().toISOString() };
+
+  await query(
+    `UPDATE app_records
+     SET data = COALESCE(data, '{}'::jsonb) || $3::jsonb,
+         updated_at = NOW()
+     WHERE model = $1 AND id = $2`,
+    [model, id, JSON.stringify(data)]
+  );
+}
+
+/**
+ * Find one record by a top-level JSONB field (case-insensitive for strings).
+ * @param {string} model
+ * @param {string} field  - JSONB key to search (e.g. 'email', 'name')
+ * @param {string} value
+ * @returns {object|null}
+ */
+async function findByField(model, field, value) {
+  const result = await query(
+    `SELECT id, data, created_at, updated_at
+     FROM app_records
+     WHERE model = $1
+       AND LOWER(COALESCE(data->>'${field}', '')) = LOWER($2)
+     LIMIT 1`,
+    [model, String(value)]
+  );
+
+  if (!result.rows[0]) return null;
+  const row = result.rows[0];
+  return { _id: row.id, id: row.id, ...row.data };
+}
+
+/**
+ * Upsert a record: update if a matching field value exists, insert otherwise.
+ * @param {string} model
+ * @param {string} matchField - Field name to check for duplicates (e.g. 'email')
+ * @param {string} matchValue - Value to look up
+ * @param {object} payload    - Full data to store / merge
+ * @returns {object} The final record (inserted or updated)
+ */
+async function upsertRecord(model, matchField, matchValue, payload) {
+  const existing = await findByField(model, matchField, matchValue);
+
+  if (existing) {
+    await updateRecord(model, existing.id, payload);
+    return { ...existing, ...payload };
+  }
+
+  return insertRecord(model, payload);
+}
+
+/**
+ * Delete all rows for a given model — used to reset contact history on each run.
+ * @param {string} model
+ */
+async function deleteAllByModel(model) {
+  await query(`DELETE FROM app_records WHERE model = $1`, [model]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEED DATA — unchanged from original
+// ─────────────────────────────────────────────────────────────────────────────
+
 const USERS = [
   { name: "Super Admin",     email: "superadmin@coreprescribing.co.uk", password: "SuperAdmin@123",  role: "super_admin" },
   { name: "Sarah Director",  email: "director@coreprescribing.co.uk",   password: "Director@123",    role: "director"    },
@@ -24,7 +141,6 @@ const USERS = [
   { name: "Dr. Sara Malik",  email: "clinician2@coreprescribing.co.uk", password: "Clinician@123",   role: "clinician"   },
 ];
 
-//  ICBs
 const ICBS = [
   { name: "NHS Greater Manchester ICB",         region: "North West",         code: "QOP" },
   { name: "NHS Lancashire & South Cumbria ICB", region: "North West",         code: "QE1" },
@@ -32,17 +148,15 @@ const ICBS = [
   { name: "NHS South Yorkshire ICB",            region: "Yorkshire & Humber", code: "QF7" },
 ];
 
-//  FEDERATIONS
 const FEDERATION_DATA = [
-  { icbName: "NHS Greater Manchester ICB", name: "Salford Together Federation",            type: "federation" },
-  { icbName: "NHS Greater Manchester ICB", name: "Manchester Health & Care Commissioning", type: "federation" },
-  { icbName: "NHS Greater Manchester ICB", name: "Stockport Together",                     type: "INT"        },
-  { icbName: "NHS Lancashire & South Cumbria ICB", name: "Lancashire & South Cumbria NHS Foundation Trust", type: "federation" },
-  { icbName: "NHS Lancashire & South Cumbria ICB", name: "Fylde Coast Medical Services",   type: "federation" },
-  { icbName: "NHS Cheshire & Merseyside ICB",      name: "Cheshire & Wirral Foundation Trust", type: "federation" },
+  { icbName: "NHS Greater Manchester ICB",         name: "Salford Together Federation",                          type: "federation" },
+  { icbName: "NHS Greater Manchester ICB",         name: "Manchester Health & Care Commissioning",               type: "federation" },
+  { icbName: "NHS Greater Manchester ICB",         name: "Stockport Together",                                   type: "INT"        },
+  { icbName: "NHS Lancashire & South Cumbria ICB", name: "Lancashire & South Cumbria NHS Foundation Trust",      type: "federation" },
+  { icbName: "NHS Lancashire & South Cumbria ICB", name: "Fylde Coast Medical Services",                        type: "federation" },
+  { icbName: "NHS Cheshire & Merseyside ICB",      name: "Cheshire & Wirral Foundation Trust",                  type: "federation" },
 ];
 
-//  PCNs
 const PCN_DATA = [
   {
     icbName: "NHS Greater Manchester ICB",
@@ -51,8 +165,7 @@ const PCN_DATA = [
       {
         name: "Salford Central PCN", annualSpend: 280000, contractType: "ARRS",
         xeroCode: "SAL1", xeroCategory: "PCN",
-        contractRenewalDate: new Date("2025-04-01"),
-        contractExpiryDate:  new Date("2026-03-31"),
+        contractRenewalDate: "2025-04-01", contractExpiryDate: "2026-03-31",
         ndaSigned: true, dsaSigned: true, mouReceived: true, welcomePackSent: true,
         notes: "Key PCN — 6 practices, high footfall area.",
         contacts: [
@@ -65,8 +178,7 @@ const PCN_DATA = [
       {
         name: "Wythenshawe & Benchill PCN", annualSpend: 195000, contractType: "EA",
         xeroCode: "WYT1", xeroCategory: "PCN",
-        contractRenewalDate: new Date("2025-06-01"),
-        contractExpiryDate:  new Date("2026-05-31"),
+        contractRenewalDate: "2025-06-01", contractExpiryDate: "2026-05-31",
         ndaSigned: true, dsaSigned: true, mouReceived: false, welcomePackSent: true,
         notes: "Growing PCN, recently added 2 new practices.",
         contacts: [
@@ -84,8 +196,7 @@ const PCN_DATA = [
       {
         name: "Preston City PCN", annualSpend: 142000, contractType: "Direct",
         xeroCode: "PRE1", xeroCategory: "PCN",
-        contractRenewalDate: new Date("2025-10-01"),
-        contractExpiryDate:  new Date("2026-09-30"),
+        contractRenewalDate: "2025-10-01", contractExpiryDate: "2026-09-30",
         ndaSigned: true, dsaSigned: true, mouReceived: true, welcomePackSent: true,
         notes: "Urban PCN — strong pharmacist engagement.",
         contacts: [
@@ -103,8 +214,7 @@ const PCN_DATA = [
       {
         name: "Liverpool South PCN", annualSpend: 220000, contractType: "ARRS",
         xeroCode: "LIV1", xeroCategory: "PCN",
-        contractRenewalDate: new Date("2026-01-01"),
-        contractExpiryDate:  new Date("2026-12-31"),
+        contractRenewalDate: "2026-01-01", contractExpiryDate: "2026-12-31",
         ndaSigned: true, dsaSigned: true, mouReceived: true, welcomePackSent: true,
         notes: "High-demand urban PCN.",
         contacts: [
@@ -118,7 +228,6 @@ const PCN_DATA = [
   },
 ];
 
-//  PRACTICES
 const PRACTICE_DATA = {
   "Salford Central PCN": [
     {
@@ -147,7 +256,7 @@ const PRACTICE_DATA = {
       systemAccessNotes: "EMIS Web — view only. ICE access requested.",
       systemAccess: [
         { system: "EMIS", code: "EMIS/1485567", status: "view_only" },
-        { system: "ICE",  status: "requested", requestedAt: new Date() },
+        { system: "ICE",  status: "requested"  },
       ],
     },
   ],
@@ -195,41 +304,38 @@ const PRACTICE_DATA = {
   ],
 };
 
-//  CONTACT HISTORY TEMPLATES
 const HISTORY_TEMPLATES = [
-  { type: "meeting",      subject: "Monthly performance review",    notes: "Discussed Q1 KPIs. All targets met. Follow-up scheduled."     },
-  { type: "call",         subject: "Clinician placement query",      notes: "PCN manager called regarding locum cover in March."            },
-  { type: "email",        subject: "Contract renewal discussion",    notes: "Sent updated terms. Awaiting sign-off from Clinical Director." },
-  { type: "complaint",    subject: "Complaint: delayed rota",        notes: "PCN reported delay in March rota. Resolved same day."          },
-  { type: "note",         subject: "Internal note — billing query",  notes: "Finance contact queried invoice. Confirmed correct."           },
-  { type: "document",     subject: "MOU signed and received",        notes: "MOU received and filed. Contract now complete."                },
-  { type: "system_access", subject: "System access request sent",   notes: "EMIS access requested for new clinical pharmacist."            },
+  { type: "meeting",       subject: "Monthly performance review",   notes: "Discussed Q1 KPIs. All targets met. Follow-up scheduled."     },
+  { type: "call",          subject: "Clinician placement query",     notes: "PCN manager called regarding locum cover in March."            },
+  { type: "email",         subject: "Contract renewal discussion",   notes: "Sent updated terms. Awaiting sign-off from Clinical Director." },
+  { type: "complaint",     subject: "Complaint: delayed rota",       notes: "PCN reported delay in March rota. Resolved same day."          },
+  { type: "note",          subject: "Internal note — billing query", notes: "Finance contact queried invoice. Confirmed correct."           },
+  { type: "document",      subject: "MOU signed and received",       notes: "MOU received and filed. Contract now complete."                },
+  { type: "system_access", subject: "System access request sent",    notes: "EMIS access requested for new clinical pharmacist."            },
 ];
 
-//  COMPLIANCE DOCUMENTS  (19 docs — CPS screenshots)
 const COMPLIANCE_DOCS = [
-  { name: "CV",                                         displayOrder: 7,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "DBS Check/Update Service",                   displayOrder: 2,  mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
-  { name: "Declaration of Interests Form",              displayOrder: 4,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Enhanced Access - Key Contacts (Mon-Fri 6:30pm-8pm - Sat 8am-6:30pm)", displayOrder: 0, mandatory: true, expirable: false, active: true, defaultExpiryDays: 0, defaultReminderDays: 0 },
-  { name: "East Lancashire Alliance - Enhanced Access - Key Contacts",             displayOrder: 0, mandatory: true, expirable: false, active: true, defaultExpiryDays: 0, defaultReminderDays: 0 },
-  { name: "Enhanced DBS Certificate (cert only)",       displayOrder: 2,  mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
-  { name: "Enhanced DBS Certitifcate",                  displayOrder: 10, mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Fitness to Practise Form",                   displayOrder: 3,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Health Screening Form",                      displayOrder: 5,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Indemnity Insurance Certificate",            displayOrder: 11, mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
-  { name: "Proof of Address",                           displayOrder: 9,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Reference 1",                                displayOrder: 1,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Reference 2",                                displayOrder: 2,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Reference Contact Details",                  displayOrder: 12, mandatory: false, expirable: false, active: false, defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Right to Work",                              displayOrder: 8,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Right to Work Check (expired)",              displayOrder: 5,  mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
-  { name: "Signed Confidentiality Statement",           displayOrder: 2,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Signed Data Protection Statement",           displayOrder: 1,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Signed Non-Disclosure Agreement",            displayOrder: 6,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "CV",                                                                    displayOrder: 7,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "DBS Check/Update Service",                                              displayOrder: 2,  mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
+  { name: "Declaration of Interests Form",                                         displayOrder: 4,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Enhanced Access - Key Contacts (Mon-Fri 6:30pm-8pm - Sat 8am-6:30pm)", displayOrder: 0,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "East Lancashire Alliance - Enhanced Access - Key Contacts",             displayOrder: 0,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Enhanced DBS Certificate (cert only)",                                  displayOrder: 2,  mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
+  { name: "Enhanced DBS Certitifcate",                                             displayOrder: 10, mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Fitness to Practise Form",                                              displayOrder: 3,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Health Screening Form",                                                 displayOrder: 5,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Indemnity Insurance Certificate",                                       displayOrder: 11, mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
+  { name: "Proof of Address",                                                      displayOrder: 9,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Reference 1",                                                           displayOrder: 1,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Reference 2",                                                           displayOrder: 2,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Reference Contact Details",                                             displayOrder: 12, mandatory: false, expirable: false, active: false, defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Right to Work",                                                         displayOrder: 8,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Right to Work Check (expired)",                                         displayOrder: 5,  mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
+  { name: "Signed Confidentiality Statement",                                      displayOrder: 2,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Signed Data Protection Statement",                                      displayOrder: 1,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "Signed Non-Disclosure Agreement",                                       displayOrder: 6,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
 ];
 
-//  DOCUMENT GROUPS  (7 groups — CPS screenshots)
 const DOCUMENT_GROUPS = [
   {
     name: "Archive/Expired",          displayOrder: 0, active: false,
@@ -275,299 +381,329 @@ const DOCUMENT_GROUPS = [
   },
 ];
 
-//  HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
 const rand    = arr => arr[Math.floor(Math.random() * arr.length)];
-const daysAgo = n   => new Date(Date.now() - n * 86_400_000);
+const daysAgo = n   => new Date(Date.now() - n * 86_400_000).toISOString();
 
+/**
+ * Builds a seeded groupDocument record for a PCN or Practice.
+ * Structure mirrors what the compliance controller reads at runtime.
+ */
 const makeSeedGroupRecord = ({ groupId, documentId, documentName, expirable, uploadedBy, daysBack = 10 }) => {
   const uploadedAt = daysAgo(daysBack);
-  const expiryDate = expirable ? new Date(Date.now() + 180 * 86_400_000) : null;
+  const expiryDate = expirable
+    ? new Date(Date.now() + 180 * 86_400_000).toISOString()
+    : null;
+
   const upload = {
-    uploadId: createId(),
-    fileName: `${String(documentName || "document").toLowerCase().replace(/[^a-z0-9]+/g, "_")}.pdf`,
-    fileUrl: `https://files.cps.local/${String(groupId)}/${String(documentId)}/${Date.now()}.pdf`,
-    mimeType: "application/pdf",
-    fileSize: 180000 + Math.floor(Math.random() * 70000),
-    status: "uploaded",
+    uploadId:   createId(),
+    fileName:   `${String(documentName || "document").toLowerCase().replace(/[^a-z0-9]+/g, "_")}.pdf`,
+    fileUrl:    `https://files.cps.local/${groupId}/${documentId}/${Date.now()}.pdf`,
+    mimeType:   "application/pdf",
+    fileSize:   180000 + Math.floor(Math.random() * 70000),
+    status:     "uploaded",
     uploadedAt,
     expiryDate,
     renewalDate: null,
-    notes: "Seeded upload record",
-    reference: `SEED-${String(documentId).slice(-6).toUpperCase()}`,
+    notes:      "Seeded upload record",
+    reference:  `SEED-${String(documentId).slice(-6).toUpperCase()}`,
     uploadedBy,
   };
 
   return {
-    group: groupId,
-    document: documentId,
-    fileName: upload.fileName,
-    fileUrl: upload.fileUrl,
-    mimeType: upload.mimeType,
-    fileSize: upload.fileSize,
-    status: upload.status,
-    uploadedAt: upload.uploadedAt,
-    expiryDate: upload.expiryDate,
-    renewalDate: null,
-    notes: upload.notes,
+    group:         groupId,
+    document:      documentId,
+    fileName:      upload.fileName,
+    fileUrl:       upload.fileUrl,
+    mimeType:      upload.mimeType,
+    fileSize:      upload.fileSize,
+    status:        upload.status,
+    uploadedAt:    upload.uploadedAt,
+    expiryDate:    upload.expiryDate,
+    renewalDate:   null,
+    notes:         upload.notes,
     uploadedBy,
     lastUpdatedBy: uploadedBy,
-    uploads: [upload],
+    uploads:       [upload],
   };
 };
 
-//  MAIN
+// ─────────────────────────────────────────────────────────────────────────────
+// MAIN SEED FUNCTION
+// ─────────────────────────────────────────────────────────────────────────────
 export async function runSeed() {
-  await connectDB();
-  console.log("✓ Postgres connected\n");
+  await initDB();
+  log.ok("PostgreSQL connected");
 
-  // ── 1. Users ──────────────────────────────────────────
-  console.log("── Seeding Users ──");
+  // ── 1. Users ──────────────────────────────────────────────────────────────
+  // Passwords are bcrypt-hashed (12 rounds) — same cost factor as authController.
+  // upsertRecord matches on 'email' so re-running seed won't create duplicates.
+  // ──────────────────────────────────────────────────────────────────────────
+  log.info("Seeding Users...");
   const seededUsers = [];
+
   for (const u of USERS) {
     const hashed = await bcrypt.hash(u.password, 12);
-    const user   = await User.findOneAndUpdate(
-      { email: u.email },
-      { ...u, password: hashed, mustChangePassword: false },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
+    const user   = await upsertRecord("user", "email", u.email.toLowerCase(), {
+      name:                u.name,
+      email:               u.email.trim().toLowerCase(),
+      password:            hashed,
+      role:                u.role,
+      isActive:            true,
+      mustChangePassword:  false,
+      isAnonymised:        false,
+      lastLogin:           null,
+    });
+
     seededUsers.push(user);
-    console.log(`  ✓ ${u.email} [${u.role}]`);
+    log.ok(`${u.email} [${u.role}]`);
   }
+
   const admin      = seededUsers.find(u => u.role === "super_admin");
   const clinicians = seededUsers.filter(u => u.role === "clinician");
 
-  // ── 2. ICBs ───────────────────────────────────────────
-  console.log("\n── Seeding ICBs ──");
+  // ── 2. ICBs ───────────────────────────────────────────────────────────────
+  log.info("\nSeeding ICBs...");
   const icbMap = {};
+
   for (const d of ICBS) {
-    const icb = await ICB.findOneAndUpdate(
-      { name: d.name },
-      { ...d, createdBy: admin._id },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
+    const icb = await upsertRecord("icb", "name", d.name, {
+      ...d,
+      createdBy: admin.id,
+    });
     icbMap[d.name] = icb;
-    console.log(`  ✓ ${d.name}`);
+    log.ok(d.name);
   }
 
-  // ── 3. Federations ────────────────────────────────────
-  console.log("\n── Seeding Federations ──");
+  // ── 3. Federations ────────────────────────────────────────────────────────
+  log.info("\nSeeding Federations...");
   const fedMap = {};
+
   for (const d of FEDERATION_DATA) {
     const icb = icbMap[d.icbName];
-    if (!icb) { console.warn(`  ⚠ ICB not found: ${d.icbName}`); continue; }
-    const fed = await Federation.findOneAndUpdate(
-      { name: d.name, icb: icb._id },
-      { name: d.name, icb: icb._id, type: d.type, createdBy: admin._id },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
+    if (!icb) { log.warn(`ICB not found: ${d.icbName}`); continue; }
+
+    const fed = await upsertRecord("federation", "name", d.name, {
+      name:      d.name,
+      icb:       icb.id,
+      type:      d.type,
+      createdBy: admin.id,
+    });
     fedMap[d.name] = fed;
-    console.log(`  ✓ ${d.name} [${d.type}]`);
+    log.ok(`${d.name} [${d.type}]`);
   }
 
-  // ── 4. PCNs ───────────────────────────────────────────
-  console.log("\n── Seeding PCNs ──");
+  // ── 4. PCNs ───────────────────────────────────────────────────────────────
+  log.info("\nSeeding PCNs...");
   const pcnMap = {};
+
   for (const group of PCN_DATA) {
     const icb = icbMap[group.icbName];
     const fed = fedMap[group.federationName];
-    if (!icb) { console.warn(`  ⚠ ICB not found: ${group.icbName}`); continue; }
+    if (!icb) { log.warn(`ICB not found: ${group.icbName}`); continue; }
+
     for (const d of group.pcns) {
-      const pcn = await PCN.findOneAndUpdate(
-        { name: d.name },
-        {
-          ...d,
-          icb: icb._id,
-          federation: fed?._id,
-          federationName: group.federationName,
-          restrictedClinicians: clinicians.length ? [clinicians[0]._id] : [],
-          createdBy: admin._id,
-        },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
-      );
+      const pcn = await upsertRecord("pcn", "name", d.name, {
+        ...d,
+        icb:                   icb.id,
+        federation:            fed?.id || null,
+        federationName:        group.federationName,
+        restrictedClinicians:  clinicians.length ? [clinicians[0].id] : [],
+        createdBy:             admin.id,
+      });
       pcnMap[d.name] = pcn;
-      console.log(`  ✓ ${d.name}`);
+      log.ok(d.name);
     }
   }
 
-  // ── 5. Practices ──────────────────────────────────────
-  console.log("\n── Seeding Practices ──");
+  // ── 5. Practices ──────────────────────────────────────────────────────────
+  // Matched on 'odsCode' — unique NHS identifier per practice.
+  // ──────────────────────────────────────────────────────────────────────────
+  log.info("\nSeeding Practices...");
   const practiceMap = {};
+
   for (const [pcnName, practices] of Object.entries(PRACTICE_DATA)) {
     const pcn = pcnMap[pcnName];
-    if (!pcn) { console.warn(`  ⚠ PCN not found: ${pcnName}`); continue; }
+    if (!pcn) { log.warn(`PCN not found: ${pcnName}`); continue; }
+
     for (const d of practices) {
-      const practice = await Practice.findOneAndUpdate(
-        { odsCode: d.odsCode },
-        { ...d, pcn: pcn._id, linkedClinicians: clinicians.map(c => c._id), createdBy: admin._id },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
-      );
+      const practice = await upsertRecord("practice", "odsCode", d.odsCode, {
+        ...d,
+        pcn:              pcn.id,
+        linkedClinicians: clinicians.map(c => c.id),
+        createdBy:        admin.id,
+      });
       practiceMap[d.name] = practice;
-      console.log(`  ✓ ${d.name}`);
+      log.ok(d.name);
     }
   }
 
-  // ── 6. Contact History ────────────────────────────────
-  console.log("\n── Seeding Contact History ──");
-  await ContactHistory.deleteMany({});
+  // ── 6. Contact History ────────────────────────────────────────────────────
+  // Deleted and re-seeded on every run (non-critical demo data).
+  // ──────────────────────────────────────────────────────────────────────────
+  log.info("\nSeeding Contact History...");
+  await deleteAllByModel("contact_history");
+
   for (const pcn of Object.values(pcnMap)) {
     for (let i = 0; i < 5; i++) {
       const t = rand(HISTORY_TEMPLATES);
-      await ContactHistory.create({
-        entityType: "PCN", entityId: pcn._id,
-        type: t.type, subject: t.subject, notes: t.notes,
-        date: daysAgo(Math.floor(Math.random() * 90)),
-        time: `${String(Math.floor(Math.random() * 8) + 9).padStart(2, "0")}:${Math.random() > 0.5 ? "00" : "30"}`,
-        starred: i === 0,
-        createdBy: admin._id,
+      await insertRecord("contact_history", {
+        entityType: "PCN",
+        entityId:   pcn.id,
+        type:       t.type,
+        subject:    t.subject,
+        notes:      t.notes,
+        date:       daysAgo(Math.floor(Math.random() * 90)),
+        time:       `${String(Math.floor(Math.random() * 8) + 9).padStart(2, "0")}:${Math.random() > 0.5 ? "00" : "30"}`,
+        starred:    i === 0,
+        createdBy:  admin.id,
       });
     }
-    console.log(` ✓ History → ${pcn.name}`);
+    log.ok(`History seeded for ${pcn.name}`);
   }
+
   for (const practice of Object.values(practiceMap)) {
     for (let i = 0; i < 3; i++) {
       const t = rand(HISTORY_TEMPLATES);
-      await ContactHistory.create({
-        entityType: "Practice", entityId: practice._id,
-        type: t.type, subject: t.subject, notes: t.notes,
-        date: daysAgo(Math.floor(Math.random() * 60)),
-        time: "10:00",
-        starred: false,
-        createdBy: admin._id,
+      await insertRecord("contact_history", {
+        entityType: "Practice",
+        entityId:   practice.id,
+        type:       t.type,
+        subject:    t.subject,
+        notes:      t.notes,
+        date:       daysAgo(Math.floor(Math.random() * 60)),
+        time:       "10:00",
+        starred:    false,
+        createdBy:  admin.id,
       });
     }
   }
-  console.log("  ✓ Practice history seeded");
+  log.ok("Practice history seeded");
 
-  // ── 7. Compliance Documents ───────────────────────────
-  console.log("\n── Seeding Compliance Documents ──");
+  // ── 7. Compliance Documents ───────────────────────────────────────────────
+  log.info("\nSeeding Compliance Documents...");
   const docMap = {};
+
   for (const d of COMPLIANCE_DOCS) {
-    const doc = await ComplianceDocument.findOneAndUpdate(
-      { name: d.name },
-      { ...d, createdBy: admin._id },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
+    const doc = await upsertRecord("compliance_document", "name", d.name, {
+      ...d,
+      createdBy: admin.id,
+    });
     docMap[d.name] = doc;
-    console.log(`  ✓ ${d.name}`);
+    log.ok(d.name);
   }
 
-  // ── 8. Document Groups ────────────────────────────────
-  console.log("\n── Seeding Document Groups ──");
+  // ── 8. Document Groups ────────────────────────────────────────────────────
+  // Each group stores an array of compliance_document IDs in its data.documents field.
+  // ──────────────────────────────────────────────────────────────────────────
+  log.info("\nSeeding Document Groups...");
   const groupMap = {};
-  for (const g of DOCUMENT_GROUPS) {
-    const docIds = g.docNames
-      .map(n => docMap[n]?._id)
-      .filter(Boolean);
 
-    const storedGroup = await DocumentGroup.findOneAndUpdate(
-      { name: g.name },
-      {
-        name: g.name,
-        displayOrder: g.displayOrder,
-        active: g.active,
-        documents: docIds,
-        createdBy: admin._id,
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
-    groupMap[g.name] = storedGroup;
-    console.log(`  ✓ ${g.name} (${docIds.length} docs)`);
+  for (const g of DOCUMENT_GROUPS) {
+    const docIds = g.docNames.map(n => docMap[n]?.id).filter(Boolean);
+
+    const group = await upsertRecord("document_group", "name", g.name, {
+      name:         g.name,
+      displayOrder: g.displayOrder,
+      active:       g.active,
+      documents:    docIds,
+      createdBy:    admin.id,
+    });
+    groupMap[g.name] = group;
+    log.ok(`${g.name} (${docIds.length} docs)`);
   }
 
-  // ── Done ──────────────────────────────────────────────
-  console.log("\nAssigning compliance groups and seeded groupDocuments...");
-  const docsById = {};
-  for (const doc of Object.values(docMap)) docsById[String(doc._id)] = doc;
+  // ── 9. Assign Compliance Groups to PCNs & Practices ───────────────────────
+  // groupDocuments are stored directly on the PCN/Practice record (same JSONB
+  // data column) — mirrors how the compliance controller reads them at runtime.
+  // ──────────────────────────────────────────────────────────────────────────
+  log.info("\nAssigning compliance groups...");
 
-  const pcnPrimaryGroup = groupMap["Clinical Staff Documents"];
+  const docsById         = Object.fromEntries(Object.values(docMap).map(d => [d.id, d]));
+  const pcnPrimaryGroup  = groupMap["Clinical Staff Documents"];
   const pcnSecondaryGroup = groupMap["DBS and Update"];
   const practicePrimaryGroup = groupMap["Non-Clinical Staff"] || pcnPrimaryGroup || null;
 
   for (const pcn of Object.values(pcnMap)) {
-    const selectedGroups = [pcnPrimaryGroup, pcnSecondaryGroup].filter(Boolean);
-    const selectedGroupIds = selectedGroups.map((group) => group._id);
-    const seededRecords = [];
+    const selectedGroups  = [pcnPrimaryGroup, pcnSecondaryGroup].filter(Boolean);
+    const selectedGroupIds = selectedGroups.map(g => g.id);
+    const seededRecords   = [];
 
     for (const group of selectedGroups) {
-      const docIds = (group.documents || []).map((id) => String(id)).filter(Boolean);
+      const docIds = (group.documents || []).filter(Boolean);
       if (!docIds.length) continue;
+
       const firstDocId = docIds[0];
-      const docDef = docsById[firstDocId];
-      seededRecords.push(
-        makeSeedGroupRecord({
-          groupId: group._id,
-          documentId: firstDocId,
-          documentName: docDef?.name || "Document",
-          expirable: !!docDef?.expirable,
-          uploadedBy: admin._id,
-          daysBack: 7,
-        })
-      );
+      const docDef     = docsById[firstDocId];
+
+      seededRecords.push(makeSeedGroupRecord({
+        groupId:      group.id,
+        documentId:   firstDocId,
+        documentName: docDef?.name || "Document",
+        expirable:    !!docDef?.expirable,
+        uploadedBy:   admin.id,
+        daysBack:     7,
+      }));
     }
 
-    await PCN.findByIdAndUpdate(
-      pcn._id,
-      {
-        $set: {
-          complianceGroups: selectedGroupIds,
-          complianceGroup: selectedGroupIds[0] || null,
-          groupDocuments: seededRecords,
-        },
-      },
-      { new: true, runValidators: false }
-    );
-    console.log(`  Seeded PCN groups -> ${pcn.name}`);
+    await updateRecord("pcn", pcn.id, {
+      complianceGroups: selectedGroupIds,
+      complianceGroup:  selectedGroupIds[0] || null,
+      groupDocuments:   seededRecords,
+    });
+    log.ok(`Compliance groups assigned to ${pcn.name}`);
   }
 
   for (const practice of Object.values(practiceMap)) {
     const seededRecords = [];
+
     if (practicePrimaryGroup) {
-      const docIds = (practicePrimaryGroup.documents || []).map((id) => String(id)).filter(Boolean);
-      if (docIds.length > 0) {
+      const docIds = (practicePrimaryGroup.documents || []).filter(Boolean);
+      if (docIds.length) {
         const firstDocId = docIds[0];
-        const docDef = docsById[firstDocId];
-        seededRecords.push(
-          makeSeedGroupRecord({
-            groupId: practicePrimaryGroup._id,
-            documentId: firstDocId,
-            documentName: docDef?.name || "Document",
-            expirable: !!docDef?.expirable,
-            uploadedBy: admin._id,
-            daysBack: 5,
-          })
-        );
+        const docDef     = docsById[firstDocId];
+
+        seededRecords.push(makeSeedGroupRecord({
+          groupId:      practicePrimaryGroup.id,
+          documentId:   firstDocId,
+          documentName: docDef?.name || "Document",
+          expirable:    !!docDef?.expirable,
+          uploadedBy:   admin.id,
+          daysBack:     5,
+        }));
       }
     }
 
-    await Practice.findByIdAndUpdate(
-      practice._id,
-      {
-        $set: {
-          complianceGroup: practicePrimaryGroup?._id || null,
-          groupDocuments: seededRecords,
-        },
-      },
-      { new: true, runValidators: false }
-    );
-    console.log(`  Seeded Practice group -> ${practice.name}`);
+    await updateRecord("practice", practice.id, {
+      complianceGroup: practicePrimaryGroup?.id || null,
+      groupDocuments:  seededRecords,
+    });
+    log.ok(`Compliance group assigned to ${practice.name}`);
   }
 
+  // ── Done ──────────────────────────────────────────────────────────────────
   await disconnectDB();
-  console.log("\n✓ Seed complete!");
-  console.log(
-    `  Users: ${USERS.length} | ICBs: ${ICBS.length} | ` +
+
+  log.ok("\nSeed complete!");
+  log.info(
+    `Users: ${USERS.length} | ICBs: ${ICBS.length} | ` +
     `Federations: ${Object.keys(fedMap).length} | PCNs: ${Object.keys(pcnMap).length} | ` +
     `Practices: ${Object.keys(practiceMap).length} | ` +
     `Compliance Docs: ${COMPLIANCE_DOCS.length} | Document Groups: ${DOCUMENT_GROUPS.length}`
   );
 }
 
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1].replace(/\\/g, "/")}`).href) {
-  runSeed().catch((err) => {
-    console.error(err);
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRY POINT — only runs when executed directly (node seed.js / npm run seed)
+// ─────────────────────────────────────────────────────────────────────────────
+if (
+  process.argv[1] &&
+  import.meta.url === new URL(`file://${process.argv[1].replace(/\\/g, "/")}`).href
+) {
+  runSeed().catch(err => {
+    log.error("Seed failed:", err.message);
     process.exit(1);
   });
 }
-
-
-
