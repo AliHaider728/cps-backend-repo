@@ -31,20 +31,8 @@ const log = {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GENERIC app_records HELPERS
-// All entities live in a single table:
-//   app_records (model TEXT, id UUID, data JSONB, created_at, updated_at)
-//
-// upsertRecord  — insert or update by a JSONB field value (e.g. email, name)
-// findByField   — SELECT one row WHERE data->>'field' = value
-// findById      — SELECT one row WHERE id = $id
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Insert a new row into app_records.
- * @param {string} model   - Entity type key (e.g. 'user', 'icb', 'pcn')
- * @param {object} payload - Data to store in the JSONB data column
- * @returns {object} { id, ...payload }
- */
 async function insertRecord(model, payload) {
   const id        = uuidv4();
   const timestamp = new Date().toISOString();
@@ -59,12 +47,6 @@ async function insertRecord(model, payload) {
   return { _id: id, id, ...data };
 }
 
-/**
- * Update an existing row's data column by merging a patch object.
- * @param {string} model
- * @param {string} id
- * @param {object} patch
- */
 async function updateRecord(model, id, patch) {
   const data = { ...patch, updatedAt: new Date().toISOString() };
 
@@ -77,13 +59,6 @@ async function updateRecord(model, id, patch) {
   );
 }
 
-/**
- * Find one record by a top-level JSONB field (case-insensitive for strings).
- * @param {string} model
- * @param {string} field  - JSONB key to search (e.g. 'email', 'name')
- * @param {string} value
- * @returns {object|null}
- */
 async function findByField(model, field, value) {
   const result = await query(
     `SELECT id, data, created_at, updated_at
@@ -99,14 +74,6 @@ async function findByField(model, field, value) {
   return { _id: row.id, id: row.id, ...row.data };
 }
 
-/**
- * Upsert a record: update if a matching field value exists, insert otherwise.
- * @param {string} model
- * @param {string} matchField - Field name to check for duplicates (e.g. 'email')
- * @param {string} matchValue - Value to look up
- * @param {object} payload    - Full data to store / merge
- * @returns {object} The final record (inserted or updated)
- */
 async function upsertRecord(model, matchField, matchValue, payload) {
   const existing = await findByField(model, matchField, matchValue);
 
@@ -118,16 +85,12 @@ async function upsertRecord(model, matchField, matchValue, payload) {
   return insertRecord(model, payload);
 }
 
-/**
- * Delete all rows for a given model — used to reset contact history on each run.
- * @param {string} model
- */
 async function deleteAllByModel(model) {
   await query(`DELETE FROM app_records WHERE model = $1`, [model]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SEED DATA — unchanged from original
+// SEED DATA
 // ─────────────────────────────────────────────────────────────────────────────
 
 const USERS = [
@@ -157,33 +120,33 @@ const FEDERATION_DATA = [
   { icbName: "NHS Cheshire & Merseyside ICB",      name: "Cheshire & Wirral Foundation Trust",                  type: "federation" },
 ];
 
-const PCN_DATA = [
+const CLIENT_DATA = [
   {
     icbName: "NHS Greater Manchester ICB",
     federationName: "Salford Together Federation",
-    pcns: [
+    clients: [
       {
-        name: "Salford Central PCN", annualSpend: 280000, contractType: "ARRS",
-        xeroCode: "SAL1", xeroCategory: "PCN",
+        name: "Salford Central Client", annualSpend: 280000, contractType: "ARRS",
+        xeroCode: "SAL1", xeroCategory: "Client",
         contractRenewalDate: "2025-04-01", contractExpiryDate: "2026-03-31",
         ndaSigned: true, dsaSigned: true, mouReceived: true, welcomePackSent: true,
-        notes: "Key PCN — 6 practices, high footfall area.",
+        notes: "Key Client — 6 practices, high footfall area.",
         contacts: [
-          { name: "Dr. Priya Sharma", role: "Clinical Director", email: "priya.sharma@salfordpcn.nhs.uk", phone: "0161 234 5678", type: "decision_maker" },
-          { name: "Kevin Walsh",      role: "PCN Manager",       email: "k.walsh@salfordpcn.nhs.uk",      phone: "0161 234 5679", type: "general"        },
-          { name: "Rachel Green",     role: "Finance Lead",      email: "r.green@salfordpcn.nhs.uk",      phone: "0161 234 5680", type: "finance"        },
+          { name: "Dr. Priya Sharma", role: "Clinical Director", email: "priya.sharma@salfordclient.nhs.uk", phone: "0161 234 5678", type: "decision_maker" },
+          { name: "Kevin Walsh",      role: "Client Manager",     email: "k.walsh@salfordclient.nhs.uk",      phone: "0161 234 5679", type: "general"        },
+          { name: "Rachel Green",     role: "Finance Lead",       email: "r.green@salfordclient.nhs.uk",      phone: "0161 234 5680", type: "finance"        },
         ],
         requiredSystems: { emis: true, ice: true, accurx: true, docman: true, vpn: true },
       },
       {
-        name: "Wythenshawe & Benchill PCN", annualSpend: 195000, contractType: "EA",
-        xeroCode: "WYT1", xeroCategory: "PCN",
+        name: "Wythenshawe & Benchill Client", annualSpend: 195000, contractType: "EA",
+        xeroCode: "WYT1", xeroCategory: "Client",
         contractRenewalDate: "2025-06-01", contractExpiryDate: "2026-05-31",
         ndaSigned: true, dsaSigned: true, mouReceived: false, welcomePackSent: true,
-        notes: "Growing PCN, recently added 2 new practices.",
+        notes: "Growing Client, recently added 2 new practices.",
         contacts: [
-          { name: "Dr. Mohammed Iqbal", role: "Clinical Director", email: "m.iqbal@wythpcn.nhs.uk", phone: "0161 945 1234", type: "decision_maker" },
-          { name: "Sandra Lee",         role: "Ops Manager",       email: "s.lee@wythpcn.nhs.uk",   phone: "0161 945 1235", type: "operations"     },
+          { name: "Dr. Mohammed Iqbal", role: "Clinical Director", email: "m.iqbal@wythclient.nhs.uk", phone: "0161 945 1234", type: "decision_maker" },
+          { name: "Sandra Lee",         role: "Ops Manager",       email: "s.lee@wythclient.nhs.uk",   phone: "0161 945 1235", type: "operations"     },
         ],
         requiredSystems: { emis: true, accurx: true },
       },
@@ -192,13 +155,13 @@ const PCN_DATA = [
   {
     icbName: "NHS Lancashire & South Cumbria ICB",
     federationName: "Lancashire & South Cumbria NHS Foundation Trust",
-    pcns: [
+    clients: [
       {
-        name: "Preston City PCN", annualSpend: 142000, contractType: "Direct",
-        xeroCode: "PRE1", xeroCategory: "PCN",
+        name: "Preston City Client", annualSpend: 142000, contractType: "Direct",
+        xeroCode: "PRE1", xeroCategory: "Client",
         contractRenewalDate: "2025-10-01", contractExpiryDate: "2026-09-30",
         ndaSigned: true, dsaSigned: true, mouReceived: true, welcomePackSent: true,
-        notes: "Urban PCN — strong pharmacist engagement.",
+        notes: "Urban Client — strong pharmacist engagement.",
         contacts: [
           { name: "Dr. Tom Brennan", role: "Clinical Director", email: "t.brennan@prestoncity.nhs.uk", phone: "01772 555 100", type: "decision_maker" },
           { name: "Lucy Parker",     role: "Finance Contact",   email: "l.parker@prestoncity.nhs.uk",  phone: "01772 555 101", type: "finance"        },
@@ -210,17 +173,17 @@ const PCN_DATA = [
   {
     icbName: "NHS Cheshire & Merseyside ICB",
     federationName: "Cheshire & Wirral Foundation Trust",
-    pcns: [
+    clients: [
       {
-        name: "Liverpool South PCN", annualSpend: 220000, contractType: "ARRS",
-        xeroCode: "LIV1", xeroCategory: "PCN",
+        name: "Liverpool South Client", annualSpend: 220000, contractType: "ARRS",
+        xeroCode: "LIV1", xeroCategory: "Client",
         contractRenewalDate: "2026-01-01", contractExpiryDate: "2026-12-31",
         ndaSigned: true, dsaSigned: true, mouReceived: true, welcomePackSent: true,
-        notes: "High-demand urban PCN.",
+        notes: "High-demand urban Client.",
         contacts: [
           { name: "Dr. Aarav Patel", role: "Clinical Director", email: "a.patel@livsouth.nhs.uk",  phone: "0151 233 4000", type: "decision_maker" },
-          { name: "Diane Morris",    role: "PCN Manager",       email: "d.morris@livsouth.nhs.uk", phone: "0151 233 4001", type: "general"        },
-          { name: "James Wong",      role: "Finance Lead",      email: "j.wong@livsouth.nhs.uk",   phone: "0151 233 4002", type: "finance"        },
+          { name: "Diane Morris",    role: "Client Manager",     email: "d.morris@livsouth.nhs.uk", phone: "0151 233 4001", type: "general"        },
+          { name: "James Wong",      role: "Finance Lead",       email: "j.wong@livsouth.nhs.uk",   phone: "0151 233 4002", type: "finance"        },
         ],
         requiredSystems: { systmOne: true, accurx: true, docman: true },
       },
@@ -229,7 +192,7 @@ const PCN_DATA = [
 ];
 
 const PRACTICE_DATA = {
-  "Salford Central PCN": [
+  "Salford Central Client": [
     {
       name: "Pendleton Medical Centre", odsCode: "P84001",
       address: "15 Broad Street", city: "Salford", postcode: "M6 5BN",
@@ -260,7 +223,7 @@ const PRACTICE_DATA = {
       ],
     },
   ],
-  "Preston City PCN": [
+  "Preston City Client": [
     {
       name: "Fishergate Hill Surgery", odsCode: "P82001",
       address: "Fishergate Hill", city: "Preston", postcode: "PR1 8JD",
@@ -286,7 +249,7 @@ const PRACTICE_DATA = {
       systemAccess: [{ system: "SystmOne", status: "pending" }],
     },
   ],
-  "Liverpool South PCN": [
+  "Liverpool South Client": [
     {
       name: "Speke Medical Centre", odsCode: "P83001",
       address: "Speke Road", city: "Liverpool", postcode: "L24 2SQ",
@@ -306,9 +269,9 @@ const PRACTICE_DATA = {
 
 const HISTORY_TEMPLATES = [
   { type: "meeting",       subject: "Monthly performance review",   notes: "Discussed Q1 KPIs. All targets met. Follow-up scheduled."     },
-  { type: "call",          subject: "Clinician placement query",     notes: "PCN manager called regarding locum cover in March."            },
+  { type: "call",          subject: "Clinician placement query",     notes: "Client manager called regarding locum cover in March."         },
   { type: "email",         subject: "Contract renewal discussion",   notes: "Sent updated terms. Awaiting sign-off from Clinical Director." },
-  { type: "complaint",     subject: "Complaint: delayed rota",       notes: "PCN reported delay in March rota. Resolved same day."          },
+  { type: "complaint",     subject: "Complaint: delayed rota",       notes: "Client reported delay in March rota. Resolved same day."       },
   { type: "note",          subject: "Internal note — billing query", notes: "Finance contact queried invoice. Confirmed correct."           },
   { type: "document",      subject: "MOU signed and received",       notes: "MOU received and filed. Contract now complete."                },
   { type: "system_access", subject: "System access request sent",    notes: "EMIS access requested for new clinical pharmacist."            },
@@ -387,10 +350,6 @@ const DOCUMENT_GROUPS = [
 const rand    = arr => arr[Math.floor(Math.random() * arr.length)];
 const daysAgo = n   => new Date(Date.now() - n * 86_400_000).toISOString();
 
-/**
- * Builds a seeded groupDocument record for a PCN or Practice.
- * Structure mirrors what the compliance controller reads at runtime.
- */
 const makeSeedGroupRecord = ({ groupId, documentId, documentName, expirable, uploadedBy, daysBack = 10 }) => {
   const uploadedAt = daysAgo(daysBack);
   const expiryDate = expirable
@@ -438,9 +397,6 @@ export async function runSeed() {
   log.ok("PostgreSQL connected");
 
   // ── 1. Users ──────────────────────────────────────────────────────────────
-  // Passwords are bcrypt-hashed (12 rounds) — same cost factor as authController.
-  // upsertRecord matches on 'email' so re-running seed won't create duplicates.
-  // ──────────────────────────────────────────────────────────────────────────
   log.info("Seeding Users...");
   const seededUsers = [];
 
@@ -495,43 +451,57 @@ export async function runSeed() {
     log.ok(`${d.name} [${d.type}]`);
   }
 
-  // ── 4. PCNs ───────────────────────────────────────────────────────────────
-  log.info("\nSeeding PCNs...");
-  const pcnMap = {};
+  // ── 4. Clients ────────────────────────────────────────────────────────────
+  // FIX: Store icb and federation as populated objects { _id, id, name }
+  // so frontend client.icb?.name and client.federation?.name resolve correctly.
+  // ──────────────────────────────────────────────────────────────────────────
+  log.info("\nSeeding Clients...");
+  const clientMap = {};
 
-  for (const group of PCN_DATA) {
+  for (const group of CLIENT_DATA) {
     const icb = icbMap[group.icbName];
     const fed = fedMap[group.federationName];
     if (!icb) { log.warn(`ICB not found: ${group.icbName}`); continue; }
 
-    for (const d of group.pcns) {
-      const pcn = await upsertRecord("pcn", "name", d.name, {
+    for (const d of group.clients) {
+      const client = await upsertRecord("client", "name", d.name, {
         ...d,
-        icb:                   icb.id,
-        federation:            fed?.id || null,
+        // ✅ FIX: store populated objects instead of raw UUID strings
+        icb: {
+          _id:  icb.id,
+          id:   icb.id,
+          name: icb.name,
+          code: icb.code,
+        },
+        federation: fed
+          ? { _id: fed.id, id: fed.id, name: fed.name, type: fed.type }
+          : null,
         federationName:        group.federationName,
         restrictedClinicians:  clinicians.length ? [clinicians[0].id] : [],
         createdBy:             admin.id,
       });
-      pcnMap[d.name] = pcn;
+      clientMap[d.name] = client;
       log.ok(d.name);
     }
   }
 
   // ── 5. Practices ──────────────────────────────────────────────────────────
-  // Matched on 'odsCode' — unique NHS identifier per practice.
-  // ──────────────────────────────────────────────────────────────────────────
   log.info("\nSeeding Practices...");
   const practiceMap = {};
 
-  for (const [pcnName, practices] of Object.entries(PRACTICE_DATA)) {
-    const pcn = pcnMap[pcnName];
-    if (!pcn) { log.warn(`PCN not found: ${pcnName}`); continue; }
+  for (const [clientName, practices] of Object.entries(PRACTICE_DATA)) {
+    const client = clientMap[clientName];
+    if (!client) { log.warn(`Client not found: ${clientName}`); continue; }
 
     for (const d of practices) {
       const practice = await upsertRecord("practice", "odsCode", d.odsCode, {
         ...d,
-        pcn:              pcn.id,
+        // ✅ FIX: store populated client object so practice detail pages work too
+        client: {
+          _id:  client.id,
+          id:   client.id,
+          name: client.name,
+        },
         linkedClinicians: clinicians.map(c => c.id),
         createdBy:        admin.id,
       });
@@ -541,17 +511,15 @@ export async function runSeed() {
   }
 
   // ── 6. Contact History ────────────────────────────────────────────────────
-  // Deleted and re-seeded on every run (non-critical demo data).
-  // ──────────────────────────────────────────────────────────────────────────
   log.info("\nSeeding Contact History...");
   await deleteAllByModel("contact_history");
 
-  for (const pcn of Object.values(pcnMap)) {
+  for (const client of Object.values(clientMap)) {
     for (let i = 0; i < 5; i++) {
       const t = rand(HISTORY_TEMPLATES);
       await insertRecord("contact_history", {
-        entityType: "PCN",
-        entityId:   pcn.id,
+        entityType: "Client",
+        entityId:   client.id,
         type:       t.type,
         subject:    t.subject,
         notes:      t.notes,
@@ -561,7 +529,7 @@ export async function runSeed() {
         createdBy:  admin.id,
       });
     }
-    log.ok(`History seeded for ${pcn.name}`);
+    log.ok(`History seeded for ${client.name}`);
   }
 
   for (const practice of Object.values(practiceMap)) {
@@ -596,8 +564,6 @@ export async function runSeed() {
   }
 
   // ── 8. Document Groups ────────────────────────────────────────────────────
-  // Each group stores an array of compliance_document IDs in its data.documents field.
-  // ──────────────────────────────────────────────────────────────────────────
   log.info("\nSeeding Document Groups...");
   const groupMap = {};
 
@@ -615,21 +581,18 @@ export async function runSeed() {
     log.ok(`${g.name} (${docIds.length} docs)`);
   }
 
-  // ── 9. Assign Compliance Groups to PCNs & Practices ───────────────────────
-  // groupDocuments are stored directly on the PCN/Practice record (same JSONB
-  // data column) — mirrors how the compliance controller reads them at runtime.
-  // ──────────────────────────────────────────────────────────────────────────
+  // ── 9. Assign Compliance Groups to Clients & Practices ───────────────────
   log.info("\nAssigning compliance groups...");
 
-  const docsById         = Object.fromEntries(Object.values(docMap).map(d => [d.id, d]));
-  const pcnPrimaryGroup  = groupMap["Clinical Staff Documents"];
-  const pcnSecondaryGroup = groupMap["DBS and Update"];
-  const practicePrimaryGroup = groupMap["Non-Clinical Staff"] || pcnPrimaryGroup || null;
+  const docsById               = Object.fromEntries(Object.values(docMap).map(d => [d.id, d]));
+  const clientPrimaryGroup     = groupMap["Clinical Staff Documents"];
+  const clientSecondaryGroup   = groupMap["DBS and Update"];
+  const practicePrimaryGroup   = groupMap["Non-Clinical Staff"] || clientPrimaryGroup || null;
 
-  for (const pcn of Object.values(pcnMap)) {
-    const selectedGroups  = [pcnPrimaryGroup, pcnSecondaryGroup].filter(Boolean);
+  for (const client of Object.values(clientMap)) {
+    const selectedGroups   = [clientPrimaryGroup, clientSecondaryGroup].filter(Boolean);
     const selectedGroupIds = selectedGroups.map(g => g.id);
-    const seededRecords   = [];
+    const seededRecords    = [];
 
     for (const group of selectedGroups) {
       const docIds = (group.documents || []).filter(Boolean);
@@ -648,12 +611,12 @@ export async function runSeed() {
       }));
     }
 
-    await updateRecord("pcn", pcn.id, {
+    await updateRecord("client", client.id, {
       complianceGroups: selectedGroupIds,
       complianceGroup:  selectedGroupIds[0] || null,
       groupDocuments:   seededRecords,
     });
-    log.ok(`Compliance groups assigned to ${pcn.name}`);
+    log.ok(`Compliance groups assigned to ${client.name}`);
   }
 
   for (const practice of Object.values(practiceMap)) {
@@ -689,14 +652,14 @@ export async function runSeed() {
   log.ok("\nSeed complete!");
   log.info(
     `Users: ${USERS.length} | ICBs: ${ICBS.length} | ` +
-    `Federations: ${Object.keys(fedMap).length} | PCNs: ${Object.keys(pcnMap).length} | ` +
+    `Federations: ${Object.keys(fedMap).length} | Clients: ${Object.keys(clientMap).length} | ` +
     `Practices: ${Object.keys(practiceMap).length} | ` +
     `Compliance Docs: ${COMPLIANCE_DOCS.length} | Document Groups: ${DOCUMENT_GROUPS.length}`
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ENTRY POINT — only runs when executed directly (node seed.js / npm run seed)
+// ENTRY POINT
 // ─────────────────────────────────────────────────────────────────────────────
 if (
   process.argv[1] &&
