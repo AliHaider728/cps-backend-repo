@@ -602,14 +602,15 @@ export const upsertMonthlyMeeting = async (req, res) => {
     const pcn = await PCN.findById(req.params.id);
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
 
-    const idx = pcn.monthlyMeetings.findIndex(m => m.month === month && m.type === type);
+    const meetings = Array.isArray(pcn.monthlyMeetings) ? [...pcn.monthlyMeetings] : [];
+    const idx = meetings.findIndex(m => m.month === month && m.type === type);
     if (idx > -1) {
-      Object.assign(pcn.monthlyMeetings[idx], { date, attendees, notes, status });
+      Object.assign(meetings[idx], { date, attendees, notes, status });
     } else {
-      pcn.monthlyMeetings.push({ month, date, type, attendees, notes, status });
+      meetings.push({ month, date, type, attendees, notes, status });
     }
-    await pcn.save();
-    res.json({ meetings: pcn.monthlyMeetings, message: "Meeting saved" });
+    await PCN.findByIdAndUpdate(req.params.id, { monthlyMeetings: meetings });
+    res.json({ meetings, message: "Meeting saved" });
   } catch (err) {
     console.error("upsertMonthlyMeeting ERROR:", err.message);
     res.status(500).json({ message: "Failed to save meeting" });
@@ -917,9 +918,17 @@ export const toggleStarred = async (req, res) => {
   try {
     const log = await ContactHistory.findById(req.params.logId);
     if (!log) return res.status(404).json({ message: "Log not found" });
-    log.starred = !log.starred;
-    await log.save();
-    res.json({ log, starred: log.starred, message: log.starred ? "Starred" : "Unstarred" });
+    const starred = !log.starred;
+    const updatedLog = await ContactHistory.findByIdAndUpdate(
+      req.params.logId,
+      { starred },
+      { new: true }
+    );
+    res.json({
+      log: updatedLog,
+      starred,
+      message: starred ? "Starred" : "Unstarred",
+    });
   } catch (err) {
     console.error("toggleStarred ERROR:", err.message);
     res.status(500).json({ message: "Failed to toggle star" });

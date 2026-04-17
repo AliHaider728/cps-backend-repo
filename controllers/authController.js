@@ -1,11 +1,164 @@
 import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
 import { rateLimit, ipKeyGenerator } from "express-rate-limit";
-import User from "../models/User.js";
-import AuditLog from "../models/AuditLog.js";
+import { v4 as uuidv4 } from "uuid";
+import { query } from "../config/db.js";
 import { getRequestIp, logAudit } from "../middleware/auditLogger.js";
 import { sendWelcomeEmail } from "../utils/sendEmail.js";
 
-// ── Per-IP login rate limiter  
+const USER_MODEL = "user";
+const AUDIT_MODEL = "audit_log";
+const PASSWORD_ROUNDS = 12;
+
+const ROLE_REDIRECTS = {
+  super_admin: "/dashboard/super-admin",
+  director: "/dashboard/director",
+  ops_manager: "/dashboard/ops-manager",
+  finance: "/dashboard/finance",
+  training: "/dashboard/training",
+  workforce: "/dashboard/workforce",
+  clinician: "/portal/clinician",
+};
+
+function mapUserRow(row) {
+  if (!row) return null;
+
+  return {
+    _id: row.id,
+    id: row.id,
+    ...(row.data || {}),
+    createdAt: row.data?.createdAt || row.created_at?.toISOString?.() || row.created_at || null,
+    updatedAt: row.data?.updatedAt || row.updated_at?.toISOString?.() || row.updated_at || null,
+  };
+}
+
+function sanitizeUser(user) {
+  if (!user) return null;
+
+  const { password, ...safeUser } = user;
+  return safeUser;
+}
+
+function buildAuthUser(user) {
+  return {
+    id: user._id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    mustChangePassword: user.mustChangePassword ?? false,
+    redirectTo: ROLE_REDIRECTS[user.role] || "/",
+  };
+}
+
+async function findUserById(id) {
+  const result = await query(
+    `
+      SELECT id, data, created_at, updated_at
+      FROM app_records
+      WHERE model = $1 AND id = $2
+      LIMIT 1
+    `,
+    [USER_MODEL, id]
+  );
+
+  return mapUserRow(result.rows[0]);
+}
+
+async function findUserByEmail(email) {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  if (!normalizedEmail) return null;
+
+  const result = await query(
+    `
+      SELECT id, data, created_at, updated_at
+      FROM app_records
+      WHERE model = $1
+      AND LOWER(COALESCE(data->>'email', '')) = $2
+      LIMIT 1
+    `,
+    [USER_MODEL, normalizedEmail]
+  );
+
+  return mapUserRow(result.rows[0]);
+}
+
+async function insertUser(userData) {
+  const id = uuidv4();
+  const timestamp = new Date().toISOString();
+  const payload = {
+    ...userData,
+    createdAt: userData.createdAt || timestamp,
+    updatedAt: userData.updatedAt || timestamp,
+  };
+
+  const result = await query(
+    `
+      INSERT INTO app_records (model, id, data, created_at, updated_at)
+      VALUES ($1, $2, $3::jsonb, NOW(), NOW())
+      RETURNING id, data, created_at, updated_at
+    `,
+    [USER_MODEL, id, JSON.stringify(payload)]
+  );
+
+  return mapUserRow(result.rows[0]);
+}
+
+async function updateUserRecord(id, patch) {
+  const payload = {
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const result = await query(
+    `
+      UPDATE app_records
+      SET data = COALESCE(data, '{}'::jsonb) || $3::jsonb,
+          updated_at = NOW()
+      WHERE model = $1 AND id = $2
+      RETURNING id, data, created_at, updated_at
+    `,
+    [USER_MODEL, id, JSON.stringify(payload)]
+  );
+
+  return mapUserRow(result.rows[0]);
+}
+
+async function deleteUserRecord(id) {
+  const result = await query(
+    `
+      DELETE FROM app_records
+      WHERE model = $1 AND id = $2
+      RETURNING id, data, created_at, updated_at
+    `,
+    [USER_MODEL, id]
+  );
+
+  return mapUserRow(result.rows[0]);
+}
+
+async function insertAuditRecord(req, data) {
+  await query(
+    `
+      INSERT INTO app_records (model, id, data, created_at, updated_at)
+      VALUES ($1, $2, $3::jsonb, NOW(), NOW())
+    `,
+    [
+      AUDIT_MODEL,
+      uuidv4(),
+      JSON.stringify({
+        ...data,
+        ip: data.ip || getRequestIp(req),
+        userAgent: data.userAgent || req.headers["user-agent"] || "",
+      }),
+    ]
+  );
+}
+
+const signToken = (id) =>
+  jwt.sign({ id }, process.env.JWT_SECRET, {
+    expiresIn: process.env.JWT_EXPIRES_IN || "7d",
+  });
+
 export const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
@@ -20,244 +173,317 @@ export const loginLimiter = rateLimit({
   },
 });
 
-// ── ROLE REDIRECTS  
-const ROLE_REDIRECTS = {
-  super_admin: "/dashboard/super-admin",
-  director:    "/dashboard/director",
-  ops_manager: "/dashboard/ops-manager",
-  finance:     "/dashboard/finance",
-  training:    "/dashboard/training",
-  workforce:   "/dashboard/workforce",
-  clinician:   "/portal/clinician",
-};
-
-// ── SIGN TOKEN  ────
-const signToken = (id) =>
-  jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || "7d",
-  });
-
-// ── LOGIN  ─────────
 export const login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password)
+    if (!email || !password) {
       return res.status(400).json({ message: "Email and password are required" });
+    }
 
-    const user = await User.findOne({ email }).select("+password");
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const user = await findUserByEmail(normalizedEmail);
+    const passwordMatches = user
+      ? await bcrypt.compare(String(password), user.password || "")
+      : false;
 
-    if (!user || !(await user.matchPassword(password))) {
-      await AuditLog.create({
-        action:    "LOGIN_FAILED",
-        resource:  "User",
-        detail:    `Failed login attempt for: ${email}`,
-        ip:        getRequestIp(req),
-        userAgent: req.headers["user-agent"] ?? "",
-        status:    "fail",
+    if (!user || !passwordMatches) {
+      await insertAuditRecord(req, {
+        action: "LOGIN_FAILED",
+        resource: "User",
+        detail: `Failed login attempt for: ${normalizedEmail}`,
+        status: "fail",
       });
+
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
-    if (!user.isActive) {
+    if (user.isActive === false) {
       req.user = user;
       await logAudit(req, "LOGIN_BLOCKED", "User", {
         resourceId: user._id,
-        detail:     "Login attempt on deactivated account",
-        status:     "fail",
+        detail: "Login attempt on deactivated account",
+        status: "fail",
       });
+
       return res.status(403).json({ message: "Account is deactivated. Contact admin." });
     }
 
-    user.lastLogin = new Date();
-    await user.save({ validateBeforeSave: false });
+    const updatedUser = await updateUserRecord(user._id, {
+      lastLogin: new Date().toISOString(),
+    });
 
-    const token = signToken(user._id);
-
-    req.user = user;
+    req.user = updatedUser || user;
     await logAudit(req, "LOGIN", "User", {
       resourceId: user._id,
-      detail:     `${user.name} logged in (${user.role})`,
+      detail: `${user.name} logged in (${user.role})`,
     });
 
     return res.json({
       success: true,
-      token,
-      user: {
-        id:                 user._id,
-        name:               user.name,
-        email:              user.email,
-        role:               user.role,
-        mustChangePassword: user.mustChangePassword,
-        redirectTo:         ROLE_REDIRECTS[user.role],
-      },
+      token: signToken(user._id),
+      user: buildAuthUser(req.user),
     });
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
+  } catch (error) {
+    console.error("[login ERROR]", error.message);
+    return res.status(500).json({ message: error.message });
   }
 };
 
-// ── GET ME   
-export const getMe = (req, res) => {
-  res.json({
+export const getMe = async (req, res) => {
+  return res.json({
     success: true,
-    user: {
-      id:                 req.user._id,
-      name:               req.user.name,
-      email:              req.user.email,
-      role:               req.user.role,
-      mustChangePassword: req.user.mustChangePassword,
-      redirectTo:         ROLE_REDIRECTS[req.user.role],
-    },
+    user: buildAuthUser(req.user),
   });
 };
 
-// ── LOGOUT   
 export const logout = async (req, res) => {
   await logAudit(req, "LOGOUT", "User", {
     resourceId: req.user._id,
-    detail:     `${req.user.name} logged out`,
+    detail: `${req.user.name} logged out`,
   });
-  res.json({ success: true, message: "Logged out successfully" });
+
+  return res.json({ success: true, message: "Logged out successfully" });
 };
 
-// ── GET ALL USERS  ─
 export const getAllUsers = async (req, res) => {
   try {
-    const users = await User.find({ isAnonymised: { $ne: true } }).sort({ createdAt: -1 });
-    res.json({ success: true, users });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
+    const result = await query(
+      `
+        SELECT id, data, created_at, updated_at
+        FROM app_records
+        WHERE model = $1
+        AND COALESCE((data->>'isAnonymised')::boolean, false) = false
+        ORDER BY created_at DESC
+      `,
+      [USER_MODEL]
+    );
+
+    const users = result.rows.map((row) => sanitizeUser(mapUserRow(row)));
+    return res.json({ success: true, users });
+  } catch (error) {
+    console.error("[getAllUsers ERROR]", error.message);
+    return res.status(500).json({ message: error.message });
   }
 };
 
-// ── CREATE USER  ───
 export const createUser = async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
-    if (!name || !email || !password || !role)
+
+    if (!name || !email || !password || !role) {
       return res.status(400).json({ message: "All fields required" });
+    }
 
-    const exists = await User.findOne({ email });
-    if (exists)
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const existingUser = await findUserByEmail(normalizedEmail);
+
+    if (existingUser) {
       return res.status(400).json({ message: "Email already registered" });
+    }
 
-    const user = await User.create({
-      name, email, password, role,
-      createdBy:          req.user._id,
+    const hashedPassword = await bcrypt.hash(String(password), PASSWORD_ROUNDS);
+    const user = await insertUser({
+      name: String(name).trim(),
+      email: normalizedEmail,
+      password: hashedPassword,
+      role,
+      isActive: true,
       mustChangePassword: true,
+      isAnonymised: false,
+      createdBy: req.user?._id || null,
+      lastLogin: null,
     });
 
     try {
-      await sendWelcomeEmail({ name, email, password, role });
-    } catch (emailErr) {
-      console.error("⚠️  Welcome email failed:", emailErr.message);
+      await sendWelcomeEmail({ name: user.name, email: user.email, password, role: user.role });
+    } catch (emailError) {
+      console.error("[createUser EMAIL ERROR]", emailError.message);
     }
 
     await logAudit(req, "CREATE_USER", "User", {
       resourceId: user._id,
-      detail:     `Created user ${user.name} with role ${user.role}`,
-      after:      { name: user.name, email: user.email, role: user.role },
+      detail: `Created user ${user.name} with role ${user.role}`,
+      after: {
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        isActive: user.isActive,
+      },
     });
 
-    return res.status(201).json({ success: true, user });
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
+    return res.status(201).json({
+      success: true,
+      user: sanitizeUser(user),
+    });
+  } catch (error) {
+    console.error("[createUser ERROR]", error.message);
+    return res.status(500).json({ message: error.message });
   }
 };
 
-// ── UPDATE USER  ───
 export const updateUser = async (req, res) => {
   try {
+    const { id } = req.params;
     const { name, email, role, isActive, password } = req.body;
-    const user = await User.findById(req.params.id).select("+password");
-    if (!user)
+
+    const existingUser = await findUserById(id);
+    if (!existingUser) {
       return res.status(404).json({ message: "User not found" });
-
-    const before = { name: user.name, email: user.email, role: user.role, isActive: user.isActive };
-
-    if (name)                          user.name     = name;
-    if (email)                         user.email    = email;
-    if (role)                          user.role     = role;
-    if (typeof isActive === "boolean") user.isActive = isActive;
-    if (password) {
-      user.password           = password;
-      user.mustChangePassword = true; // admin ne reset kiya → phir se change karna hoga
     }
 
-    await user.save();
+    const patch = {};
+
+    if (typeof name === "string" && name.trim()) {
+      patch.name = name.trim();
+    }
+
+    if (typeof email === "string" && email.trim()) {
+      const normalizedEmail = email.trim().toLowerCase();
+      const duplicateUser = await findUserByEmail(normalizedEmail);
+
+      if (duplicateUser && duplicateUser._id !== id) {
+        return res.status(400).json({ message: "Email already registered" });
+      }
+
+      patch.email = normalizedEmail;
+    }
+
+    if (typeof role === "string" && role.trim()) {
+      patch.role = role;
+    }
+
+    if (typeof isActive === "boolean") {
+      patch.isActive = isActive;
+    }
+
+    if (password) {
+      patch.password = await bcrypt.hash(String(password), PASSWORD_ROUNDS);
+      patch.mustChangePassword = true;
+    }
+
+    const updatedUser = await updateUserRecord(id, patch);
+    if (!updatedUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
 
     await logAudit(req, "UPDATE_USER", "User", {
-      resourceId: user._id,
-      detail:     `Updated user ${user.name}`,
-      before,
-      after: { name: user.name, email: user.email, role: user.role, isActive: user.isActive },
+      resourceId: updatedUser._id,
+      detail: `Updated user ${updatedUser.name}`,
+      before: {
+        name: existingUser.name,
+        email: existingUser.email,
+        role: existingUser.role,
+        isActive: existingUser.isActive,
+      },
+      after: {
+        name: updatedUser.name,
+        email: updatedUser.email,
+        role: updatedUser.role,
+        isActive: updatedUser.isActive,
+      },
     });
 
-    return res.json({ success: true, user });
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
+    return res.json({
+      success: true,
+      user: sanitizeUser(updatedUser),
+    });
+  } catch (error) {
+    console.error("[updateUser ERROR]", error.message);
+    return res.status(500).json({ message: error.message });
   }
 };
 
-// ── DELETE USER  
 export const deleteUser = async (req, res) => {
   try {
-    const user = await User.findByIdAndDelete(req.params.id);
-    if (!user)
+    const deletedUser = await deleteUserRecord(req.params.id);
+
+    if (!deletedUser) {
       return res.status(404).json({ message: "User not found" });
+    }
 
     await logAudit(req, "DELETE_USER", "User", {
-      resourceId: req.params.id,
-      detail:     `Deleted user ${user.name} (${user.email})`,
-      before:     { name: user.name, email: user.email, role: user.role },
+      resourceId: deletedUser._id,
+      detail: `Deleted user ${deletedUser.name} (${deletedUser.email})`,
+      before: {
+        name: deletedUser.name,
+        email: deletedUser.email,
+        role: deletedUser.role,
+      },
     });
 
     return res.json({ success: true, message: "User deleted" });
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
+  } catch (error) {
+    console.error("[deleteUser ERROR]", error.message);
+    return res.status(500).json({ message: error.message });
   }
 };
 
-// ── GDPR ANONYMISE  
 export const anonymiseUser = async (req, res) => {
   try {
-    const user = await User.findById(req.params.id);
-    if (!user)
-      return res.status(404).json({ message: "User not found" });
+    const existingUser = await findUserById(req.params.id);
 
-    await user.anonymise();
+    if (!existingUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const updatedUser = await updateUserRecord(existingUser._id, {
+      name: "Anonymised User",
+      email: `anonymised-${existingUser._id}@example.local`,
+      password: "",
+      isAnonymised: true,
+      isActive: false,
+    });
 
     await logAudit(req, "GDPR_ANONYMISE", "User", {
-      resourceId: req.params.id,
-      detail:     "User anonymised for GDPR compliance",
+      resourceId: existingUser._id,
+      detail: "User anonymised for GDPR compliance",
+      before: {
+        name: existingUser.name,
+        email: existingUser.email,
+        role: existingUser.role,
+      },
+      after: {
+        name: updatedUser?.name,
+        email: updatedUser?.email,
+        role: updatedUser?.role,
+        isActive: updatedUser?.isActive,
+      },
     });
 
     return res.json({ success: true, message: "User anonymised successfully" });
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
+  } catch (error) {
+    console.error("[anonymiseUser ERROR]", error.message);
+    return res.status(500).json({ message: error.message });
   }
 };
 
-// ── CHANGE PASSWORD (first-login force) 
 export const changePassword = async (req, res) => {
   try {
     const { newPassword } = req.body;
-    if (!newPassword || newPassword.length < 6)
+
+    if (!newPassword || String(newPassword).length < 6) {
       return res.status(400).json({ message: "Password must be at least 6 characters" });
+    }
 
-    const user = await User.findById(req.user._id).select("+password");
-    user.password           = newPassword;
-    user.mustChangePassword = false;
-    await user.save();
-
-    await logAudit(req, "CHANGE_PASSWORD", "User", {  // ← CHANGE_PASSWORD action
-      resourceId: user._id,
-      detail:     `${user.name} changed their password`,
+    const updatedUser = await updateUserRecord(req.user._id, {
+      password: await bcrypt.hash(String(newPassword), PASSWORD_ROUNDS),
+      mustChangePassword: false,
     });
 
-    res.json({ success: true, message: "Password changed successfully" });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
+    if (!updatedUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    req.user = updatedUser;
+    await logAudit(req, "CHANGE_PASSWORD", "User", {
+      resourceId: req.user._id,
+      detail: `${req.user.name} changed their password`,
+    });
+
+    return res.json({ success: true, message: "Password changed successfully" });
+  } catch (error) {
+    console.error("[changePassword ERROR]", error.message);
+    return res.status(500).json({ message: error.message });
   }
 };

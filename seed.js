@@ -12,9 +12,7 @@ import ComplianceDocument from "./models/ComplianceDocument.js";
 import DocumentGroup     from "./models/DocumentGroup.js";
 import { createId } from "./lib/ids.js";
 
-// ─────────────────────────────────────────────────────────
 //  USERS
-// ─────────────────────────────────────────────────────────
 const USERS = [
   { name: "Super Admin",     email: "superadmin@coreprescribing.co.uk", password: "SuperAdmin@123",  role: "super_admin" },
   { name: "Sarah Director",  email: "director@coreprescribing.co.uk",   password: "Director@123",    role: "director"    },
@@ -26,9 +24,7 @@ const USERS = [
   { name: "Dr. Sara Malik",  email: "clinician2@coreprescribing.co.uk", password: "Clinician@123",   role: "clinician"   },
 ];
 
-// ─────────────────────────────────────────────────────────
 //  ICBs
-// ─────────────────────────────────────────────────────────
 const ICBS = [
   { name: "NHS Greater Manchester ICB",         region: "North West",         code: "QOP" },
   { name: "NHS Lancashire & South Cumbria ICB", region: "North West",         code: "QE1" },
@@ -36,9 +32,7 @@ const ICBS = [
   { name: "NHS South Yorkshire ICB",            region: "Yorkshire & Humber", code: "QF7" },
 ];
 
-// ─────────────────────────────────────────────────────────
 //  FEDERATIONS
-// ─────────────────────────────────────────────────────────
 const FEDERATION_DATA = [
   { icbName: "NHS Greater Manchester ICB", name: "Salford Together Federation",            type: "federation" },
   { icbName: "NHS Greater Manchester ICB", name: "Manchester Health & Care Commissioning", type: "federation" },
@@ -48,9 +42,7 @@ const FEDERATION_DATA = [
   { icbName: "NHS Cheshire & Merseyside ICB",      name: "Cheshire & Wirral Foundation Trust", type: "federation" },
 ];
 
-// ─────────────────────────────────────────────────────────
 //  PCNs
-// ─────────────────────────────────────────────────────────
 const PCN_DATA = [
   {
     icbName: "NHS Greater Manchester ICB",
@@ -126,9 +118,7 @@ const PCN_DATA = [
   },
 ];
 
-// ─────────────────────────────────────────────────────────
 //  PRACTICES
-// ─────────────────────────────────────────────────────────
 const PRACTICE_DATA = {
   "Salford Central PCN": [
     {
@@ -205,9 +195,7 @@ const PRACTICE_DATA = {
   ],
 };
 
-// ─────────────────────────────────────────────────────────
 //  CONTACT HISTORY TEMPLATES
-// ─────────────────────────────────────────────────────────
 const HISTORY_TEMPLATES = [
   { type: "meeting",      subject: "Monthly performance review",    notes: "Discussed Q1 KPIs. All targets met. Follow-up scheduled."     },
   { type: "call",         subject: "Clinician placement query",      notes: "PCN manager called regarding locum cover in March."            },
@@ -218,9 +206,7 @@ const HISTORY_TEMPLATES = [
   { type: "system_access", subject: "System access request sent",   notes: "EMIS access requested for new clinical pharmacist."            },
 ];
 
-// ─────────────────────────────────────────────────────────
 //  COMPLIANCE DOCUMENTS  (19 docs — CPS screenshots)
-// ─────────────────────────────────────────────────────────
 const COMPLIANCE_DOCS = [
   { name: "CV",                                         displayOrder: 7,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
   { name: "DBS Check/Update Service",                   displayOrder: 2,  mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
@@ -243,9 +229,7 @@ const COMPLIANCE_DOCS = [
   { name: "Signed Non-Disclosure Agreement",            displayOrder: 6,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
 ];
 
-// ─────────────────────────────────────────────────────────
 //  DOCUMENT GROUPS  (7 groups — CPS screenshots)
-// ─────────────────────────────────────────────────────────
 const DOCUMENT_GROUPS = [
   {
     name: "Archive/Expired",          displayOrder: 0, active: false,
@@ -291,9 +275,7 @@ const DOCUMENT_GROUPS = [
   },
 ];
 
-// ─────────────────────────────────────────────────────────
 //  HELPERS
-// ─────────────────────────────────────────────────────────
 const rand    = arr => arr[Math.floor(Math.random() * arr.length)];
 const daysAgo = n   => new Date(Date.now() - n * 86_400_000);
 
@@ -333,9 +315,7 @@ const makeSeedGroupRecord = ({ groupId, documentId, documentName, expirable, upl
   };
 };
 
-// ─────────────────────────────────────────────────────────
 //  MAIN
-// ─────────────────────────────────────────────────────────
 export async function runSeed() {
   await connectDB();
   console.log("✓ Postgres connected\n");

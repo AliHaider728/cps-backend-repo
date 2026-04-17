@@ -3,81 +3,73 @@ import { Pool } from "pg";
 
 dotenv.config();
 
-let pool;
-let initPromise;
-let connected = false;
-
-function getDatabaseUrl() {
-  const value = process.env.DATABASE_URL;
-  if (!value) {
-    throw new Error("DATABASE_URL is not configured");
-  }
-  return value;
+if (!process.env.DATABASE_URL) {
+  throw new Error("DATABASE_URL is missing in environment variables");
 }
 
-function getPool() {
-  if (!pool) {
-    pool = new Pool({
-      connectionString: getDatabaseUrl(),
-      ssl: { rejectUnauthorized: false },
-      max: 10,
-    });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl:
+    process.env.NODE_ENV === "production"
+      ? { rejectUnauthorized: false }
+      : false,
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
+});
+
+export async function query(text, params = []) {
+  try {
+    return await pool.query(text, params);
+  } catch (err) {
+    console.error("[DB QUERY ERROR]", err.message);
+    throw err;
   }
-  return pool;
+}
+
+export async function ensureSchema() {
+  try {
+    await query(`
+      CREATE TABLE IF NOT EXISTS app_records (
+        model TEXT NOT NULL,
+        id TEXT NOT NULL,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (model, id)
+      );
+    `);
+  } catch (err) {
+    console.error("[DB SCHEMA ERROR]", err.message);
+    throw err;
+  }
+}
+
+export async function initDB() {
+  try {
+    await pool.query("SELECT 1");
+    await ensureSchema();
+    console.log("[DB] Connected & Ready");
+  } catch (err) {
+    console.error("[DB] Connection failed:", err.message);
+    throw err;
+  }
 }
 
 export function isDbConnected() {
-  return connected;
+  return true;
 }
-
-export async function query(text, params = []) {
-  const client = getPool();
-  return client.query(text, params);
-}
-
-async function ensureSchema() {
-  await query(`
-    CREATE TABLE IF NOT EXISTS app_records (
-      model TEXT NOT NULL,
-      id TEXT NOT NULL,
-      data JSONB NOT NULL DEFAULT '{}'::jsonb,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      PRIMARY KEY (model, id)
-    );
-  `);
-
-  await query(`
-    CREATE INDEX IF NOT EXISTS idx_app_records_model_updated
-    ON app_records (model, updated_at DESC);
-  `);
-}
-
-const connectDB = async () => {
-  if (!initPromise) {
-    initPromise = (async () => {
-      const client = getPool();
-      await client.query("SELECT 1");
-      await ensureSchema();
-      connected = true;
-      return client;
-    })().catch((err) => {
-      connected = false;
-      initPromise = null;
-      throw err;
-    });
-  }
-
-  return initPromise;
-};
 
 export async function disconnectDB() {
-  if (pool) {
+  try {
     await pool.end();
-    pool = null;
+    console.log("[DB] Disconnected cleanly");
+  } catch (err) {
+    console.error("[DB DISCONNECT ERROR]", err.message);
+    throw err;
   }
-  initPromise = null;
-  connected = false;
 }
+
+const connectDB = async () => initDB();
 
 export default connectDB;
