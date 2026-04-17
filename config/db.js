@@ -1,29 +1,55 @@
 import dotenv from "dotenv";
-import { Pool } from "pg";
+import pkg from "pg";
 
 dotenv.config();
 
+const { Pool } = pkg;
+
+// ─────────────────────────────
+// ENV CHECK
+// ─────────────────────────────
 if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL is missing in environment variables");
+  throw new Error("  DATABASE_URL is missing in environment variables");
 }
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // ✅ Vercel + Supabase dono ke liye zaroori
-  max: 10,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,
-});
+// ─────────────────────────────
+// GLOBAL POOL (IMPORTANT for serverless reuse)
+// ─────────────────────────────
+let pool;
 
+if (!global._pgPool) {
+  global._pgPool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+
+    ssl: {
+      rejectUnauthorized: false, //  Supabase required
+    },
+
+    // 🔥 Serverless optimized
+    max: 5, // low connections (important for Vercel)
+    idleTimeoutMillis: 20000,
+    connectionTimeoutMillis: 10000,
+  });
+}
+
+pool = global._pgPool;
+
+// ─────────────────────────────
+// QUERY FUNCTION
+// ─────────────────────────────
 export async function query(text, params = []) {
   try {
-    return await pool.query(text, params);
+    const res = await pool.query(text, params);
+    return res;
   } catch (err) {
-    console.error("[DB QUERY ERROR]", err.message);
+    console.error("  [DB QUERY ERROR]", err.message);
     throw err;
   }
 }
 
+// ─────────────────────────────
+// SCHEMA SETUP
+// ─────────────────────────────
 export async function ensureSchema() {
   try {
     await query(`
@@ -36,37 +62,57 @@ export async function ensureSchema() {
         PRIMARY KEY (model, id)
       );
     `);
+
+    console.log(" Schema ensured");
   } catch (err) {
-    console.error("[DB SCHEMA ERROR]", err.message);
+    console.error("  [DB SCHEMA ERROR]", err.message);
     throw err;
   }
 }
 
+// ─────────────────────────────
+// INIT DB (SAFE - run once)
+// ─────────────────────────────
+let isInitialized = false;
+
 export async function initDB() {
+  if (isInitialized) return;
+
   try {
     await pool.query("SELECT 1");
     await ensureSchema();
-    console.log("[DB] Connected & Ready");
+
+    isInitialized = true;
+
+    console.log("  [DB] Connected & Ready");
   } catch (err) {
-    console.error("[DB] Connection failed:", err.message);
+    console.error("  [DB] Connection failed:", err.message);
     throw err;
   }
 }
 
+// ─────────────────────────────
+// HEALTH CHECK HELPER
+// ─────────────────────────────
 export function isDbConnected() {
-  return true;
+  return !!pool;
 }
 
+// ─────────────────────────────
+// DISCONNECT (optional, mostly local)
+// ─────────────────────────────
 export async function disconnectDB() {
   try {
     await pool.end();
-    console.log("[DB] Disconnected cleanly");
+    global._pgPool = null;
+    console.log("  [DB] Disconnected cleanly");
   } catch (err) {
-    console.error("[DB DISCONNECT ERROR]", err.message);
+    console.error("  [DB DISCONNECT ERROR]", err.message);
     throw err;
   }
 }
 
-const connectDB = async () => initDB();
-
-export default connectDB;
+// ─────────────────────────────
+// DEFAULT EXPORT
+// ─────────────────────────────
+export default initDB;
