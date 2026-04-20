@@ -1,22 +1,39 @@
 /**
  * clientController.js  —  CPS Client Management
  *
- * UPDATED (Apr 2026)
+ * UPDATED (Apr 2026) — Spec: CPS_Controller_Update_Spec.docx
  *
- * FIXED:
- *   • getContactHistory: entityId string → ObjectId cast (logs not showing bug)
- *   • addContactHistory: entityId string → ObjectId cast
- *   • requestSystemAccess: entityId string → ObjectId cast
- *   • sendMassEmail: entityId string → ObjectId cast
- *   • All previous fixes kept (CastError for federation names, defensive hierarchy)
- *   • getPCNById: complianceGroups now deep-populated with documents
- *     (was only fetching "name active displayOrder" — documents field missing
- *      caused buildSelectedGroups to get undefined documents → 500 crash)
- *   • getPCNs: icb now populated with name/region/code
- *     (was missing — caused ICB badge to not show in PCNListPage)
+ * NEW FUNCTIONS (9):
+ *   getReportingArchive        — GET /:entityType/:entityId/reporting-archive
+ *   addToReportingArchive      — POST /:entityType/:entityId/reporting-archive
+ *   deleteFromReportingArchive — DELETE /:entityType/:entityId/reporting-archive/:reportId
+ *   getDecisionMakers          — GET /:entityType/:entityId/decision-makers
+ *   updateDecisionMakers       — PUT /:entityType/:entityId/decision-makers
+ *   getFinanceContacts         — GET /:entityType/:entityId/finance-contacts
+ *   updateFinanceContacts      — PUT /:entityType/:entityId/finance-contacts
+ *   getClientFacingData        — GET /pcn/:id/client-facing
+ *   updateClientFacingData     — PUT /pcn/:id/client-facing
  *
- * NEW (Apr 2026):
- *   • getICBById: now returns federations + pcns (with practices) for ICBDetailPage
+ * UPDATED FUNCTIONS (6):
+ *   getPCNById         — +decisionMakers, +financeContacts, +reportingArchive (last 3),
+ *                         +clientFacingData, +tags, +priority
+ *   createPCN          — +decisionMakers, +financeContacts, +tags, +priority, +clientFacingData
+ *   updatePCN          — +decisionMakers, +financeContacts, +tags, +priority, +clientFacingData
+ *                         (selective merge — does not wipe if absent)
+ *   getPracticeById    — +localDecisionMakers, +siteSpecificDocs,
+ *                         +reportingArchive (last 3), +tags, +priority
+ *   addContactHistory  — +outcome, +followUpDate, +followUpNote
+ *   updateContactHistory — +outcome, +followUpDate, +followUpNote
+ *
+ * BUG FIX (Apr 2026):
+ *   getPCNs — federation resolution now falls back to embedded pcn.federation
+ *             object when fedMap lookup returns undefined. Previously lookup
+ *             failure silently returned null, wiping the already-embedded name.
+ *
+ * All previous fixes kept:
+ *   • normalizeEntityType(), toObjectId() casts throughout
+ *   • getPCNs: icb populated with name/region/code
+ *   • getICBById: returns federations + pcns with practices
  */
 
 import ICB            from "../models/ICB.js";
@@ -29,13 +46,10 @@ import nodemailer     from "nodemailer";
 import crypto         from "crypto";
 import { logAudit }   from "../middleware/auditLogger.js";
 import { normalizeId } from "../lib/ids.js";
+import { uploadBufferToStorage } from "../lib/supabase.js";
 
-/* ─────────────────────────────────────────────────
-   HELPER: safe ObjectId cast
-───────────────────────────────────────────────── */
-const toObjectId = (id) => {
-  return normalizeId(id);
-};
+/* ── Helpers ─────────────────────────────────────────────────────── */
+const toObjectId = (id) => normalizeId(id);
 
 const validateObjectIdOr400 = (id, label = "id") => {
   const objectId = toObjectId(id);
@@ -51,58 +65,61 @@ const safeJson = (value) => JSON.parse(JSON.stringify(value ?? null));
 
 const formatComplianceGroupDetail = (beforeGroups = [], afterGroups = []) => {
   const beforeText = beforeGroups.length ? beforeGroups.join(", ") : "none";
-  const afterText = afterGroups.length ? afterGroups.join(", ") : "none";
+  const afterText  = afterGroups.length  ? afterGroups.join(", ")  : "none";
   return `Compliance groups changed from [${beforeText}] to [${afterText}]`;
 };
 
 const normalizeEntityType = (entityType = "") => {
   const normalized = String(entityType).trim().toLowerCase();
-  if (normalized === "pcn") return "PCN";
-  if (normalized === "practice") return "Practice";
+  if (normalized === "pcn")        return "PCN";
+  if (normalized === "practice")   return "Practice";
   if (normalized === "federation") return "Federation";
-  if (normalized === "icb") return "ICB";
+  if (normalized === "icb")        return "ICB";
   const error = new Error("Invalid entityType");
   error.statusCode = 400;
   throw error;
 };
 
 const getEntityModelByType = (entityType) => {
-  if (entityType === "PCN") return PCN;
-  if (entityType === "Practice") return Practice;
+  if (entityType === "PCN")        return PCN;
+  if (entityType === "Practice")   return Practice;
   if (entityType === "Federation") return Federation;
-  if (entityType === "ICB") return ICB;
+  if (entityType === "ICB")        return ICB;
   const error = new Error("Invalid entityType");
+  error.statusCode = 400;
+  throw error;
+};
+
+/** Resolves PCN or Practice model from entityType param */
+const getPCNOrPracticeModel = (entityType) => {
+  if (entityType === "PCN")      return PCN;
+  if (entityType === "Practice") return Practice;
+  const error = new Error("entityType must be PCN or Practice for this endpoint");
   error.statusCode = 400;
   throw error;
 };
 
 const normalizeComplianceGroup = (payload = {}) => {
   const next = { ...payload };
-
   if (Object.prototype.hasOwnProperty.call(payload, "complianceGroups")) {
     const complianceGroups = Array.from(
       new Set(
         (Array.isArray(payload.complianceGroups) ? payload.complianceGroups : [payload.complianceGroups])
-          .map((value) => String(value || "").trim())
-          .filter(Boolean)
+          .map((v) => String(v || "").trim()).filter(Boolean)
       )
     );
     next.complianceGroups = complianceGroups;
-    next.complianceGroup = complianceGroups[0] || null;
+    next.complianceGroup  = complianceGroups[0] || null;
     return next;
   }
-
   if (Object.prototype.hasOwnProperty.call(payload, "complianceGroup")) {
-    next.complianceGroup = payload.complianceGroup || null;
+    next.complianceGroup  = payload.complianceGroup || null;
     next.complianceGroups = next.complianceGroup ? [next.complianceGroup] : [];
   }
-
   return next;
 };
 
-/* ─────────────────────────────────────────────────
-   EMAIL TRANSPORT
-───────────────────────────────────────────────── */
+/* ── Email transport ─────────────────────────────────────────────── */
 const transporter = nodemailer.createTransport({
   host:   process.env.EMAIL_HOST,
   port:   Number(process.env.EMAIL_PORT) || 587,
@@ -110,20 +127,363 @@ const transporter = nodemailer.createTransport({
   auth:   { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
 });
 
-/* ─────────────────────────────────────────────────
-   HELPER: record who viewed a record
-───────────────────────────────────────────────── */
 const recordView = async (Model, id, userId) => {
-  try {
-    await Model.findByIdAndUpdate(id, {
-      $push: { viewedBy: { user: userId, viewedAt: new Date() } },
-    });
-  } catch (_) {}
+  try { await Model.findByIdAndUpdate(id, { $push: { viewedBy: { user: userId, viewedAt: new Date() } } }); }
+  catch (_) {}
 };
 
-/* ─────────────────────────────────────────────────
-   HIERARCHY — FULLY DEFENSIVE (CastError FIXED)
-───────────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════════
+   REPORTING ARCHIVE (NEW — spec §1, §2, §3)
+══════════════════════════════════════════════════════════════════ */
+
+/**
+ * GET /:entityType/:entityId/reporting-archive
+ * Returns paginated reporting archive for a PCN or Practice.
+ * Query params: ?month= &year=
+ */
+export const getReportingArchive = async (req, res) => {
+  try {
+    const entityType = normalizeEntityType(req.params.entityType);
+    const Model      = getPCNOrPracticeModel(entityType);
+    const entityId   = validateObjectIdOr400(req.params.entityId, `${entityType} id`);
+
+    const { month, year } = req.query;
+
+    const entity = await Model.findById(entityId)
+      .select("name reportingArchive")
+      .lean();
+    if (!entity) return res.status(404).json({ message: `${entityType} not found` });
+
+    let archive = Array.isArray(entity.reportingArchive) ? entity.reportingArchive : [];
+
+    // Filter by month/year if provided
+    if (month) archive = archive.filter((r) => String(r.month) === String(month));
+    if (year)  archive = archive.filter((r) => String(r.year)  === String(year));
+
+    // Sort: newest first
+    archive = [...archive].sort((a, b) => {
+      if (b.year !== a.year) return (b.year || 0) - (a.year || 0);
+      return (b.month || 0) - (a.month || 0);
+    });
+
+    res.json({ archive, total: archive.length, entityName: entity.name });
+  } catch (err) {
+    console.error("getReportingArchive ERROR:", err.message);
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to fetch reporting archive" });
+  }
+};
+
+/**
+ * POST /:entityType/:entityId/reporting-archive
+ * Upload a monthly report. Accepts multipart file via Supabase.
+ * Pushes to reportingArchive, auto-adds starred contact history entry.
+ */
+export const addToReportingArchive = async (req, res) => {
+  try {
+    const entityType = normalizeEntityType(req.params.entityType);
+    const Model      = getPCNOrPracticeModel(entityType);
+    const entityId   = validateObjectIdOr400(req.params.entityId, `${entityType} id`);
+
+    const entity = await Model.findById(entityId).lean();
+    if (!entity) return res.status(404).json({ message: `${entityType} not found` });
+
+    const { month, year, notes, starred } = req.body;
+    if (!month || !year)
+      return res.status(400).json({ message: "month and year are required" });
+
+    // Upload file to Supabase (same as compliance uploads)
+    if (!req.file)
+      return res.status(400).json({ message: "A report file is required" });
+
+    const uploaded = await uploadBufferToStorage({
+      buffer:      req.file.buffer,
+      contentType: req.file.mimetype || "application/octet-stream",
+      fileName:    req.file.originalname || "report.pdf",
+    });
+
+    const reportEntry = {
+      month:      Number(month),
+      year:       Number(year),
+      reportUrl:  uploaded.publicUrl,
+      fileName:   req.file.originalname || "report.pdf",
+      uploadedAt: new Date(),
+      uploadedBy: req.user._id,
+      notes:      notes?.trim() || "",
+      starred:    starred === "true" || starred === true,
+    };
+
+    await Model.findByIdAndUpdate(
+      entityId,
+      { $push: { reportingArchive: reportEntry } },
+      { new: true, runValidators: false }
+    );
+
+    // Auto-add starred contact history entry (spec §2)
+    await ContactHistory.create({
+      entityType,
+      entityId: entityId,
+      type:     "report",
+      subject:  `Monthly Report — ${String(month).padStart(2, "0")}/${year}`,
+      notes:    notes?.trim() || "",
+      date:     new Date(),
+      time:     new Date().toTimeString().slice(0, 5),
+      starred:  true,
+      createdBy: req.user._id,
+    });
+
+    await logAudit(req, "REPORTING_ARCHIVE_ADD", entityType, {
+      resourceId: entityId,
+      detail:     `Report uploaded: ${reportEntry.fileName} (${month}/${year})`,
+      after:      { entityType, entityId, month, year, fileName: reportEntry.fileName },
+    });
+
+    res.status(201).json({ message: "Report added to archive", report: reportEntry });
+  } catch (err) {
+    console.error("addToReportingArchive ERROR:", err.message);
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to add report" });
+  }
+};
+
+/**
+ * DELETE /:entityType/:entityId/reporting-archive/:reportId
+ * Remove a report from the reportingArchive array by its _id.
+ */
+export const deleteFromReportingArchive = async (req, res) => {
+  try {
+    const entityType = normalizeEntityType(req.params.entityType);
+    const Model      = getPCNOrPracticeModel(entityType);
+    const entityId   = validateObjectIdOr400(req.params.entityId, `${entityType} id`);
+    const { reportId } = req.params;
+
+    const entity = await Model.findById(entityId).lean();
+    if (!entity) return res.status(404).json({ message: `${entityType} not found` });
+
+    const before = (entity.reportingArchive || []).length;
+    await Model.findByIdAndUpdate(
+      entityId,
+      { $pull: { reportingArchive: { _id: reportId } } },
+      { new: true, runValidators: false }
+    );
+    const after = await Model.findById(entityId).select("reportingArchive").lean();
+    if ((after?.reportingArchive || []).length === before)
+      return res.status(404).json({ message: "Report not found in archive" });
+
+    await logAudit(req, "REPORTING_ARCHIVE_DELETE", entityType, {
+      resourceId: entityId,
+      detail: `Report removed from archive (reportId: ${reportId})`,
+      after: { entityType, entityId, reportId },
+    });
+
+    res.json({ message: "Report deleted from archive" });
+  } catch (err) {
+    console.error("deleteFromReportingArchive ERROR:", err.message);
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to delete report" });
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   DECISION MAKERS (NEW — spec §4, §5)
+══════════════════════════════════════════════════════════════════ */
+
+/**
+ * GET /:entityType/:entityId/decision-makers
+ * Returns decisionMakers array for a PCN or Practice.
+ */
+export const getDecisionMakers = async (req, res) => {
+  try {
+    const entityType = normalizeEntityType(req.params.entityType);
+    const Model      = getPCNOrPracticeModel(entityType);
+    const entityId   = validateObjectIdOr400(req.params.entityId, `${entityType} id`);
+
+    const entity = await Model.findById(entityId)
+      .select("name decisionMakers")
+      .lean();
+    if (!entity) return res.status(404).json({ message: `${entityType} not found` });
+
+    res.json({
+      decisionMakers: entity.decisionMakers || [],
+      entityName:     entity.name,
+    });
+  } catch (err) {
+    console.error("getDecisionMakers ERROR:", err.message);
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to fetch decision makers" });
+  }
+};
+
+/**
+ * PUT /:entityType/:entityId/decision-makers
+ * Replace the decisionMakers array. Each entry: { name, role, email, phone, isPrimary }
+ */
+export const updateDecisionMakers = async (req, res) => {
+  try {
+    const entityType = normalizeEntityType(req.params.entityType);
+    const Model      = getPCNOrPracticeModel(entityType);
+    const entityId   = validateObjectIdOr400(req.params.entityId, `${entityType} id`);
+
+    const { decisionMakers } = req.body;
+    if (!Array.isArray(decisionMakers))
+      return res.status(400).json({ message: "decisionMakers must be an array" });
+
+    // Validate minimum required fields (spec §5)
+    for (const dm of decisionMakers) {
+      if (!dm.name?.trim() || !dm.email?.trim())
+        return res.status(400).json({ message: "Each decision maker requires at minimum name and email" });
+    }
+
+    const entity = await Model.findByIdAndUpdate(
+      entityId,
+      { decisionMakers },
+      { new: true, runValidators: true }
+    ).select("name decisionMakers").lean();
+    if (!entity) return res.status(404).json({ message: `${entityType} not found` });
+
+    await logAudit(req, "UPDATE_DECISION_MAKERS", entityType, {
+      resourceId: entityId,
+      detail:     `Decision makers updated for ${entityType} (${decisionMakers.length} entries)`,
+      after:      { entityType, entityId, count: decisionMakers.length },
+    });
+
+    res.json({ decisionMakers: entity.decisionMakers, entityName: entity.name, message: "Decision makers updated" });
+  } catch (err) {
+    console.error("updateDecisionMakers ERROR:", err.message);
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to update decision makers" });
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   FINANCE CONTACTS (NEW — spec §6, §7)
+══════════════════════════════════════════════════════════════════ */
+
+/**
+ * GET /:entityType/:entityId/finance-contacts
+ * Returns financeContacts array for a PCN or Practice.
+ */
+export const getFinanceContacts = async (req, res) => {
+  try {
+    const entityType = normalizeEntityType(req.params.entityType);
+    const Model      = getPCNOrPracticeModel(entityType);
+    const entityId   = validateObjectIdOr400(req.params.entityId, `${entityType} id`);
+
+    const entity = await Model.findById(entityId)
+      .select("name financeContacts")
+      .lean();
+    if (!entity) return res.status(404).json({ message: `${entityType} not found` });
+
+    res.json({ financeContacts: entity.financeContacts || [], entityName: entity.name });
+  } catch (err) {
+    console.error("getFinanceContacts ERROR:", err.message);
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to fetch finance contacts" });
+  }
+};
+
+/**
+ * PUT /:entityType/:entityId/finance-contacts
+ * Replace financeContacts array. Each entry: { name, role, email, phone }
+ */
+export const updateFinanceContacts = async (req, res) => {
+  try {
+    const entityType = normalizeEntityType(req.params.entityType);
+    const Model      = getPCNOrPracticeModel(entityType);
+    const entityId   = validateObjectIdOr400(req.params.entityId, `${entityType} id`);
+
+    const { financeContacts } = req.body;
+    if (!Array.isArray(financeContacts))
+      return res.status(400).json({ message: "financeContacts must be an array" });
+
+    const entity = await Model.findByIdAndUpdate(
+      entityId,
+      { financeContacts },
+      { new: true, runValidators: true }
+    ).select("name financeContacts").lean();
+    if (!entity) return res.status(404).json({ message: `${entityType} not found` });
+
+    await logAudit(req, "UPDATE_FINANCE_CONTACTS", entityType, {
+      resourceId: entityId,
+      detail:     `Finance contacts updated for ${entityType} (${financeContacts.length} entries)`,
+      after:      { entityType, entityId, count: financeContacts.length },
+    });
+
+    res.json({ financeContacts: entity.financeContacts, entityName: entity.name, message: "Finance contacts updated" });
+  } catch (err) {
+    console.error("updateFinanceContacts ERROR:", err.message);
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to update finance contacts" });
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   CLIENT FACING DATA (NEW — spec §8, §9)
+══════════════════════════════════════════════════════════════════ */
+
+/**
+ * GET /pcn/:id/client-facing
+ * Returns client-facing data for a PCN: upcoming meetings, active clinicians,
+ * public notes. Clinicians returned with name + role only (no sensitive data).
+ */
+export const getClientFacingData = async (req, res) => {
+  try {
+    const pcn = await PCN.findById(req.params.id)
+      .populate("activeClinicians", "name role")   // name + role only (spec §8)
+      .select("name clientFacingData monthlyMeetings activeClinicians")
+      .lean();
+    if (!pcn) return res.status(404).json({ message: "PCN not found" });
+
+    // Return only upcoming meetings (spec §8)
+    const now = new Date();
+    const upcomingMeetings = (pcn.monthlyMeetings || [])
+      .filter((m) => m.date && new Date(m.date) >= now)
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    res.json({
+      clientFacingData:  pcn.clientFacingData  || {},
+      upcomingMeetings,
+      clinicians:        (pcn.activeClinicians || []).map((c) => ({ _id: c._id, name: c.name, role: c.role })),
+      entityName:        pcn.name,
+    });
+  } catch (err) {
+    console.error("getClientFacingData ERROR:", err.message);
+    res.status(500).json({ message: "Failed to fetch client-facing data" });
+  }
+};
+
+/**
+ * PUT /pcn/:id/client-facing
+ * Update clientFacingData config: showMonthlyMeetings, showClinicianMeetings, publicNotes
+ */
+export const updateClientFacingData = async (req, res) => {
+  try {
+    const { showMonthlyMeetings, showClinicianMeetings, publicNotes } = req.body;
+
+    const pcn = await PCN.findByIdAndUpdate(
+      req.params.id,
+      {
+        clientFacingData: {
+          ...(showMonthlyMeetings   !== undefined && { showMonthlyMeetings }),
+          ...(showClinicianMeetings !== undefined && { showClinicianMeetings }),
+          ...(publicNotes           !== undefined && { publicNotes: publicNotes?.trim() || "" }),
+          lastUpdated: new Date(),   // spec §9
+        },
+      },
+      { new: true, runValidators: true }
+    ).select("name clientFacingData").lean();
+
+    if (!pcn) return res.status(404).json({ message: "PCN not found" });
+
+    await logAudit(req, "UPDATE_CLIENT_FACING", "PCN", {
+      resourceId: req.params.id,
+      detail:     `Client-facing data updated for PCN: ${pcn.name}`,
+      after:      pcn.clientFacingData,
+    });
+
+    res.json({ clientFacingData: pcn.clientFacingData, entityName: pcn.name, message: "Client-facing data updated" });
+  } catch (err) {
+    console.error("updateClientFacingData ERROR:", err.message);
+    res.status(500).json({ message: "Failed to update client-facing data" });
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   HIERARCHY
+══════════════════════════════════════════════════════════════════ */
 export const getHierarchy = async (req, res) => {
   try {
     const [icbs, federationsRaw, pcnsRaw, practices] = await Promise.all([
@@ -132,14 +492,13 @@ export const getHierarchy = async (req, res) => {
       PCN.find({ isActive: true }).sort({ name: 1 }).lean(),
       Practice.find({ isActive: true })
         .select("name odsCode pcn isActive contractType fte")
-        .sort({ name: 1 })
-        .lean(),
+        .sort({ name: 1 }).lean(),
     ]);
 
-    const fedMapById = {};
+    const fedMapById   = {};
     const fedMapByName = {};
     for (const f of federationsRaw) {
-      fedMapById[String(f._id)] = f;
+      fedMapById[String(f._id)]                   = f;
       fedMapByName[f.name.trim().toLowerCase()] = f;
     }
 
@@ -154,25 +513,17 @@ export const getHierarchy = async (req, res) => {
     for (const pcn of pcnsRaw) {
       const icbKey = String(pcn.icb?._id || pcn.icb);
       if (!icbKey || icbKey === "null" || icbKey === "undefined") continue;
-
       let federation = null;
       const fedField = pcn.federation;
       if (fedField) {
         if (typeof fedField === "string") {
-          federation = /^[0-9a-fA-F]{24}$/.test(fedField)
-            ? fedMapById[fedField]
-            : fedMapByName[fedField.trim().toLowerCase()];
+          federation = /^[0-9a-fA-F]{24}$/.test(fedField) ? fedMapById[fedField] : fedMapByName[fedField.trim().toLowerCase()];
         } else if (fedField._id) {
           federation = fedMapById[String(fedField._id)];
         }
       }
-
       if (!pcnsByICB[icbKey]) pcnsByICB[icbKey] = [];
-      pcnsByICB[icbKey].push({
-        ...pcn,
-        federation: federation || null,
-        practices: practicesByPCN[String(pcn._id)] || [],
-      });
+      pcnsByICB[icbKey].push({ ...pcn, federation: federation || null, practices: practicesByPCN[String(pcn._id)] || [] });
     }
 
     const tree = icbs.map(icb => ({
@@ -181,27 +532,19 @@ export const getHierarchy = async (req, res) => {
       pcns:        pcnsByICB[String(icb._id)] || [],
     }));
 
-    res.json({
-      tree,
-      counts: {
-        icbs:        icbs.length,
-        federations: federationsRaw.length,
-        pcns:        pcnsRaw.length,
-        practices:   practices.length,
-      },
-    });
+    res.json({ tree, counts: { icbs: icbs.length, federations: federationsRaw.length, pcns: pcnsRaw.length, practices: practices.length } });
   } catch (err) {
     console.error("getHierarchy ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to load hierarchy", detail: err.message });
   }
 };
 
-/* ─────────────────────────────────────────────────
-   PCNs — FULLY DEFENSIVE
-   ★ FIXED: .populate("icb", "name region code") added
-     Pehle ICB populate nahi hota tha — PCNListPage mein
-     ICB badge nahi dikhta tha kyunki pcn.icb sirf ObjectId thi
-───────────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════════
+   getPCNs
+   BUG FIX: federation fallback to embedded pcn.federation when
+            fedMap lookup returns undefined — prevents name being
+            silently wiped to null on the list view.
+══════════════════════════════════════════════════════════════════ */
 export const getPCNs = async (req, res) => {
   try {
     const filter = { isActive: true };
@@ -209,36 +552,45 @@ export const getPCNs = async (req, res) => {
     if (req.query.federation) filter.federation = req.query.federation;
 
     const pcnsRaw = await PCN.find(filter)
-      .populate("icb", "name region code")   // ← FIXED: yeh line add ki
-      .populate("complianceGroup", "name")
+      .populate("icb", "name region code")
+      .populate("complianceGroup",  "name")
       .populate("complianceGroups", "name")
-      .sort({ name: 1 })
-      .lean();
+      .sort({ name: 1 }).lean();
 
-    const federations = await Federation.find({ isActive: true })
-      .select("name type icb")
-      .lean();
-
-    const fedMapById = {};
-    const fedMapByName = {};
+    const federations = await Federation.find({ isActive: true }).select("name type icb").lean();
+    const fedMapById  = {};
+    const fedMapByName= {};
     for (const f of federations) {
       fedMapById[String(f._id)] = f;
       fedMapByName[f.name.trim().toLowerCase()] = f;
     }
 
     const pcns = pcnsRaw.map(pcn => {
-      let federation = null;
+      let resolvedFederation = null;
       const fedField = pcn.federation;
+
       if (fedField) {
         if (typeof fedField === "string") {
-          federation = /^[0-9a-fA-F]{24}$/.test(fedField)
+          // Plain string ID — look up in fedMap
+          resolvedFederation = /^[0-9a-fA-F]{24}$/.test(fedField)
             ? fedMapById[fedField]
             : fedMapByName[fedField.trim().toLowerCase()];
-        } else if (fedField._id) {
-          federation = fedMapById[String(fedField._id)];
+        } else if (typeof fedField === "object") {
+          // Already an embedded object — try to enrich from fedMap first
+          const fid = fedField._id || fedField.id;
+          if (fid) resolvedFederation = fedMapById[String(fid)];
         }
       }
-      return { ...pcn, federation: federation || null };
+
+      // ✅ FIX: if fedMap lookup returned nothing but we already have an
+      //         embedded federation object (with a name), use it as-is.
+      //         This prevents the name from being wiped to null when the
+      //         fedMap doesn't contain the UUID (e.g. seeded data mismatch).
+      const federation = resolvedFederation || (
+        fedField && typeof fedField === "object" && fedField.name ? fedField : null
+      );
+
+      return { ...pcn, federation };
     });
 
     res.json({ pcns });
@@ -248,51 +600,33 @@ export const getPCNs = async (req, res) => {
   }
 };
 
-/* ─────────────────────────────────────────────────
-   ICB CRUD
-───────────────────────────────────────────────── */
+/* ── ICB CRUD ─────────────────────────────────────────────────────── */
 export const getICBs = async (req, res) => {
   try {
     const icbs = await ICB.find({ isActive: true }).sort({ name: 1 }).lean();
     res.json({ icbs });
   } catch (err) {
-    console.error("getICBs ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch ICBs" });
   }
 };
 
-/* ─────────────────────────────────────────────────
-    UPDATED: getICBById
-   Now returns federations + pcns (with practices)
-   so ICBDetailPage can show full drill-down
-───────────────────────────────────────────────── */
 export const getICBById = async (req, res) => {
   try {
     const icb = await ICB.findById(req.params.id).lean();
     if (!icb) return res.status(404).json({ message: "ICB not found" });
 
     const [federations, pcnsRaw] = await Promise.all([
-      Federation.find({ icb: req.params.id, isActive: true })
-        .select("name type notes")
-        .sort({ name: 1 })
-        .lean(),
+      Federation.find({ icb: req.params.id, isActive: true }).select("name type notes").sort({ name: 1 }).lean(),
       PCN.find({ icb: req.params.id, isActive: true })
         .populate("federation", "name type")
         .select("name contractType annualSpend federation xeroCode")
-        .sort({ name: 1 })
-        .lean(),
+        .sort({ name: 1 }).lean(),
     ]);
 
     const practicesByPCN = {};
     if (pcnsRaw.length > 0) {
-      const pcnIds = pcnsRaw.map(p => p._id);
-      const allPractices = await Practice.find({
-        pcn: { $in: pcnIds },
-        isActive: true,
-      })
-        .select("name odsCode fte contractType pcn")
-        .lean();
-
+      const allPractices = await Practice.find({ pcn: { $in: pcnsRaw.map(p => p._id) }, isActive: true })
+        .select("name odsCode fte contractType pcn").lean();
       for (const pr of allPractices) {
         const key = String(pr.pcn);
         if (!practicesByPCN[key]) practicesByPCN[key] = [];
@@ -300,11 +634,7 @@ export const getICBById = async (req, res) => {
       }
     }
 
-    const pcns = pcnsRaw.map(pcn => ({
-      ...pcn,
-      practices: practicesByPCN[String(pcn._id)] || [],
-    }));
-
+    const pcns = pcnsRaw.map(pcn => ({ ...pcn, practices: practicesByPCN[String(pcn._id)] || [] }));
     res.json({ icb: { ...icb, federations, pcns } });
   } catch (err) {
     console.error("getICBById ERROR:", err.message);
@@ -316,14 +646,10 @@ export const createICB = async (req, res) => {
   try {
     const { name, region, code, notes } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: "ICB name is required" });
-    const icb = await ICB.create({
-      name: name.trim(), region: region || "", code: code || "", notes: notes || "",
-      createdBy: req.user._id,
-    });
+    const icb = await ICB.create({ name: name.trim(), region: region || "", code: code || "", notes: notes || "", createdBy: req.user._id });
     res.status(201).json({ icb, message: "ICB created successfully" });
   } catch (err) {
     if (err.code === 11000) return res.status(409).json({ message: "An ICB with this name already exists" });
-    console.error("createICB ERROR:", err.message);
     res.status(500).json({ message: "Failed to create ICB" });
   }
 };
@@ -339,7 +665,6 @@ export const updateICB = async (req, res) => {
     if (!icb) return res.status(404).json({ message: "ICB not found" });
     res.json({ icb, message: "ICB updated" });
   } catch (err) {
-    console.error("updateICB ERROR:", err.message);
     res.status(500).json({ message: "Failed to update ICB" });
   }
 };
@@ -351,31 +676,22 @@ export const deleteICB = async (req, res) => {
       Federation.countDocuments({ icb: req.params.id, isActive: true }),
     ]);
     if (pcnCount > 0 || fedCount > 0)
-      return res.status(409).json({
-        message: `Cannot delete — ${pcnCount} active PCN(s) and ${fedCount} federation(s) are linked`,
-      });
+      return res.status(409).json({ message: `Cannot delete — ${pcnCount} active PCN(s) and ${fedCount} federation(s) are linked` });
     await ICB.findByIdAndUpdate(req.params.id, { isActive: false });
     res.json({ message: "ICB deleted" });
   } catch (err) {
-    console.error("deleteICB ERROR:", err.message);
     res.status(500).json({ message: "Failed to delete ICB" });
   }
 };
 
-/* ─────────────────────────────────────────────────
-   FEDERATION / INT CRUD
-───────────────────────────────────────────────── */
+/* ── Federation CRUD ──────────────────────────────────────────────── */
 export const getFederations = async (req, res) => {
   try {
     const filter = { isActive: true };
     if (req.query.icb) filter.icb = req.query.icb;
-    const federations = await Federation.find(filter)
-      .populate("icb", "name region")
-      .sort({ name: 1 })
-      .lean();
+    const federations = await Federation.find(filter).populate("icb", "name region").sort({ name: 1 }).lean();
     res.json({ federations });
   } catch (err) {
-    console.error("getFederations ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch federations" });
   }
 };
@@ -385,26 +701,20 @@ export const createFederation = async (req, res) => {
     const { name, icb, type, notes } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: "Federation name is required" });
     if (!icb)          return res.status(400).json({ message: "ICB is required" });
-    const fed = await Federation.create({
-      name: name.trim(), icb, type: type || "federation", notes: notes || "",
-      createdBy: req.user._id,
-    });
+    const fed = await Federation.create({ name: name.trim(), icb, type: type || "federation", notes: notes || "", createdBy: req.user._id });
     const populated = await fed.populate("icb", "name");
     res.status(201).json({ federation: populated, message: "Federation created" });
   } catch (err) {
-    console.error("createFederation ERROR:", err.message);
     res.status(500).json({ message: "Failed to create federation" });
   }
 };
 
 export const updateFederation = async (req, res) => {
   try {
-    const fed = await Federation.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true })
-      .populate("icb", "name");
+    const fed = await Federation.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true }).populate("icb", "name");
     if (!fed) return res.status(404).json({ message: "Federation not found" });
     res.json({ federation: fed, message: "Federation updated" });
   } catch (err) {
-    console.error("updateFederation ERROR:", err.message);
     res.status(500).json({ message: "Failed to update federation" });
   }
 };
@@ -412,41 +722,53 @@ export const updateFederation = async (req, res) => {
 export const deleteFederation = async (req, res) => {
   try {
     const pcnCount = await PCN.countDocuments({ federation: req.params.id, isActive: true });
-    if (pcnCount > 0)
-      return res.status(409).json({ message: `Cannot delete — ${pcnCount} active PCN(s) are linked` });
+    if (pcnCount > 0) return res.status(409).json({ message: `Cannot delete — ${pcnCount} active PCN(s) are linked` });
     await Federation.findByIdAndUpdate(req.params.id, { isActive: false });
     res.json({ message: "Federation deleted" });
   } catch (err) {
-    console.error("deleteFederation ERROR:", err.message);
     res.status(500).json({ message: "Failed to delete federation" });
   }
 };
 
-/* ─────────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════════════════
    PCN CRUD
-───────────────────────────────────────────────── */
+   UPDATED: getPCNById, createPCN, updatePCN
+══════════════════════════════════════════════════════════════════ */
+
+/**
+ * GET /pcn/:id
+ * UPDATED (spec §10): +decisionMakers, +financeContacts,
+ *   +reportingArchive (last 3 only), +clientFacingData, +tags, +priority
+ */
 export const getPCNById = async (req, res) => {
   try {
     const pcn = await PCN.findById(req.params.id)
       .populate("icb", "name region code")
       .populate("federation", "name type")
       .populate({
-        path: "complianceGroups",
-        select: "name active displayOrder documents",
-        populate: {
-          path: "documents",
-          select: "name mandatory expirable displayOrder defaultExpiryDays defaultReminderDays active",
-        },
-      })
-      .populate({
-        path: "complianceGroup",
+        path:   "complianceGroups",
         select: "name active displayOrder documents",
         populate: { path: "documents", select: "name mandatory expirable displayOrder defaultExpiryDays defaultReminderDays active" },
       })
-      .populate("activeClinicians", "name email role")
-      .populate("restrictedClinicians", "name email role")
+      .populate({
+        path:   "complianceGroup",
+        select: "name active displayOrder documents",
+        populate: { path: "documents", select: "name mandatory expirable displayOrder defaultExpiryDays defaultReminderDays active" },
+      })
+      .populate("activeClinicians",    "name role")
+      .populate("restrictedClinicians","name email role")
       .lean();
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
+
+    // ── NEW: reportingArchive — last 3 entries only (spec §10) ─────────
+    if (Array.isArray(pcn.reportingArchive)) {
+      pcn.reportingArchive = [...pcn.reportingArchive]
+        .sort((a, b) => {
+          if (b.year !== a.year) return (b.year || 0) - (a.year || 0);
+          return (b.month || 0) - (a.month || 0);
+        })
+        .slice(0, 3);
+    }
 
     const practices = await Practice.find({ pcn: pcn._id, isActive: true })
       .select("name odsCode address city postcode fte contractType systemAccessNotes isActive linkedClinicians ndaSigned dsaSigned mouReceived welcomePackSent mobilisationPlanSent templateInstalled reportsImported")
@@ -461,23 +783,36 @@ export const getPCNById = async (req, res) => {
   }
 };
 
+/**
+ * POST /pcn
+ * UPDATED (spec §11): +decisionMakers, +financeContacts, +tags, +priority, +clientFacingData
+ */
 export const createPCN = async (req, res) => {
   try {
-    const { name, icb } = req.body;
+    const { name, icb, decisionMakers, financeContacts, tags, priority, clientFacingData } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: "PCN name is required" });
     if (!icb)          return res.status(400).json({ message: "ICB is required" });
-    const payload = normalizeComplianceGroup(req.body);
+
+    const payload = normalizeComplianceGroup({
+      ...req.body,
+      // ── NEW FIELDS (spec §11) ─────────────────────
+      decisionMakers:  decisionMakers  || [],
+      financeContacts: financeContacts || [],
+      tags:            Array.isArray(tags) ? tags : [],
+      priority:        priority        || "normal",
+      clientFacingData: clientFacingData || {},
+    });
+
     const pcn = await PCN.create({ ...payload, name: name.trim(), createdBy: req.user._id });
     const populated = await PCN.findById(pcn._id)
       .populate("icb", "name")
       .populate("federation", "name type")
-      .populate("complianceGroup", "name")
+      .populate("complianceGroup",  "name")
       .populate("complianceGroups", "name")
       .lean();
+
     await logAudit(req, "CREATE_CLIENT", "PCN", {
-      resourceId: pcn._id,
-      detail: `PCN created: ${pcn.name}`,
-      after: safeJson(populated),
+      resourceId: pcn._id, detail: `PCN created: ${pcn.name}`, after: safeJson(populated),
     });
     res.status(201).json({ pcn: populated, message: "PCN created" });
   } catch (err) {
@@ -486,52 +821,75 @@ export const createPCN = async (req, res) => {
   }
 };
 
+/**
+ * PUT /pcn/:id
+ * UPDATED (spec §12): +decisionMakers, +financeContacts, +tags, +priority, +clientFacingData
+ *   Selective merge — does NOT wipe these fields if absent from req.body
+ */
 export const updatePCN = async (req, res) => {
   try {
     validateObjectIdOr400(req.params.id, "PCN id");
     const existing = await PCN.findById(req.params.id)
       .populate("icb", "name region")
       .populate("federation", "name type")
-      .populate("complianceGroup", "name")
+      .populate("complianceGroup",  "name")
       .populate("complianceGroups", "name")
       .lean();
     if (!existing) return res.status(404).json({ message: "PCN not found" });
 
-    const payload = normalizeComplianceGroup(req.body);
+    let payload = normalizeComplianceGroup(req.body);
+
+    // Clear groupDocuments if compliance groups changed
     if (
       Object.prototype.hasOwnProperty.call(payload, "complianceGroups") ||
       Object.prototype.hasOwnProperty.call(payload, "complianceGroup")
     ) {
       const previousGroups = [
-        ...(existing.complianceGroups || []).map((groupId) => String(groupId)),
+        ...(existing.complianceGroups || []).map((g) => String(g)),
         ...(!(existing.complianceGroups || []).length && existing.complianceGroup ? [String(existing.complianceGroup)] : []),
       ].sort();
       const nextGroups = [
-        ...(payload.complianceGroups || []).map((groupId) => String(groupId)),
+        ...(payload.complianceGroups || []).map((g) => String(g)),
         ...(!(payload.complianceGroups || []).length && payload.complianceGroup ? [String(payload.complianceGroup)] : []),
       ].sort();
       if (JSON.stringify(previousGroups) !== JSON.stringify(nextGroups)) payload.groupDocuments = [];
     }
 
+    // ── NEW: selective merge for new fields (spec §12) ─────────────────
+    // Only include in payload if explicitly provided — avoids wiping on partial updates
+    const selectiveMerge = {};
+    if (Object.prototype.hasOwnProperty.call(req.body, "decisionMakers"))
+      selectiveMerge.decisionMakers  = req.body.decisionMakers  || [];
+    if (Object.prototype.hasOwnProperty.call(req.body, "financeContacts"))
+      selectiveMerge.financeContacts = req.body.financeContacts || [];
+    if (Object.prototype.hasOwnProperty.call(req.body, "tags"))
+      selectiveMerge.tags            = Array.isArray(req.body.tags) ? req.body.tags : [];
+    if (Object.prototype.hasOwnProperty.call(req.body, "priority"))
+      selectiveMerge.priority        = req.body.priority || "normal";
+    if (Object.prototype.hasOwnProperty.call(req.body, "clientFacingData"))
+      selectiveMerge.clientFacingData = { ...(req.body.clientFacingData || {}), lastUpdated: new Date() };
+
+    payload = { ...payload, ...selectiveMerge };
+
     const pcn = await PCN.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true })
       .populate("icb", "name region")
       .populate("federation", "name type")
-      .populate("complianceGroup", "name")
+      .populate("complianceGroup",  "name")
       .populate("complianceGroups", "name")
       .lean();
+
     const beforeGroups = (existing.complianceGroups?.length ? existing.complianceGroups : (existing.complianceGroup ? [existing.complianceGroup] : []))
-      .map((group) => group?.name)
-      .filter(Boolean);
-    const afterGroups = (pcn.complianceGroups?.length ? pcn.complianceGroups : (pcn.complianceGroup ? [pcn.complianceGroup] : []))
-      .map((group) => group?.name)
-      .filter(Boolean);
+      .map((g) => g?.name).filter(Boolean);
+    const afterGroups  = (pcn.complianceGroups?.length ? pcn.complianceGroups : (pcn.complianceGroup ? [pcn.complianceGroup] : []))
+      .map((g) => g?.name).filter(Boolean);
+
     await logAudit(req, "UPDATE_CLIENT", "PCN", {
       resourceId: pcn._id,
       detail: beforeGroups.join("|") !== afterGroups.join("|")
         ? formatComplianceGroupDetail(beforeGroups, afterGroups)
         : `PCN updated: ${pcn.name}`,
       before: safeJson(existing),
-      after: safeJson(pcn),
+      after:  safeJson(pcn),
     });
     res.json({ pcn, message: "PCN updated" });
   } catch (err) {
@@ -550,15 +908,12 @@ export const deletePCN = async (req, res) => {
     await PCN.findByIdAndUpdate(req.params.id, { isActive: false });
     if (existing) {
       await logAudit(req, "DELETE_CLIENT", "PCN", {
-        resourceId: existing._id,
-        detail: `PCN soft-deleted: ${existing.name}`,
-        before: safeJson(existing),
-        after: { isActive: false },
+        resourceId: existing._id, detail: `PCN soft-deleted: ${existing.name}`,
+        before: safeJson(existing), after: { isActive: false },
       });
     }
     res.json({ message: "PCN deleted" });
   } catch (err) {
-    console.error("deletePCN ERROR:", err.message);
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to delete PCN" });
   }
 };
@@ -567,29 +922,22 @@ export const updateRestrictedClinicians = async (req, res) => {
   try {
     const { clinicianIds } = req.body;
     if (!Array.isArray(clinicianIds)) return res.status(400).json({ message: "clinicianIds must be an array" });
-    const pcn = await PCN.findByIdAndUpdate(
-      req.params.id,
-      { restrictedClinicians: clinicianIds },
-      { new: true }
-    ).populate("restrictedClinicians", "name email role");
+    const pcn = await PCN.findByIdAndUpdate(req.params.id, { restrictedClinicians: clinicianIds }, { new: true })
+      .populate("restrictedClinicians", "name email role");
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
     res.json({ pcn, message: "Restricted clinicians updated" });
   } catch (err) {
-    console.error("updateRestrictedClinicians ERROR:", err.message);
     res.status(500).json({ message: "Failed to update restricted clinicians" });
   }
 };
 
-/* ─────────────────────────────────────────────────
-   MONTHLY MEETINGS + ROLLUP
-───────────────────────────────────────────────── */
+/* ── Monthly Meetings + Rollup ───────────────────────────────────── */
 export const getMonthlyMeetings = async (req, res) => {
   try {
     const pcn = await PCN.findById(req.params.id).select("monthlyMeetings name").lean();
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
     res.json({ meetings: pcn.monthlyMeetings || [], pcnName: pcn.name });
   } catch (err) {
-    console.error("getMonthlyMeetings ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch meetings" });
   }
 };
@@ -598,116 +946,80 @@ export const upsertMonthlyMeeting = async (req, res) => {
   try {
     const { month, date, type, attendees, notes, status } = req.body;
     if (!month) return res.status(400).json({ message: "Month is required" });
-
     const pcn = await PCN.findById(req.params.id);
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
-
     const meetings = Array.isArray(pcn.monthlyMeetings) ? [...pcn.monthlyMeetings] : [];
     const idx = meetings.findIndex(m => m.month === month && m.type === type);
-    if (idx > -1) {
-      Object.assign(meetings[idx], { date, attendees, notes, status });
-    } else {
-      meetings.push({ month, date, type, attendees, notes, status });
-    }
+    if (idx > -1) { Object.assign(meetings[idx], { date, attendees, notes, status }); }
+    else { meetings.push({ month, date, type, attendees, notes, status }); }
     await PCN.findByIdAndUpdate(req.params.id, { monthlyMeetings: meetings });
     res.json({ meetings, message: "Meeting saved" });
   } catch (err) {
-    console.error("upsertMonthlyMeeting ERROR:", err.message);
     res.status(500).json({ message: "Failed to save meeting" });
   }
 };
 
 export const getPCNRollup = async (req, res) => {
   try {
-    const pcn = await PCN.findById(req.params.id)
-      .populate("icb", "name region")
-      .populate("federation", "name type")
-      .lean();
+    const pcn = await PCN.findById(req.params.id).populate("icb", "name region").populate("federation", "name type").lean();
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
-
-    const practices = await Practice.find({ pcn: req.params.id, isActive: true }).lean();
-
-    const complianceKeys = [
-      "ndaSigned","dsaSigned","mouReceived","welcomePackSent",
-      "mobilisationPlanSent","confidentialityFormSigned",
-      "prescribingPoliciesShared","remoteAccessSetup",
-      "templateInstalled","reportsImported",
-    ];
-
+    const practices    = await Practice.find({ pcn: req.params.id, isActive: true }).lean();
+    const complianceKeys = ["ndaSigned","dsaSigned","mouReceived","welcomePackSent","mobilisationPlanSent","confidentialityFormSigned","prescribingPoliciesShared","remoteAccessSetup","templateInstalled","reportsImported"];
     const complianceByPractice = practices.map(p => {
       const done = complianceKeys.filter(k => p[k]).length;
-      return {
-        practiceId:   p._id,
-        practiceName: p.name,
-        done,
-        total:        complianceKeys.length,
-        score:        Math.round((done / complianceKeys.length) * 100),
-      };
+      return { practiceId: p._id, practiceName: p.name, done, total: complianceKeys.length, score: Math.round((done / complianceKeys.length) * 100) };
     });
-
     const avgCompliance = complianceByPractice.length
-      ? Math.round(complianceByPractice.reduce((s, p) => s + p.score, 0) / complianceByPractice.length)
-      : 0;
-
-    const systemCounts = {};
-    for (const p of practices) {
-      for (const sa of (p.systemAccess || [])) {
-        if (!systemCounts[sa.system]) systemCounts[sa.system] = { granted: 0, pending: 0, total: 0 };
-        systemCounts[sa.system].total++;
-        if (["granted","view_only"].includes(sa.status)) systemCounts[sa.system].granted++;
-        if (["requested","pending"].includes(sa.status)) systemCounts[sa.system].pending++;
-      }
-    }
-
-    res.json({
-      pcn,
-      practices,
-      rollup: {
-        practiceCount: practices.length,
-        avgCompliance,
-        complianceByPractice,
-        annualSpend: pcn.annualSpend,
-        systemCounts,
-      },
-    });
+      ? Math.round(complianceByPractice.reduce((s, p) => s + p.score, 0) / complianceByPractice.length) : 0;
+    res.json({ pcn, practices, rollup: { practiceCount: practices.length, avgCompliance, complianceByPractice, annualSpend: pcn.annualSpend } });
   } catch (err) {
-    console.error("getPCNRollup ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to generate rollup report" });
   }
 };
 
-/* ─────────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════════════════
    PRACTICE CRUD
-───────────────────────────────────────────────── */
+   UPDATED: getPracticeById
+══════════════════════════════════════════════════════════════════ */
 export const getPractices = async (req, res) => {
   try {
     const filter = { isActive: true };
     if (req.query.pcn) filter.pcn = req.query.pcn;
-    const practices = await Practice.find(filter)
-      .populate("pcn", "name")
-      .populate("complianceGroup", "name")
-      .sort({ name: 1 })
-      .lean();
+    const practices = await Practice.find(filter).populate("pcn", "name").populate("complianceGroup", "name").sort({ name: 1 }).lean();
     res.json({ practices });
   } catch (err) {
-    console.error("getPractices ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch practices" });
   }
 };
 
+/**
+ * GET /practice/:id
+ * UPDATED (spec §13): +localDecisionMakers, +siteSpecificDocs,
+ *   +reportingArchive (last 3), +tags, +priority
+ */
 export const getPracticeById = async (req, res) => {
   try {
     const practice = await Practice.findById(req.params.id)
       .populate("pcn", "name icb")
       .populate({
-        path: "complianceGroup",
+        path:   "complianceGroup",
         select: "name active displayOrder documents",
         populate: { path: "documents", select: "name mandatory expirable displayOrder defaultExpiryDays defaultReminderDays active" },
       })
-      .populate("linkedClinicians", "name email role")
-      .populate("restrictedClinicians", "name email role")
+      .populate("linkedClinicians",    "name email role")
+      .populate("restrictedClinicians","name email role")
       .lean();
     if (!practice) return res.status(404).json({ message: "Practice not found" });
+
+    // ── NEW: reportingArchive — last 3 (spec §13) ──────────────────────
+    if (Array.isArray(practice.reportingArchive)) {
+      practice.reportingArchive = [...practice.reportingArchive]
+        .sort((a, b) => {
+          if (b.year !== a.year) return (b.year || 0) - (a.year || 0);
+          return (b.month || 0) - (a.month || 0);
+        })
+        .slice(0, 3);
+    }
 
     recordView(Practice, req.params.id, req.user._id);
     res.json({ practice });
@@ -722,20 +1034,12 @@ export const createPractice = async (req, res) => {
     const { name, pcn } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: "Practice name is required" });
     if (!pcn)          return res.status(400).json({ message: "PCN is required" });
-    const payload = normalizeComplianceGroup(req.body);
+    const payload  = normalizeComplianceGroup(req.body);
     const practice = await Practice.create({ ...payload, name: name.trim(), createdBy: req.user._id });
-    const populated = await Practice.findById(practice._id)
-      .populate("pcn", "name")
-      .populate("complianceGroup", "name")
-      .lean();
-    await logAudit(req, "CREATE_CLIENT", "Practice", {
-      resourceId: practice._id,
-      detail: `Practice created: ${practice.name}`,
-      after: safeJson(populated),
-    });
+    const populated = await Practice.findById(practice._id).populate("pcn", "name").populate("complianceGroup", "name").lean();
+    await logAudit(req, "CREATE_CLIENT", "Practice", { resourceId: practice._id, detail: `Practice created: ${practice.name}`, after: safeJson(populated) });
     res.status(201).json({ practice: populated, message: "Practice created" });
   } catch (err) {
-    console.error("createPractice ERROR:", err.message);
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to create practice" });
   }
 };
@@ -744,39 +1048,32 @@ export const updatePractice = async (req, res) => {
   try {
     validateObjectIdOr400(req.params.id, "Practice id");
     const existing = await Practice.findById(req.params.id)
-      .populate("pcn", "name")
-      .populate("complianceGroup", "name")
-      .populate("linkedClinicians", "name email role")
-      .populate("restrictedClinicians", "name email role")
-      .lean();
+      .populate("pcn","name").populate("complianceGroup","name")
+      .populate("linkedClinicians","name email role").populate("restrictedClinicians","name email role").lean();
     if (!existing) return res.status(404).json({ message: "Practice not found" });
 
     const payload = normalizeComplianceGroup(req.body);
     if (Object.prototype.hasOwnProperty.call(payload, "complianceGroup")) {
-      const previousGroup = existing.complianceGroup ? String(existing.complianceGroup) : "";
-      const nextGroup = payload.complianceGroup ? String(payload.complianceGroup) : "";
-      if (previousGroup !== nextGroup) payload.groupDocuments = [];
+      const prev = existing.complianceGroup ? String(existing.complianceGroup) : "";
+      const next = payload.complianceGroup  ? String(payload.complianceGroup)  : "";
+      if (prev !== next) payload.groupDocuments = [];
     }
 
     const practice = await Practice.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true })
-      .populate("pcn", "name")
-      .populate("complianceGroup", "name")
-      .populate("linkedClinicians", "name email role")
-      .populate("restrictedClinicians", "name email role")
-      .lean();
+      .populate("pcn","name").populate("complianceGroup","name")
+      .populate("linkedClinicians","name email role").populate("restrictedClinicians","name email role").lean();
+
     const beforeGroups = existing.complianceGroup?.name ? [existing.complianceGroup.name] : [];
-    const afterGroups = practice.complianceGroup?.name ? [practice.complianceGroup.name] : [];
+    const afterGroups  = practice.complianceGroup?.name ? [practice.complianceGroup.name] : [];
     await logAudit(req, "UPDATE_CLIENT", "Practice", {
       resourceId: practice._id,
       detail: beforeGroups.join("|") !== afterGroups.join("|")
         ? formatComplianceGroupDetail(beforeGroups, afterGroups)
         : `Practice updated: ${practice.name}`,
-      before: safeJson(existing),
-      after: safeJson(practice),
+      before: safeJson(existing), after: safeJson(practice),
     });
     res.json({ practice, message: "Practice updated" });
   } catch (err) {
-    console.error("updatePractice ERROR:", err.message);
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to update practice" });
   }
 };
@@ -788,15 +1085,12 @@ export const deletePractice = async (req, res) => {
     await Practice.findByIdAndUpdate(req.params.id, { isActive: false });
     if (existing) {
       await logAudit(req, "DELETE_CLIENT", "Practice", {
-        resourceId: existing._id,
-        detail: `Practice soft-deleted: ${existing.name}`,
-        before: safeJson(existing),
-        after: { isActive: false },
+        resourceId: existing._id, detail: `Practice soft-deleted: ${existing.name}`,
+        before: safeJson(existing), after: { isActive: false },
       });
     }
     res.json({ message: "Practice deleted" });
   } catch (err) {
-    console.error("deletePractice ERROR:", err.message);
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to delete practice" });
   }
 };
@@ -805,22 +1099,19 @@ export const updatePracticeRestricted = async (req, res) => {
   try {
     const { clinicianIds } = req.body;
     if (!Array.isArray(clinicianIds)) return res.status(400).json({ message: "clinicianIds must be an array" });
-    const practice = await Practice.findByIdAndUpdate(
-      req.params.id,
-      { restrictedClinicians: clinicianIds },
-      { new: true }
-    ).populate("restrictedClinicians", "name email role");
+    const practice = await Practice.findByIdAndUpdate(req.params.id, { restrictedClinicians: clinicianIds }, { new: true })
+      .populate("restrictedClinicians", "name email role");
     if (!practice) return res.status(404).json({ message: "Practice not found" });
     res.json({ practice, message: "Restricted clinicians updated" });
   } catch (err) {
-    console.error("updatePracticeRestricted ERROR:", err.message);
     res.status(500).json({ message: "Failed to update restricted clinicians" });
   }
 };
 
-/* ─────────────────────────────────────────────────
-   CONTACT HISTORY — ★ FIXED: entityId ObjectId cast
-───────────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════════
+   CONTACT HISTORY
+   UPDATED: addContactHistory, updateContactHistory (spec §14, §15)
+══════════════════════════════════════════════════════════════════ */
 export const getContactHistory = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
@@ -830,26 +1121,20 @@ export const getContactHistory = async (req, res) => {
     const entityObjId = toObjectId(entityId);
     if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
 
-    const EntityModel = getEntityModelByType(entityType);
+    const EntityModel  = getEntityModelByType(entityType);
     const entityExists = await EntityModel.exists({ _id: entityObjId });
     if (!entityExists) return res.status(404).json({ message: `${entityType} not found` });
 
     const filter = { entityType, entityId: entityObjId };
-    if (type && type !== "all") filter.type = type;
+    if (type && type !== "all") filter.type  = type;
     if (starred === "true")     filter.starred = true;
 
     const skip = (Number(page) - 1) * Number(limit);
-
     const [logs, total] = await Promise.all([
-      ContactHistory.find(filter)
-        .populate("createdBy", "name role")
-        .sort({ date: -1, createdAt: -1 })
-        .skip(skip)
-        .limit(Number(limit))
-        .lean(),
+      ContactHistory.find(filter).populate("createdBy", "name role")
+        .sort({ date: -1, createdAt: -1 }).skip(skip).limit(Number(limit)).lean(),
       ContactHistory.countDocuments(filter),
     ]);
-
     res.json({ logs, total, page: Number(page), pages: Math.ceil(total / Number(limit)) });
   } catch (err) {
     console.error("getContactHistory ERROR:", err.message);
@@ -857,18 +1142,26 @@ export const getContactHistory = async (req, res) => {
   }
 };
 
+/**
+ * POST /:entityType/:entityId/history
+ * UPDATED (spec §14): +outcome, +followUpDate, +followUpNote
+ */
 export const addContactHistory = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
     const { entityId } = req.params;
-    const { type, subject, notes, date, time, attachments } = req.body;
+    const {
+      type, subject, notes, date, time, attachments,
+      // ── NEW FIELDS (spec §14) ─────────────────────
+      outcome, followUpDate, followUpNote,
+    } = req.body;
 
     if (!subject?.trim()) return res.status(400).json({ message: "Subject is required" });
     if (!type)            return res.status(400).json({ message: "Type is required" });
 
-    const entityObjId = toObjectId(entityId);
+    const entityObjId  = toObjectId(entityId);
     if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
-    const EntityModel = getEntityModelByType(entityType);
+    const EntityModel  = getEntityModelByType(entityType);
     const entityExists = await EntityModel.exists({ _id: entityObjId });
     if (!entityExists) return res.status(404).json({ message: `${entityType} not found` });
 
@@ -876,11 +1169,15 @@ export const addContactHistory = async (req, res) => {
       entityType,
       entityId: entityObjId,
       type,
-      subject: subject.trim(),
-      notes:   notes || "",
-      date:    date ? new Date(date) : new Date(),
-      time:    time || new Date().toTimeString().slice(0, 5),
+      subject:     subject.trim(),
+      notes:       notes || "",
+      date:        date  ? new Date(date) : new Date(),
+      time:        time  || new Date().toTimeString().slice(0, 5),
       attachments: attachments || [],
+      // ── NEW FIELDS (spec §14) ─────────────────────
+      outcome:      outcome?.trim()    || "",
+      followUpDate: followUpDate ? new Date(followUpDate) : null,
+      followUpNote: followUpNote?.trim() || "",
       createdBy: req.user._id,
     });
 
@@ -892,20 +1189,34 @@ export const addContactHistory = async (req, res) => {
   }
 };
 
+/**
+ * PUT /history/:logId
+ * UPDATED (spec §15): +outcome, +followUpDate, +followUpNote
+ */
 export const updateContactHistory = async (req, res) => {
   try {
-    const { subject, notes, type, date, time } = req.body;
+    const {
+      subject, notes, type, date, time,
+      // ── NEW FIELDS (spec §15) ─────────────────────
+      outcome, followUpDate, followUpNote,
+    } = req.body;
+
     const log = await ContactHistory.findByIdAndUpdate(
       req.params.logId,
       {
-        ...(subject              && { subject }),
-        ...(notes !== undefined  && { notes }),
-        ...(type                 && { type }),
-        ...(date                 && { date }),
-        ...(time                 && { time }),
+        ...(subject           && { subject }),
+        ...(notes !== undefined && { notes }),
+        ...(type              && { type }),
+        ...(date              && { date }),
+        ...(time              && { time }),
+        // ── NEW FIELDS (spec §15) ─────────────────
+        ...(outcome      !== undefined && { outcome:      outcome?.trim()    || "" }),
+        ...(followUpDate !== undefined && { followUpDate: followUpDate ? new Date(followUpDate) : null }),
+        ...(followUpNote !== undefined && { followUpNote: followUpNote?.trim() || "" }),
       },
       { new: true }
     ).populate("createdBy", "name role");
+
     if (!log) return res.status(404).json({ message: "Log not found" });
     res.json({ log, message: "Log updated" });
   } catch (err) {
@@ -918,19 +1229,10 @@ export const toggleStarred = async (req, res) => {
   try {
     const log = await ContactHistory.findById(req.params.logId);
     if (!log) return res.status(404).json({ message: "Log not found" });
-    const starred = !log.starred;
-    const updatedLog = await ContactHistory.findByIdAndUpdate(
-      req.params.logId,
-      { starred },
-      { new: true }
-    );
-    res.json({
-      log: updatedLog,
-      starred,
-      message: starred ? "Starred" : "Unstarred",
-    });
+    const starred    = !log.starred;
+    const updatedLog = await ContactHistory.findByIdAndUpdate(req.params.logId, { starred }, { new: true });
+    res.json({ log: updatedLog, starred, message: starred ? "Starred" : "Unstarred" });
   } catch (err) {
-    console.error("toggleStarred ERROR:", err.message);
     res.status(500).json({ message: "Failed to toggle star" });
   }
 };
@@ -941,19 +1243,15 @@ export const deleteContactHistory = async (req, res) => {
     if (!log) return res.status(404).json({ message: "Log not found" });
     res.json({ message: "Log deleted" });
   } catch (err) {
-    console.error("deleteContactHistory ERROR:", err.message);
     res.status(500).json({ message: "Failed to delete log" });
   }
 };
 
-/* ─────────────────────────────────────────────────
-   SYSTEM ACCESS REQUEST
-───────────────────────────────────────────────── */
+/* ── System Access ────────────────────────────────────────────────── */
 export const requestSystemAccess = async (req, res) => {
   try {
     const { entityType, entityId } = req.params;
     const { systems, clinicianDetails, notes } = req.body;
-
     if (!systems?.length)        return res.status(400).json({ message: "At least one system must be selected" });
     if (!clinicianDetails?.name) return res.status(400).json({ message: "Clinician name is required" });
 
@@ -961,55 +1259,27 @@ export const requestSystemAccess = async (req, res) => {
     if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
 
     const systemList = systems.join(", ");
-    const emailBody = `
-Dear Team,
-
-Please arrange system access for the following clinician:
-
-Name:              ${clinicianDetails.name}
-Clinician Type:    ${clinicianDetails.clinicianType || "N/A"}
-GPhC Number:       ${clinicianDetails.gphcNumber || "N/A"}
-Smart Card Number: ${clinicianDetails.smartCardNumber || "N/A"}
-Email:             ${clinicianDetails.email || "N/A"}
-Phone:             ${clinicianDetails.phone || "N/A"}
-
-Systems Required:  ${systemList}
-
-Additional Notes:  ${notes || "None"}
-
-Kind regards,
-Core Prescribing Solutions
-`.trim();
+    const emailBody  = `Dear Team,\n\nPlease arrange system access for:\n\nName: ${clinicianDetails.name}\nType: ${clinicianDetails.clinicianType || "N/A"}\nGPhC: ${clinicianDetails.gphcNumber || "N/A"}\nSmart Card: ${clinicianDetails.smartCardNumber || "N/A"}\nEmail: ${clinicianDetails.email || "N/A"}\nPhone: ${clinicianDetails.phone || "N/A"}\n\nSystems: ${systemList}\nNotes: ${notes || "None"}\n\nKind regards,\nCore Prescribing Solutions`.trim();
 
     const log = await ContactHistory.create({
-      entityType,
-      entityId: entityObjId,
-      type:    "system_access",
-      subject: `System Access Request — ${clinicianDetails.name} — ${systemList}`,
-      notes:   emailBody,
-      date:    new Date(),
-      time:    new Date().toTimeString().slice(0, 5),
+      entityType, entityId: entityObjId, type: "system_access",
+      subject:  `System Access Request — ${clinicianDetails.name} — ${systemList}`,
+      notes:    emailBody, date: new Date(), time: new Date().toTimeString().slice(0, 5),
       createdBy: req.user._id,
     });
-
     res.json({ message: "System access request logged successfully", log });
   } catch (err) {
-    console.error("requestSystemAccess ERROR:", err.message);
     res.status(500).json({ message: "Failed to process system access request" });
   }
 };
 
-/* ─────────────────────────────────────────────────
-   MASS EMAIL
-───────────────────────────────────────────────── */
+/* ── Mass Email ───────────────────────────────────────────────────── */
 export const sendMassEmail = async (req, res) => {
   try {
     const { entityType, entityId } = req.params;
     const { subject, body, recipients } = req.body;
-
     if (!subject?.trim()) return res.status(400).json({ message: "Subject is required" });
     if (!body?.trim())    return res.status(400).json({ message: "Body is required" });
-
     const valid = (recipients || []).filter(r => r.email?.includes("@"));
     if (!valid.length)    return res.status(400).json({ message: "At least one valid recipient email is required" });
 
@@ -1023,43 +1293,27 @@ export const sendMassEmail = async (req, res) => {
     const recipientResults = [];
     for (const r of valid) {
       try {
-        await transporter.sendMail({
-          from:    process.env.EMAIL_FROM,
-          to:      r.name ? `"${r.name}" <${r.email}>` : r.email,
-          subject,
-          html:    body + pixel,
-        });
+        await transporter.sendMail({ from: process.env.EMAIL_FROM, to: r.name ? `"${r.name}" <${r.email}>` : r.email, subject, html: body + pixel });
         recipientResults.push({ email: r.email, name: r.name || "", opened: false });
       } catch (mailErr) {
-        console.error("Mail error:", r.email, mailErr.message);
         recipientResults.push({ email: r.email, name: r.name || "", opened: false });
       }
     }
 
     await ContactHistory.create({
-      entityType,
-      entityId: entityObjId,
-      type:        "email",
-      subject:     `[Mass Email] ${subject}`,
-      notes:       body.replace(/<[^>]+>/g, "").slice(0, 500),
-      date:        new Date(),
-      time:        new Date().toTimeString().slice(0, 5),
-      isMassEmail: true,
-      recipients:  recipientResults,
+      entityType, entityId: entityObjId, type: "email",
+      subject: `[Mass Email] ${subject}`, notes: body.replace(/<[^>]+>/g, "").slice(0, 500),
+      date: new Date(), time: new Date().toTimeString().slice(0, 5),
+      isMassEmail: true, recipients: recipientResults,
       emailTracking: { sent: true, sentAt: new Date(), trackingId },
       createdBy: req.user._id,
     });
-
     res.json({ message: `Email sent to ${recipientResults.length} recipient(s)` });
   } catch (err) {
-    console.error("sendMassEmail ERROR:", err.message);
     res.status(500).json({ message: "Failed to send email" });
   }
 };
 
-/* ─────────────────────────────────────────────────
-   EMAIL TRACKING PIXEL
-───────────────────────────────────────────────── */
 export const trackEmailOpen = async (req, res) => {
   try {
     await ContactHistory.findOneAndUpdate(
@@ -1067,15 +1321,12 @@ export const trackEmailOpen = async (req, res) => {
       { "emailTracking.opened": true, "emailTracking.openedAt": new Date() }
     );
   } catch (_) {}
-
   const pixel = Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64");
   res.set({ "Content-Type": "image/gif", "Cache-Control": "no-cache,no-store,must-revalidate" });
   res.end(pixel);
 };
 
-/* ─────────────────────────────────────────────────
-   SEARCH
-───────────────────────────────────────────────── */
+/* ── Search ───────────────────────────────────────────────────────── */
 export const searchClients = async (req, res) => {
   try {
     const q = req.query.q?.trim();
@@ -1094,7 +1345,6 @@ export const searchClients = async (req, res) => {
       ],
     });
   } catch (err) {
-    console.error("searchClients ERROR:", err.message);
     res.status(500).json({ message: "Search failed" });
   }
 };

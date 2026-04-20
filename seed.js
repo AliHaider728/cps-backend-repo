@@ -3,9 +3,12 @@
  * @description Populates the PostgreSQL database (app_records table) with
  *              realistic demo data for all CPS entities.
  *
- *              Previously this file used Mongoose models — it has been fully
- *              migrated to raw PostgreSQL queries so seed data lands in the
- *              same app_records table that the API reads from.
+ * UPDATED (Apr 2026):
+ *   COMPLIANCE_DOCS       — +clinicianCanUpload, +visibleToClinician, +defaultReminderDays, +notes
+ *   DOCUMENT_GROUPS       — +applicableContractTypes, +colour, +notes
+ *   CLIENT_DATA (Clients) — +decisionMakers, +financeContacts, +tags, +priority, +clientFacingData
+ *   PRACTICE_DATA         — +localDecisionMakers, +tags, +priority
+ *   ContactHistory        — +outcome, +followUpDate, +followUpNote
  *
  * Run locally:  node seed.js
  * Run via npm:  npm run seed
@@ -19,9 +22,6 @@ import { v4 as uuidv4 } from "uuid";
 import { initDB, query, disconnectDB } from "./config/db.js";
 import { createId } from "./lib/ids.js";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// STRUCTURED LOGGER  (no emojis — matches server.js convention)
-// ─────────────────────────────────────────────────────────────────────────────
 const log = {
   info:  (msg, ...a) => console.log(`[INFO]  ${msg}`, ...a),
   ok:    (msg, ...a) => console.log(`[OK]    ${msg}`, ...a),
@@ -29,31 +29,24 @@ const log = {
   error: (msg, ...a) => console.error(`[ERROR] ${msg}`, ...a),
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GENERIC app_records HELPERS
-// ─────────────────────────────────────────────────────────────────────────────
-
+/* ── DB helpers ─────────────────────────────────────────────────── */
 async function insertRecord(model, payload) {
   const id        = uuidv4();
   const timestamp = new Date().toISOString();
   const data      = { ...payload, createdAt: timestamp, updatedAt: timestamp };
-
   await query(
     `INSERT INTO app_records (model, id, data, created_at, updated_at)
      VALUES ($1, $2, $3::jsonb, NOW(), NOW())`,
     [model, id, JSON.stringify(data)]
   );
-
   return { _id: id, id, ...data };
 }
 
 async function updateRecord(model, id, patch) {
   const data = { ...patch, updatedAt: new Date().toISOString() };
-
   await query(
     `UPDATE app_records
-     SET data = COALESCE(data, '{}'::jsonb) || $3::jsonb,
-         updated_at = NOW()
+     SET data = COALESCE(data, '{}'::jsonb) || $3::jsonb, updated_at = NOW()
      WHERE model = $1 AND id = $2`,
     [model, id, JSON.stringify(data)]
   );
@@ -68,7 +61,6 @@ async function findByField(model, field, value) {
      LIMIT 1`,
     [model, String(value)]
   );
-
   if (!result.rows[0]) return null;
   const row = result.rows[0];
   return { _id: row.id, id: row.id, ...row.data };
@@ -76,12 +68,10 @@ async function findByField(model, field, value) {
 
 async function upsertRecord(model, matchField, matchValue, payload) {
   const existing = await findByField(model, matchField, matchValue);
-
   if (existing) {
     await updateRecord(model, existing.id, payload);
     return { ...existing, ...payload };
   }
-
   return insertRecord(model, payload);
 }
 
@@ -89,9 +79,9 @@ async function deleteAllByModel(model) {
   await query(`DELETE FROM app_records WHERE model = $1`, [model]);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SEED DATA
-// ─────────────────────────────────────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════════════════
+   SEED DATA
+══════════════════════════════════════════════════════════════════ */
 
 const USERS = [
   { name: "Super Admin",     email: "superadmin@coreprescribing.co.uk", password: "SuperAdmin@123",  role: "super_admin" },
@@ -112,17 +102,17 @@ const ICBS = [
 ];
 
 const FEDERATION_DATA = [
-  { icbName: "NHS Greater Manchester ICB",         name: "Salford Together Federation",                          type: "federation" },
-  { icbName: "NHS Greater Manchester ICB",         name: "Manchester Health & Care Commissioning",               type: "federation" },
-  { icbName: "NHS Greater Manchester ICB",         name: "Stockport Together",                                   type: "INT"        },
-  { icbName: "NHS Lancashire & South Cumbria ICB", name: "Lancashire & South Cumbria NHS Foundation Trust",      type: "federation" },
-  { icbName: "NHS Lancashire & South Cumbria ICB", name: "Fylde Coast Medical Services",                        type: "federation" },
-  { icbName: "NHS Cheshire & Merseyside ICB",      name: "Cheshire & Wirral Foundation Trust",                  type: "federation" },
+  { icbName: "NHS Greater Manchester ICB",         name: "Salford Together Federation",                     type: "federation" },
+  { icbName: "NHS Greater Manchester ICB",         name: "Manchester Health & Care Commissioning",          type: "federation" },
+  { icbName: "NHS Greater Manchester ICB",         name: "Stockport Together",                              type: "INT"        },
+  { icbName: "NHS Lancashire & South Cumbria ICB", name: "Lancashire & South Cumbria NHS Foundation Trust", type: "federation" },
+  { icbName: "NHS Lancashire & South Cumbria ICB", name: "Fylde Coast Medical Services",                   type: "federation" },
+  { icbName: "NHS Cheshire & Merseyside ICB",      name: "Cheshire & Wirral Foundation Trust",             type: "federation" },
 ];
 
 const CLIENT_DATA = [
   {
-    icbName: "NHS Greater Manchester ICB",
+    icbName:        "NHS Greater Manchester ICB",
     federationName: "Salford Together Federation",
     clients: [
       {
@@ -133,10 +123,20 @@ const CLIENT_DATA = [
         notes: "Key Client — 6 practices, high footfall area.",
         contacts: [
           { name: "Dr. Priya Sharma", role: "Clinical Director", email: "priya.sharma@salfordclient.nhs.uk", phone: "0161 234 5678", type: "decision_maker" },
-          { name: "Kevin Walsh",      role: "Client Manager",     email: "k.walsh@salfordclient.nhs.uk",      phone: "0161 234 5679", type: "general"        },
-          { name: "Rachel Green",     role: "Finance Lead",       email: "r.green@salfordclient.nhs.uk",      phone: "0161 234 5680", type: "finance"        },
+          { name: "Kevin Walsh",      role: "Client Manager",    email: "k.walsh@salfordclient.nhs.uk",      phone: "0161 234 5679", type: "general"        },
+          { name: "Rachel Green",     role: "Finance Lead",      email: "r.green@salfordclient.nhs.uk",      phone: "0161 234 5680", type: "finance"        },
         ],
         requiredSystems: { emis: true, ice: true, accurx: true, docman: true, vpn: true },
+        tags:     ["arrs", "high-priority"],
+        priority: "high",
+        decisionMakers: [
+          { name: "Dr. Priya Sharma", role: "Clinical Director", email: "priya.sharma@salfordclient.nhs.uk", phone: "0161 234 5678", isPrimary: true },
+        ],
+        financeContacts: [
+          { name: "Rachel Green", role: "Finance Lead", email: "r.green@salfordclient.nhs.uk", phone: "0161 234 5680" },
+        ],
+        clientFacingData: { showMonthlyMeetings: true, showClinicianMeetings: true, publicNotes: "Monthly review every first Tuesday.", lastUpdated: null },
+        reportingArchive: [],
       },
       {
         name: "Wythenshawe & Benchill Client", annualSpend: 195000, contractType: "EA",
@@ -149,11 +149,19 @@ const CLIENT_DATA = [
           { name: "Sandra Lee",         role: "Ops Manager",       email: "s.lee@wythclient.nhs.uk",   phone: "0161 945 1235", type: "operations"     },
         ],
         requiredSystems: { emis: true, accurx: true },
+        tags:     ["ea"],
+        priority: "normal",
+        decisionMakers: [
+          { name: "Dr. Mohammed Iqbal", role: "Clinical Director", email: "m.iqbal@wythclient.nhs.uk", phone: "0161 945 1234", isPrimary: true },
+        ],
+        financeContacts: [],
+        clientFacingData: { showMonthlyMeetings: true, showClinicianMeetings: false, publicNotes: "", lastUpdated: null },
+        reportingArchive: [],
       },
     ],
   },
   {
-    icbName: "NHS Lancashire & South Cumbria ICB",
+    icbName:        "NHS Lancashire & South Cumbria ICB",
     federationName: "Lancashire & South Cumbria NHS Foundation Trust",
     clients: [
       {
@@ -167,11 +175,21 @@ const CLIENT_DATA = [
           { name: "Lucy Parker",     role: "Finance Contact",   email: "l.parker@prestoncity.nhs.uk",  phone: "01772 555 101", type: "finance"        },
         ],
         requiredSystems: { systmOne: true, ice: true, accurx: true },
+        tags:     ["direct"],
+        priority: "normal",
+        decisionMakers: [
+          { name: "Dr. Tom Brennan", role: "Clinical Director", email: "t.brennan@prestoncity.nhs.uk", phone: "01772 555 100", isPrimary: true },
+        ],
+        financeContacts: [
+          { name: "Lucy Parker", role: "Finance Contact", email: "l.parker@prestoncity.nhs.uk", phone: "01772 555 101" },
+        ],
+        clientFacingData: { showMonthlyMeetings: true, showClinicianMeetings: true, publicNotes: "", lastUpdated: null },
+        reportingArchive: [],
       },
     ],
   },
   {
-    icbName: "NHS Cheshire & Merseyside ICB",
+    icbName:        "NHS Cheshire & Merseyside ICB",
     federationName: "Cheshire & Wirral Foundation Trust",
     clients: [
       {
@@ -182,10 +200,20 @@ const CLIENT_DATA = [
         notes: "High-demand urban Client.",
         contacts: [
           { name: "Dr. Aarav Patel", role: "Clinical Director", email: "a.patel@livsouth.nhs.uk",  phone: "0151 233 4000", type: "decision_maker" },
-          { name: "Diane Morris",    role: "Client Manager",     email: "d.morris@livsouth.nhs.uk", phone: "0151 233 4001", type: "general"        },
-          { name: "James Wong",      role: "Finance Lead",       email: "j.wong@livsouth.nhs.uk",   phone: "0151 233 4002", type: "finance"        },
+          { name: "Diane Morris",    role: "Client Manager",    email: "d.morris@livsouth.nhs.uk", phone: "0151 233 4001", type: "general"        },
+          { name: "James Wong",      role: "Finance Lead",      email: "j.wong@livsouth.nhs.uk",   phone: "0151 233 4002", type: "finance"        },
         ],
         requiredSystems: { systmOne: true, accurx: true, docman: true },
+        tags:     ["arrs", "urban"],
+        priority: "normal",
+        decisionMakers: [
+          { name: "Dr. Aarav Patel", role: "Clinical Director", email: "a.patel@livsouth.nhs.uk", phone: "0151 233 4000", isPrimary: true },
+        ],
+        financeContacts: [
+          { name: "James Wong", role: "Finance Lead", email: "j.wong@livsouth.nhs.uk", phone: "0151 233 4002" },
+        ],
+        clientFacingData: { showMonthlyMeetings: true, showClinicianMeetings: true, publicNotes: "", lastUpdated: null },
+        reportingArchive: [],
       },
     ],
   },
@@ -208,6 +236,13 @@ const PRACTICE_DATA = {
         { system: "AccuRx", status: "granted" },
         { system: "Docman", status: "granted" },
       ],
+      tags:     ["arrs"],
+      priority: "normal",
+      localDecisionMakers: [
+        { name: "Dr. James Pendleton", role: "GP Partner", email: "j.pendleton@pendletonmc.nhs.uk", phone: "0161 111 2222", isPrimary: true },
+      ],
+      siteSpecificDocs: [],
+      reportingArchive: [],
     },
     {
       name: "Weaste & Seedley Surgery", odsCode: "P84002",
@@ -221,6 +256,11 @@ const PRACTICE_DATA = {
         { system: "EMIS", code: "EMIS/1485567", status: "view_only" },
         { system: "ICE",  status: "requested"  },
       ],
+      tags:     [],
+      priority: "normal",
+      localDecisionMakers: [],
+      siteSpecificDocs:    [],
+      reportingArchive:    [],
     },
   ],
   "Preston City Client": [
@@ -237,6 +277,13 @@ const PRACTICE_DATA = {
         { system: "ICE",      status: "granted" },
         { system: "AccuRx",   status: "granted" },
       ],
+      tags:     ["direct"],
+      priority: "normal",
+      localDecisionMakers: [
+        { name: "Dr. Helen Fisher", role: "Practice Manager", email: "h.fisher@fishergate.nhs.uk", phone: "01772 100 200", isPrimary: true },
+      ],
+      siteSpecificDocs: [],
+      reportingArchive: [],
     },
     {
       name: "Larches Surgery", odsCode: "P82002",
@@ -247,6 +294,11 @@ const PRACTICE_DATA = {
       mobilisationPlanSent: false, templateInstalled: false, reportsImported: false,
       systemAccessNotes: "SystmOne — access pending setup.",
       systemAccess: [{ system: "SystmOne", status: "pending" }],
+      tags:     [],
+      priority: "normal",
+      localDecisionMakers: [],
+      siteSpecificDocs:    [],
+      reportingArchive:    [],
     },
   ],
   "Liverpool South Client": [
@@ -263,46 +315,97 @@ const PRACTICE_DATA = {
         { system: "AccuRx",   status: "granted" },
         { system: "Docman",   status: "granted" },
       ],
+      tags:     ["arrs"],
+      priority: "normal",
+      localDecisionMakers: [],
+      siteSpecificDocs:    [],
+      reportingArchive:    [],
     },
   ],
 };
 
 const HISTORY_TEMPLATES = [
-  { type: "meeting",       subject: "Monthly performance review",   notes: "Discussed Q1 KPIs. All targets met. Follow-up scheduled."     },
-  { type: "call",          subject: "Clinician placement query",     notes: "Client manager called regarding locum cover in March."         },
-  { type: "email",         subject: "Contract renewal discussion",   notes: "Sent updated terms. Awaiting sign-off from Clinical Director." },
-  { type: "complaint",     subject: "Complaint: delayed rota",       notes: "Client reported delay in March rota. Resolved same day."       },
-  { type: "note",          subject: "Internal note — billing query", notes: "Finance contact queried invoice. Confirmed correct."           },
-  { type: "document",      subject: "MOU signed and received",       notes: "MOU received and filed. Contract now complete."                },
-  { type: "system_access", subject: "System access request sent",    notes: "EMIS access requested for new clinical pharmacist."            },
+  {
+    type: "meeting",       subject: "Monthly performance review",
+    notes: "Discussed Q1 KPIs. All targets met. Follow-up scheduled.",
+    outcome: "KPIs reviewed — all green. No action required.",
+    followUpNote: "Send Q2 report by end of month.",
+  },
+  {
+    type: "call",          subject: "Clinician placement query",
+    notes: "Client manager called regarding locum cover in March.",
+    outcome: "Cover arranged — confirmed Dr. Ali Haider for week 2.",
+    followUpNote: "",
+  },
+  {
+    type: "email",         subject: "Contract renewal discussion",
+    notes: "Sent updated terms. Awaiting sign-off from Clinical Director.",
+    outcome: "Terms sent. Awaiting response.",
+    followUpNote: "Chase if no reply within 5 working days.",
+  },
+  {
+    type: "complaint",     subject: "Complaint: delayed rota",
+    notes: "Client reported delay in March rota. Resolved same day.",
+    outcome: "Resolved — apology sent, rota corrected.",
+    followUpNote: "",
+  },
+  {
+    type: "note",          subject: "Internal note — billing query",
+    notes: "Finance contact queried invoice. Confirmed correct.",
+    outcome: "Invoice confirmed correct. No changes needed.",
+    followUpNote: "",
+  },
+  {
+    type: "document",      subject: "MOU signed and received",
+    notes: "MOU received and filed. Contract now complete.",
+    outcome: "MOU filed. Contract complete.",
+    followUpNote: "",
+  },
+  {
+    type: "system_access", subject: "System access request sent",
+    notes: "EMIS access requested for new clinical pharmacist.",
+    outcome: "Request sent — awaiting confirmation from practice.",
+    followUpNote: "Chase access confirmation after 3 working days.",
+  },
 ];
 
+/* ══════════════════════════════════════════════════════════════════
+   COMPLIANCE DOCUMENTS
+   UPDATED: +clinicianCanUpload, +visibleToClinician, +defaultReminderDays, +notes
+══════════════════════════════════════════════════════════════════ */
 const COMPLIANCE_DOCS = [
-  { name: "CV",                                                                    displayOrder: 7,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "DBS Check/Update Service",                                              displayOrder: 2,  mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
-  { name: "Declaration of Interests Form",                                         displayOrder: 4,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Enhanced Access - Key Contacts (Mon-Fri 6:30pm-8pm - Sat 8am-6:30pm)", displayOrder: 0,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "East Lancashire Alliance - Enhanced Access - Key Contacts",             displayOrder: 0,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Enhanced DBS Certificate (cert only)",                                  displayOrder: 2,  mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
-  { name: "Enhanced DBS Certitifcate",                                             displayOrder: 10, mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Fitness to Practise Form",                                              displayOrder: 3,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Health Screening Form",                                                 displayOrder: 5,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Indemnity Insurance Certificate",                                       displayOrder: 11, mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
-  { name: "Proof of Address",                                                      displayOrder: 9,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Reference 1",                                                           displayOrder: 1,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Reference 2",                                                           displayOrder: 2,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Reference Contact Details",                                             displayOrder: 12, mandatory: false, expirable: false, active: false, defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Right to Work",                                                         displayOrder: 8,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Right to Work Check (expired)",                                         displayOrder: 5,  mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28 },
-  { name: "Signed Confidentiality Statement",                                      displayOrder: 2,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Signed Data Protection Statement",                                      displayOrder: 1,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
-  { name: "Signed Non-Disclosure Agreement",                                       displayOrder: 6,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0  },
+  { name: "CV",                                                                    displayOrder: 7,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0,  clinicianCanUpload: true,  visibleToClinician: true,  notes: "" },
+  { name: "DBS Check/Update Service",                                              displayOrder: 2,  mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28, clinicianCanUpload: true,  visibleToClinician: true,  notes: "Annual renewal required." },
+  { name: "Declaration of Interests Form",                                         displayOrder: 4,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0,  clinicianCanUpload: true,  visibleToClinician: true,  notes: "" },
+  { name: "Enhanced Access - Key Contacts (Mon-Fri 6:30pm-8pm - Sat 8am-6:30pm)", displayOrder: 0,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0,  clinicianCanUpload: false, visibleToClinician: true,  notes: "Ops uploads this on behalf of clinician." },
+  { name: "East Lancashire Alliance - Enhanced Access - Key Contacts",             displayOrder: 0,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0,  clinicianCanUpload: false, visibleToClinician: true,  notes: "" },
+  { name: "Enhanced DBS Certificate (cert only)",                                  displayOrder: 2,  mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28, clinicianCanUpload: true,  visibleToClinician: true,  notes: "" },
+  { name: "Enhanced DBS Certitifcate",                                             displayOrder: 10, mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0,  clinicianCanUpload: true,  visibleToClinician: true,  notes: "" },
+  { name: "Fitness to Practise Form",                                              displayOrder: 3,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0,  clinicianCanUpload: true,  visibleToClinician: true,  notes: "" },
+  { name: "Health Screening Form",                                                 displayOrder: 5,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0,  clinicianCanUpload: true,  visibleToClinician: true,  notes: "" },
+  { name: "Indemnity Insurance Certificate",                                       displayOrder: 11, mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28, clinicianCanUpload: true,  visibleToClinician: true,  notes: "Must be current at all times." },
+  { name: "Proof of Address",                                                      displayOrder: 9,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0,  clinicianCanUpload: true,  visibleToClinician: true,  notes: "" },
+  { name: "Reference 1",                                                           displayOrder: 1,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0,  clinicianCanUpload: true,  visibleToClinician: true,  notes: "" },
+  { name: "Reference 2",                                                           displayOrder: 2,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0,  clinicianCanUpload: true,  visibleToClinician: true,  notes: "" },
+  { name: "Reference Contact Details",                                             displayOrder: 12, mandatory: false, expirable: false, active: false, defaultExpiryDays: 0,   defaultReminderDays: 0,  clinicianCanUpload: false, visibleToClinician: false, notes: "Archived — no longer required." },
+  { name: "Right to Work",                                                         displayOrder: 8,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0,  clinicianCanUpload: true,  visibleToClinician: true,  notes: "" },
+  { name: "Right to Work Check (expired)",                                         displayOrder: 5,  mandatory: true,  expirable: true,  active: true,  defaultExpiryDays: 365, defaultReminderDays: 28, clinicianCanUpload: true,  visibleToClinician: true,  notes: "" },
+  { name: "Signed Confidentiality Statement",                                      displayOrder: 2,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0,  clinicianCanUpload: true,  visibleToClinician: true,  notes: "" },
+  { name: "Signed Data Protection Statement",                                      displayOrder: 1,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0,  clinicianCanUpload: true,  visibleToClinician: true,  notes: "" },
+  { name: "Signed Non-Disclosure Agreement",                                       displayOrder: 6,  mandatory: true,  expirable: false, active: true,  defaultExpiryDays: 0,   defaultReminderDays: 0,  clinicianCanUpload: true,  visibleToClinician: true,  notes: "" },
 ];
 
+/* ══════════════════════════════════════════════════════════════════
+   DOCUMENT GROUPS
+   UPDATED: +applicableContractTypes, +colour, +notes
+══════════════════════════════════════════════════════════════════ */
 const DOCUMENT_GROUPS = [
   {
     name: "Archive/Expired",          displayOrder: 0, active: false,
     docNames: ["Right to Work", "Indemnity Insurance Certificate"],
+    applicableContractTypes: [],
+    colour: "#9ca3af",
+    notes: "Archived group — do not assign to new clinicians.",
   },
   {
     name: "Clinical Staff Documents", displayOrder: 1, active: true,
@@ -315,14 +418,23 @@ const DOCUMENT_GROUPS = [
       "Signed Confidentiality Statement", "Signed Data Protection Statement",
       "Signed Non-Disclosure Agreement",
     ],
+    applicableContractTypes: ["ARRS", "EA", "Direct"],
+    colour: "#3b82f6",
+    notes: "Standard compliance group for all clinical staff.",
   },
   {
     name: "DBS and Update",           displayOrder: 0, active: true,
     docNames: ["DBS Check/Update Service", "Enhanced DBS Certificate (cert only)"],
+    applicableContractTypes: ["ARRS", "EA", "Direct"],
+    colour: "#f59e0b",
+    notes: "For clinicians using DBS Update Service.",
   },
   {
     name: "DBS cert - no update",     displayOrder: 0, active: true,
     docNames: ["Enhanced DBS Certificate (cert only)"],
+    applicableContractTypes: ["ARRS", "EA", "Direct"],
+    colour: "#f97316",
+    notes: "For clinicians with standalone DBS certificate only.",
   },
   {
     name: "Enhanced Access",          displayOrder: 0, active: true,
@@ -330,6 +442,9 @@ const DOCUMENT_GROUPS = [
       "Enhanced Access - Key Contacts (Mon-Fri 6:30pm-8pm - Sat 8am-6:30pm)",
       "East Lancashire Alliance - Enhanced Access - Key Contacts",
     ],
+    applicableContractTypes: ["EA"],
+    colour: "#8b5cf6",
+    notes: "Enhanced Access contract clinicians only.",
   },
   {
     name: "Non-Clinical Staff",       displayOrder: 0, active: true,
@@ -337,61 +452,55 @@ const DOCUMENT_GROUPS = [
       "CV", "Signed Confidentiality Statement", "Signed Data Protection Statement",
       "Reference 1", "Reference 2", "Proof of Address",
     ],
+    applicableContractTypes: [],
+    colour: "#10b981",
+    notes: "For admin, VA, and non-clinical roles.",
   },
   {
     name: "Right to Work Check (Expired)", displayOrder: 0, active: true,
     docNames: ["Right to Work Check (expired)"],
+    applicableContractTypes: ["ARRS", "EA", "Direct"],
+    colour: "#ef4444",
+    notes: "Assign when right to work needs re-verification.",
   },
 ];
 
-// ─────────────────────────────────────────────────────────────────────────────
-// HELPERS
-// ─────────────────────────────────────────────────────────────────────────────
+/* ── Helpers ─────────────────────────────────────────────────────── */
 const rand    = arr => arr[Math.floor(Math.random() * arr.length)];
 const daysAgo = n   => new Date(Date.now() - n * 86_400_000).toISOString();
+const daysFromNow = n => new Date(Date.now() + n * 86_400_000).toISOString();
 
 const makeSeedGroupRecord = ({ groupId, documentId, documentName, expirable, uploadedBy, daysBack = 10 }) => {
   const uploadedAt = daysAgo(daysBack);
-  const expiryDate = expirable
-    ? new Date(Date.now() + 180 * 86_400_000).toISOString()
-    : null;
-
+  const expiryDate = expirable ? new Date(Date.now() + 180 * 86_400_000).toISOString() : null;
   const upload = {
-    uploadId:   createId(),
-    fileName:   `${String(documentName || "document").toLowerCase().replace(/[^a-z0-9]+/g, "_")}.pdf`,
-    fileUrl:    `https://files.cps.local/${groupId}/${documentId}/${Date.now()}.pdf`,
-    mimeType:   "application/pdf",
-    fileSize:   180000 + Math.floor(Math.random() * 70000),
-    status:     "uploaded",
+    uploadId:    createId(),
+    fileName:    `${String(documentName || "document").toLowerCase().replace(/[^a-z0-9]+/g, "_")}.pdf`,
+    fileUrl:     `https://files.cps.local/${groupId}/${documentId}/${Date.now()}.pdf`,
+    mimeType:    "application/pdf",
+    fileSize:    180000 + Math.floor(Math.random() * 70000),
+    status:      "uploaded",
     uploadedAt,
     expiryDate,
     renewalDate: null,
-    notes:      "Seeded upload record",
-    reference:  `SEED-${String(documentId).slice(-6).toUpperCase()}`,
+    notes:       "Seeded upload record",
+    reference:   `SEED-${String(documentId).slice(-6).toUpperCase()}`,
     uploadedBy,
   };
-
   return {
-    group:         groupId,
-    document:      documentId,
-    fileName:      upload.fileName,
-    fileUrl:       upload.fileUrl,
-    mimeType:      upload.mimeType,
-    fileSize:      upload.fileSize,
-    status:        upload.status,
-    uploadedAt:    upload.uploadedAt,
-    expiryDate:    upload.expiryDate,
-    renewalDate:   null,
-    notes:         upload.notes,
-    uploadedBy,
-    lastUpdatedBy: uploadedBy,
-    uploads:       [upload],
+    group: groupId, document: documentId,
+    fileName: upload.fileName, fileUrl: upload.fileUrl,
+    mimeType: upload.mimeType, fileSize: upload.fileSize,
+    status: upload.status, uploadedAt: upload.uploadedAt,
+    expiryDate: upload.expiryDate, renewalDate: null,
+    notes: upload.notes, uploadedBy, lastUpdatedBy: uploadedBy,
+    uploads: [upload],
   };
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MAIN SEED FUNCTION
-// ─────────────────────────────────────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════════════════
+   MAIN SEED FUNCTION
+══════════════════════════════════════════════════════════════════ */
 export async function runSeed() {
   await initDB();
   log.ok("PostgreSQL connected");
@@ -399,20 +508,27 @@ export async function runSeed() {
   // ── 1. Users ──────────────────────────────────────────────────────────────
   log.info("Seeding Users...");
   const seededUsers = [];
-
   for (const u of USERS) {
     const hashed = await bcrypt.hash(u.password, 12);
     const user   = await upsertRecord("user", "email", u.email.toLowerCase(), {
-      name:                u.name,
-      email:               u.email.trim().toLowerCase(),
-      password:            hashed,
-      role:                u.role,
-      isActive:            true,
-      mustChangePassword:  false,
-      isAnonymised:        false,
-      lastLogin:           null,
+      name:               u.name,
+      email:              u.email.trim().toLowerCase(),
+      password:           hashed,
+      role:               u.role,
+      isActive:           true,
+      mustChangePassword: false,
+      isAnonymised:       false,
+      lastLogin:          null,
+      phone:        "",
+      department:   u.role === "clinician" ? "Clinical" : u.role === "finance" ? "Finance" : u.role === "training" ? "Training" : "Operations",
+      jobTitle:     u.role === "clinician" ? "Clinical Pharmacist" : u.role === "finance" ? "Finance Manager" : "",
+      opsLead:      null,
+      supervisor:   null,
+      startDate:    daysAgo(180),
+      leaveDate:    null,
+      profilePhoto: "",
+      emergencyContact: { name: "", relationship: "", phone: "", email: "" },
     });
-
     seededUsers.push(user);
     log.ok(`${u.email} [${u.role}]`);
   }
@@ -423,12 +539,8 @@ export async function runSeed() {
   // ── 2. ICBs ───────────────────────────────────────────────────────────────
   log.info("\nSeeding ICBs...");
   const icbMap = {};
-
   for (const d of ICBS) {
-    const icb = await upsertRecord("icb", "name", d.name, {
-      ...d,
-      createdBy: admin.id,
-    });
+    const icb = await upsertRecord("icb", "name", d.name, { ...d, createdBy: admin.id });
     icbMap[d.name] = icb;
     log.ok(d.name);
   }
@@ -436,49 +548,31 @@ export async function runSeed() {
   // ── 3. Federations ────────────────────────────────────────────────────────
   log.info("\nSeeding Federations...");
   const fedMap = {};
-
   for (const d of FEDERATION_DATA) {
     const icb = icbMap[d.icbName];
     if (!icb) { log.warn(`ICB not found: ${d.icbName}`); continue; }
-
     const fed = await upsertRecord("federation", "name", d.name, {
-      name:      d.name,
-      icb:       icb.id,
-      type:      d.type,
-      createdBy: admin.id,
+      name: d.name, icb: icb.id, type: d.type, createdBy: admin.id,
     });
     fedMap[d.name] = fed;
     log.ok(`${d.name} [${d.type}]`);
   }
 
   // ── 4. Clients ────────────────────────────────────────────────────────────
-  // FIX: Store icb and federation as populated objects { _id, id, name }
-  // so frontend client.icb?.name and client.federation?.name resolve correctly.
-  // ──────────────────────────────────────────────────────────────────────────
   log.info("\nSeeding Clients...");
   const clientMap = {};
-
   for (const group of CLIENT_DATA) {
     const icb = icbMap[group.icbName];
     const fed = fedMap[group.federationName];
     if (!icb) { log.warn(`ICB not found: ${group.icbName}`); continue; }
-
     for (const d of group.clients) {
       const client = await upsertRecord("client", "name", d.name, {
         ...d,
-        // ✅ FIX: store populated objects instead of raw UUID strings
-        icb: {
-          _id:  icb.id,
-          id:   icb.id,
-          name: icb.name,
-          code: icb.code,
-        },
-        federation: fed
-          ? { _id: fed.id, id: fed.id, name: fed.name, type: fed.type }
-          : null,
-        federationName:        group.federationName,
-        restrictedClinicians:  clinicians.length ? [clinicians[0].id] : [],
-        createdBy:             admin.id,
+        icb:        { _id: icb.id, id: icb.id, name: icb.name, code: icb.code },
+        federation: fed ? { _id: fed.id, id: fed.id, name: fed.name, type: fed.type } : null,
+        federationName:       group.federationName,
+        restrictedClinicians: clinicians.length ? [clinicians[0].id] : [],
+        createdBy:            admin.id,
       });
       clientMap[d.name] = client;
       log.ok(d.name);
@@ -488,20 +582,13 @@ export async function runSeed() {
   // ── 5. Practices ──────────────────────────────────────────────────────────
   log.info("\nSeeding Practices...");
   const practiceMap = {};
-
   for (const [clientName, practices] of Object.entries(PRACTICE_DATA)) {
     const client = clientMap[clientName];
     if (!client) { log.warn(`Client not found: ${clientName}`); continue; }
-
     for (const d of practices) {
       const practice = await upsertRecord("practice", "odsCode", d.odsCode, {
         ...d,
-        // ✅ FIX: store populated client object so practice detail pages work too
-        client: {
-          _id:  client.id,
-          id:   client.id,
-          name: client.name,
-        },
+        client:          { _id: client.id, id: client.id, name: client.name },
         linkedClinicians: clinicians.map(c => c.id),
         createdBy:        admin.id,
       });
@@ -518,15 +605,18 @@ export async function runSeed() {
     for (let i = 0; i < 5; i++) {
       const t = rand(HISTORY_TEMPLATES);
       await insertRecord("contact_history", {
-        entityType: "Client",
-        entityId:   client.id,
-        type:       t.type,
-        subject:    t.subject,
-        notes:      t.notes,
-        date:       daysAgo(Math.floor(Math.random() * 90)),
-        time:       `${String(Math.floor(Math.random() * 8) + 9).padStart(2, "0")}:${Math.random() > 0.5 ? "00" : "30"}`,
-        starred:    i === 0,
-        createdBy:  admin.id,
+        entityType:   "Client",
+        entityId:     client.id,
+        type:         t.type,
+        subject:      t.subject,
+        notes:        t.notes,
+        date:         daysAgo(Math.floor(Math.random() * 90)),
+        time:         `${String(Math.floor(Math.random() * 8) + 9).padStart(2, "0")}:${Math.random() > 0.5 ? "00" : "30"}`,
+        starred:      i === 0,
+        createdBy:    admin.id,
+        outcome:      t.outcome || "",
+        followUpDate: t.followUpNote ? daysFromNow(7) : null,
+        followUpNote: t.followUpNote || "",
       });
     }
     log.ok(`History seeded for ${client.name}`);
@@ -536,15 +626,18 @@ export async function runSeed() {
     for (let i = 0; i < 3; i++) {
       const t = rand(HISTORY_TEMPLATES);
       await insertRecord("contact_history", {
-        entityType: "Practice",
-        entityId:   practice.id,
-        type:       t.type,
-        subject:    t.subject,
-        notes:      t.notes,
-        date:       daysAgo(Math.floor(Math.random() * 60)),
-        time:       "10:00",
-        starred:    false,
-        createdBy:  admin.id,
+        entityType:   "Practice",
+        entityId:     practice.id,
+        type:         t.type,
+        subject:      t.subject,
+        notes:        t.notes,
+        date:         daysAgo(Math.floor(Math.random() * 60)),
+        time:         "10:00",
+        starred:      false,
+        createdBy:    admin.id,
+        outcome:      t.outcome || "",
+        followUpDate: null,
+        followUpNote: "",
       });
     }
   }
@@ -553,11 +646,9 @@ export async function runSeed() {
   // ── 7. Compliance Documents ───────────────────────────────────────────────
   log.info("\nSeeding Compliance Documents...");
   const docMap = {};
-
   for (const d of COMPLIANCE_DOCS) {
     const doc = await upsertRecord("compliance_document", "name", d.name, {
-      ...d,
-      createdBy: admin.id,
+      ...d, createdBy: admin.id,
     });
     docMap[d.name] = doc;
     log.ok(d.name);
@@ -566,16 +657,17 @@ export async function runSeed() {
   // ── 8. Document Groups ────────────────────────────────────────────────────
   log.info("\nSeeding Document Groups...");
   const groupMap = {};
-
   for (const g of DOCUMENT_GROUPS) {
     const docIds = g.docNames.map(n => docMap[n]?.id).filter(Boolean);
-
-    const group = await upsertRecord("document_group", "name", g.name, {
-      name:         g.name,
-      displayOrder: g.displayOrder,
-      active:       g.active,
-      documents:    docIds,
-      createdBy:    admin.id,
+    const group  = await upsertRecord("document_group", "name", g.name, {
+      name:                    g.name,
+      displayOrder:            g.displayOrder,
+      active:                  g.active,
+      documents:               docIds,
+      applicableContractTypes: g.applicableContractTypes || [],
+      colour:                  g.colour || "",
+      notes:                   g.notes  || "",
+      createdBy:               admin.id,
     });
     groupMap[g.name] = group;
     log.ok(`${g.name} (${docIds.length} docs)`);
@@ -583,11 +675,10 @@ export async function runSeed() {
 
   // ── 9. Assign Compliance Groups to Clients & Practices ───────────────────
   log.info("\nAssigning compliance groups...");
-
-  const docsById               = Object.fromEntries(Object.values(docMap).map(d => [d.id, d]));
-  const clientPrimaryGroup     = groupMap["Clinical Staff Documents"];
-  const clientSecondaryGroup   = groupMap["DBS and Update"];
-  const practicePrimaryGroup   = groupMap["Non-Clinical Staff"] || clientPrimaryGroup || null;
+  const docsById             = Object.fromEntries(Object.values(docMap).map(d => [d.id, d]));
+  const clientPrimaryGroup   = groupMap["Clinical Staff Documents"];
+  const clientSecondaryGroup = groupMap["DBS and Update"];
+  const practicePrimaryGroup = groupMap["Non-Clinical Staff"] || clientPrimaryGroup || null;
 
   for (const client of Object.values(clientMap)) {
     const selectedGroups   = [clientPrimaryGroup, clientSecondaryGroup].filter(Boolean);
@@ -597,17 +688,12 @@ export async function runSeed() {
     for (const group of selectedGroups) {
       const docIds = (group.documents || []).filter(Boolean);
       if (!docIds.length) continue;
-
       const firstDocId = docIds[0];
       const docDef     = docsById[firstDocId];
-
       seededRecords.push(makeSeedGroupRecord({
-        groupId:      group.id,
-        documentId:   firstDocId,
+        groupId: group.id, documentId: firstDocId,
         documentName: docDef?.name || "Document",
-        expirable:    !!docDef?.expirable,
-        uploadedBy:   admin.id,
-        daysBack:     7,
+        expirable: !!docDef?.expirable, uploadedBy: admin.id, daysBack: 7,
       }));
     }
 
@@ -621,24 +707,18 @@ export async function runSeed() {
 
   for (const practice of Object.values(practiceMap)) {
     const seededRecords = [];
-
     if (practicePrimaryGroup) {
       const docIds = (practicePrimaryGroup.documents || []).filter(Boolean);
       if (docIds.length) {
         const firstDocId = docIds[0];
         const docDef     = docsById[firstDocId];
-
         seededRecords.push(makeSeedGroupRecord({
-          groupId:      practicePrimaryGroup.id,
-          documentId:   firstDocId,
+          groupId: practicePrimaryGroup.id, documentId: firstDocId,
           documentName: docDef?.name || "Document",
-          expirable:    !!docDef?.expirable,
-          uploadedBy:   admin.id,
-          daysBack:     5,
+          expirable: !!docDef?.expirable, uploadedBy: admin.id, daysBack: 5,
         }));
       }
     }
-
     await updateRecord("practice", practice.id, {
       complianceGroup: practicePrimaryGroup?.id || null,
       groupDocuments:  seededRecords,
@@ -648,7 +728,6 @@ export async function runSeed() {
 
   // ── Done ──────────────────────────────────────────────────────────────────
   await disconnectDB();
-
   log.ok("\nSeed complete!");
   log.info(
     `Users: ${USERS.length} | ICBs: ${ICBS.length} | ` +
@@ -658,9 +737,7 @@ export async function runSeed() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ENTRY POINT
-// ─────────────────────────────────────────────────────────────────────────────
+/* ── Entry point ─────────────────────────────────────────────────── */
 if (
   process.argv[1] &&
   import.meta.url === new URL(`file://${process.argv[1].replace(/\\/g, "/")}`).href

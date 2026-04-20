@@ -2,6 +2,15 @@
  * complianceDocController.js
  * CRUD for ComplianceDocument and DocumentGroup admin management
  *
+ * UPDATED (Apr 2026) — Spec: CPS_Controller_Update_Spec.docx
+ *
+ * createComplianceDoc    — +clinicianCanUpload, +visibleToClinician, +defaultReminderDays, +notes
+ * updateComplianceDoc    — +clinicianCanUpload, +visibleToClinician, +defaultReminderDays, +notes
+ * createDocumentGroup    — +applicableContractTypes, +colour, +notes
+ * updateDocumentGroup    — +applicableContractTypes, +colour, +notes
+ * getDocumentGroups      — +?applicableContractTypes= filter
+ * duplicateDocumentGroup — copies applicableContractTypes + colour, does NOT copy notes
+ *
  * Routes:
  *   GET    /api/compliance/documents
  *   GET    /api/compliance/documents/stats
@@ -46,9 +55,8 @@ export const getComplianceDocs = async (req, res) => {
     if (autoSendOnBooking  !== undefined) filter.autoSendOnBooking  = autoSendOnBooking === "true";
     if (preStartRequired   !== undefined) filter.preStartRequired   = preStartRequired === "true";
     if (category)     filter.category     = category;
-    if (applicableTo) filter.applicableTo = applicableTo; // e.g. "Clinician"
+    if (applicableTo) filter.applicableTo = applicableTo;
 
-    // Text search on name + description
     if (search?.trim()) {
       filter.$or = [
         { name:        { $regex: search.trim(), $options: "i" } },
@@ -69,7 +77,6 @@ export const getComplianceDocs = async (req, res) => {
 
 /**
  * GET /api/compliance/documents/stats
- * Summary counts by category, active/inactive, etc.
  */
 export const getComplianceDocStats = async (req, res) => {
   try {
@@ -106,7 +113,6 @@ export const getComplianceDocById = async (req, res) => {
     const doc = await ComplianceDocument.findById(req.params.id).lean();
     if (!doc) return res.status(404).json({ message: "Document not found" });
 
-    // Which groups contain this doc
     const groups = await DocumentGroup.find({ documents: req.params.id })
       .select("name active displayOrder applicableEntityTypes")
       .lean();
@@ -120,6 +126,11 @@ export const getComplianceDocById = async (req, res) => {
 
 /**
  * POST /api/compliance/documents
+ *
+ * UPDATED: +clinicianCanUpload (bool, default true)
+ *          +visibleToClinician  (bool, default true)
+ *          +defaultReminderDays (number, default 28)
+ *          +notes               (string, admin-only internal notes)
  */
 export const createComplianceDoc = async (req, res) => {
   try {
@@ -129,6 +140,11 @@ export const createComplianceDoc = async (req, res) => {
       defaultExpiryDays, reminderDays,
       autoSendOnBooking, preStartRequired,
       templateFileUrl, templateFileName,
+      // ── NEW FIELDS (spec §1) ──────────────────────
+      clinicianCanUpload,
+      visibleToClinician,
+      defaultReminderDays,
+      notes,
     } = req.body;
 
     if (!name?.trim()) return res.status(400).json({ message: "Document name is required" });
@@ -151,6 +167,11 @@ export const createComplianceDoc = async (req, res) => {
       preStartRequired:  preStartRequired  ?? false,
       templateFileUrl:   templateFileUrl   || "",
       templateFileName:  templateFileName  || "",
+      // ── NEW FIELDS ───────────────────────────────
+      clinicianCanUpload:  clinicianCanUpload  ?? true,
+      visibleToClinician:  visibleToClinician  ?? true,
+      defaultReminderDays: defaultReminderDays ?? 28,
+      notes:               notes?.trim()       || "",
       createdBy: req.user._id,
     });
 
@@ -163,6 +184,8 @@ export const createComplianceDoc = async (req, res) => {
 
 /**
  * PUT /api/compliance/documents/:id
+ *
+ * UPDATED: +clinicianCanUpload, +visibleToClinician, +defaultReminderDays, +notes
  */
 export const updateComplianceDoc = async (req, res) => {
   try {
@@ -172,23 +195,33 @@ export const updateComplianceDoc = async (req, res) => {
       defaultExpiryDays, reminderDays,
       autoSendOnBooking, preStartRequired,
       templateFileUrl, templateFileName,
+      // ── NEW FIELDS (spec §2) ──────────────────────
+      clinicianCanUpload,
+      visibleToClinician,
+      defaultReminderDays,
+      notes,
     } = req.body;
 
     const updateFields = {
-      ...(name              !== undefined && { name: name.trim() }),
-      ...(description       !== undefined && { description: description.trim() }),
-      ...(category          !== undefined && { category }),
-      ...(applicableTo      !== undefined && { applicableTo }),
-      ...(displayOrder      !== undefined && { displayOrder }),
-      ...(mandatory         !== undefined && { mandatory }),
-      ...(expirable         !== undefined && { expirable }),
-      ...(active            !== undefined && { active }),
-      ...(defaultExpiryDays !== undefined && { defaultExpiryDays }),
-      ...(reminderDays      !== undefined && { reminderDays }),
-      ...(autoSendOnBooking !== undefined && { autoSendOnBooking }),
-      ...(preStartRequired  !== undefined && { preStartRequired }),
-      ...(templateFileUrl   !== undefined && { templateFileUrl }),
-      ...(templateFileName  !== undefined && { templateFileName }),
+      ...(name                !== undefined && { name: name.trim() }),
+      ...(description         !== undefined && { description: description.trim() }),
+      ...(category            !== undefined && { category }),
+      ...(applicableTo        !== undefined && { applicableTo }),
+      ...(displayOrder        !== undefined && { displayOrder }),
+      ...(mandatory           !== undefined && { mandatory }),
+      ...(expirable           !== undefined && { expirable }),
+      ...(active              !== undefined && { active }),
+      ...(defaultExpiryDays   !== undefined && { defaultExpiryDays }),
+      ...(reminderDays        !== undefined && { reminderDays }),
+      ...(autoSendOnBooking   !== undefined && { autoSendOnBooking }),
+      ...(preStartRequired    !== undefined && { preStartRequired }),
+      ...(templateFileUrl     !== undefined && { templateFileUrl }),
+      ...(templateFileName    !== undefined && { templateFileName }),
+      // ── NEW FIELDS ───────────────────────────────
+      ...(clinicianCanUpload  !== undefined && { clinicianCanUpload }),
+      ...(visibleToClinician  !== undefined && { visibleToClinician }),
+      ...(defaultReminderDays !== undefined && { defaultReminderDays }),
+      ...(notes               !== undefined && { notes: notes?.trim() || "" }),
       updatedBy: req.user._id,
     };
 
@@ -210,7 +243,6 @@ export const updateComplianceDoc = async (req, res) => {
  */
 export const deleteComplianceDoc = async (req, res) => {
   try {
-    // Remove from all groups first
     await DocumentGroup.updateMany(
       { documents: req.params.id },
       { $pull: { documents: req.params.id } }
@@ -231,17 +263,40 @@ export const deleteComplianceDoc = async (req, res) => {
 
 /**
  * GET /api/compliance/groups
- * Query params: active, applicableEntityTypes, autoAssignOnBooking, isPreStartChecklist
+ * Query params: active, applicableEntityTypes, autoAssignOnBooking,
+ *               isPreStartChecklist, applicableContractTypes (NEW)
+ *
+ * UPDATED: +?applicableContractTypes= filter (spec §5)
+ *   e.g. /api/compliance/groups?applicableContractTypes=ARRS
+ *        returns only groups where applicableContractTypes includes "ARRS"
  */
 export const getDocumentGroups = async (req, res) => {
   try {
-    const { active, applicableEntityTypes, autoAssignOnBooking, isPreStartChecklist } = req.query;
+    const {
+      active, applicableEntityTypes, autoAssignOnBooking,
+      isPreStartChecklist,
+      applicableContractTypes, // ── NEW FILTER (spec §5)
+    } = req.query;
 
     const filter = {};
     if (active                !== undefined) filter.active                = active === "true";
     if (autoAssignOnBooking   !== undefined) filter.autoAssignOnBooking   = autoAssignOnBooking === "true";
     if (isPreStartChecklist   !== undefined) filter.isPreStartChecklist   = isPreStartChecklist === "true";
     if (applicableEntityTypes) filter.applicableEntityTypes = applicableEntityTypes;
+
+    // ── NEW: filter by contract type ─────────────────
+    // Supports comma-separated: ?applicableContractTypes=ARRS,EA
+    if (applicableContractTypes) {
+      const types = String(applicableContractTypes)
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean);
+      if (types.length === 1) {
+        filter.applicableContractTypes = types[0];
+      } else if (types.length > 1) {
+        filter.applicableContractTypes = { $in: types };
+      }
+    }
 
     const groups = await DocumentGroup.find(filter)
       .populate("documents", "name displayOrder mandatory expirable active category autoSendOnBooking preStartRequired")
@@ -257,8 +312,6 @@ export const getDocumentGroups = async (req, res) => {
 
 /**
  * GET /api/compliance/groups/for-entity/:entityType
- * Returns active groups applicable to a specific entity type
- * e.g. /for-entity/Clinician → groups for clinicians
  */
 export const getGroupsForEntity = async (req, res) => {
   try {
@@ -288,7 +341,6 @@ export const getDocumentGroupById = async (req, res) => {
       .lean();
     if (!group) return res.status(404).json({ message: "Document group not found" });
 
-    // All active docs for checkbox list in admin UI
     const allDocs = await ComplianceDocument.find({ active: true })
       .sort({ displayOrder: 1, name: 1 })
       .lean();
@@ -302,6 +354,10 @@ export const getDocumentGroupById = async (req, res) => {
 
 /**
  * POST /api/compliance/groups
+ *
+ * UPDATED: +applicableContractTypes (array, e.g. ['ARRS','EA'])
+ *          +colour                  (string, UI badge hex/name)
+ *          +notes                   (string, admin internal notes)
  */
 export const createDocumentGroup = async (req, res) => {
   try {
@@ -309,6 +365,10 @@ export const createDocumentGroup = async (req, res) => {
       name, description, displayOrder, active,
       applicableEntityTypes, documents,
       isPreStartChecklist, autoAssignOnBooking,
+      // ── NEW FIELDS (spec §3) ──────────────────────
+      applicableContractTypes,
+      colour,
+      notes,
     } = req.body;
 
     if (!name?.trim()) return res.status(400).json({ message: "Group name is required" });
@@ -325,6 +385,10 @@ export const createDocumentGroup = async (req, res) => {
       documents:             documents             || [],
       isPreStartChecklist:   isPreStartChecklist   ?? false,
       autoAssignOnBooking:   autoAssignOnBooking   ?? false,
+      // ── NEW FIELDS ───────────────────────────────
+      applicableContractTypes: Array.isArray(applicableContractTypes) ? applicableContractTypes : [],
+      colour:                  colour?.trim() || "",
+      notes:                   notes?.trim()  || "",
       createdBy: req.user._id,
     });
 
@@ -341,6 +405,8 @@ export const createDocumentGroup = async (req, res) => {
 
 /**
  * PUT /api/compliance/groups/:id
+ *
+ * UPDATED: +applicableContractTypes, +colour, +notes
  */
 export const updateDocumentGroup = async (req, res) => {
   try {
@@ -348,17 +414,25 @@ export const updateDocumentGroup = async (req, res) => {
       name, description, displayOrder, active,
       applicableEntityTypes, documents,
       isPreStartChecklist, autoAssignOnBooking,
+      // ── NEW FIELDS (spec §4) ──────────────────────
+      applicableContractTypes,
+      colour,
+      notes,
     } = req.body;
 
     const updateFields = {
-      ...(name                  !== undefined && { name: name.trim() }),
-      ...(description           !== undefined && { description: description.trim() }),
-      ...(displayOrder          !== undefined && { displayOrder }),
-      ...(active                !== undefined && { active }),
-      ...(applicableEntityTypes !== undefined && { applicableEntityTypes }),
-      ...(documents             !== undefined && { documents }),
-      ...(isPreStartChecklist   !== undefined && { isPreStartChecklist }),
-      ...(autoAssignOnBooking   !== undefined && { autoAssignOnBooking }),
+      ...(name                    !== undefined && { name: name.trim() }),
+      ...(description             !== undefined && { description: description.trim() }),
+      ...(displayOrder            !== undefined && { displayOrder }),
+      ...(active                  !== undefined && { active }),
+      ...(applicableEntityTypes   !== undefined && { applicableEntityTypes }),
+      ...(documents               !== undefined && { documents }),
+      ...(isPreStartChecklist     !== undefined && { isPreStartChecklist }),
+      ...(autoAssignOnBooking     !== undefined && { autoAssignOnBooking }),
+      // ── NEW FIELDS ───────────────────────────────
+      ...(applicableContractTypes !== undefined && { applicableContractTypes }),
+      ...(colour                  !== undefined && { colour: colour?.trim() || "" }),
+      ...(notes                   !== undefined && { notes: notes?.trim() || "" }),
       updatedBy: req.user._id,
     };
 
@@ -392,7 +466,9 @@ export const deleteDocumentGroup = async (req, res) => {
 
 /**
  * POST /api/compliance/groups/:id/duplicate
- * Admin shortcut — clone an existing group with a new name
+ *
+ * UPDATED: copies applicableContractTypes + colour from source
+ *          does NOT copy notes (spec §6 — admin adds fresh notes to clone)
  */
 export const duplicateDocumentGroup = async (req, res) => {
   try {
@@ -414,6 +490,10 @@ export const duplicateDocumentGroup = async (req, res) => {
       documents:             source.documents,
       isPreStartChecklist:   source.isPreStartChecklist,
       autoAssignOnBooking:   source.autoAssignOnBooking,
+      // ── NEW FIELDS: copy contract types + colour, NOT notes (spec §6) ──
+      applicableContractTypes: source.applicableContractTypes || [],
+      colour:                  source.colour || "",
+      notes:                   "",          // intentionally blank on clone
       createdBy: req.user._id,
     });
 

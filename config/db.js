@@ -25,7 +25,7 @@ if (!global._pgPool) {
       rejectUnauthorized: false, //  Supabase required
     },
 
-    // 🔥 Serverless optimized
+    //  Serverless optimized
     max: 5, // low connections (important for Vercel)
     idleTimeoutMillis: 20000,
     connectionTimeoutMillis: 10000,
