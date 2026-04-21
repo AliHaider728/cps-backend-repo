@@ -1,15 +1,5 @@
 /**
  * @file server.js
- * @description Entry point for the CPS (Compliance Processing System) REST API.
- *              Configures Express middleware, CORS, rate limiting, routes,
- *              and global error handling.
- *
- * @author       ALi Haider Ansari
- * @version     1.0.0
- *
- * UPDATED (Apr 2026):
- *   - initDB() now runs on production (Vercel cold start fix)
- *   - DB connection pooling optimized for serverless
  */
 
 import express from "express";
@@ -28,9 +18,6 @@ dotenv.config();
 
 const app = express();
 
-// ─────────────────────────────────────────────────────────────────────────────
-// LOGGER UTILITY
-// ─────────────────────────────────────────────────────────────────────────────
 const log = {
   info:  (msg, ...args) => console.log(`[INFO]  ${msg}`, ...args),
   warn:  (msg, ...args) => console.warn(`[WARN]  ${msg}`, ...args),
@@ -38,9 +25,6 @@ const log = {
   ok:    (msg, ...args) => console.log(`[OK]    ${msg}`, ...args),
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CUSTOM ERROR CLASS
-// ─────────────────────────────────────────────────────────────────────────────
 class AppError extends Error {
   constructor(message, statusCode = 500, code = "INTERNAL_ERROR") {
     super(message);
@@ -50,22 +34,30 @@ class AppError extends Error {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ASYNC HANDLER WRAPPER
-// ─────────────────────────────────────────────────────────────────────────────
 const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TRUST PROXY
-// ─────────────────────────────────────────────────────────────────────────────
 app.set("trust proxy", 1);
 log.info("NODE_ENV:", process.env.NODE_ENV);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CORS CONFIGURATION
-// ─────────────────────────────────────────────────────────────────────────────
+// ── DEBUG: Log every incoming request ────────────────────────────
+app.use((req, res, next) => {
+  console.log(`\n[REQ] ${req.method} ${req.originalUrl}`);
+  console.log(`[REQ] Content-Type: ${req.headers["content-type"] || "none"}`);
+
+  const originalJson = res.json.bind(res);
+  res.json = (body) => {
+    console.log(`[RES] ${req.method} ${req.originalUrl} → ${res.statusCode}`);
+    if (res.statusCode >= 400) {
+      console.error(`[RES ERROR] Body:`, JSON.stringify(body));
+    }
+    return originalJson(body);
+  };
+
+  next();
+});
+
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:3000",
@@ -78,7 +70,6 @@ app.use(cors({
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
     log.warn("CORS blocked origin:", origin);
-    // Still allow — don't block unknown origins
     return callback(null, true);
   },
   credentials: true,
@@ -88,9 +79,6 @@ app.use(cors({
 
 app.options("*", cors());
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BODY PARSERS
-// ─────────────────────────────────────────────────────────────────────────────
 app.use(express.json({ limit: "10mb", strict: true }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -105,9 +93,6 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// RATE LIMITER
-// ─────────────────────────────────────────────────────────────────────────────
 app.use(rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 200,
@@ -123,29 +108,38 @@ app.use(rateLimit({
   },
 }));
 
-// ─────────────────────────────────────────────────────────────────────────────
-// API ROUTES
-// ─────────────────────────────────────────────────────────────────────────────
 app.use("/api/auth",       authRoutes);
 app.use("/api/audit",      auditRoutes);
 app.use("/api/clients",    clientRoutes);
 app.use("/api/compliance", complianceDocRoutes);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// HEALTH CHECK ENDPOINTS
-// ─────────────────────────────────────────────────────────────────────────────
 app.get("/api/db-test", asyncHandler(async (req, res) => {
   const result = await query("SELECT NOW() as time");
   res.json({ status: "ok", db_time: result.rows[0].time });
+}));
+
+// ── DEBUG: Supabase connection test ──────────────────────────────
+app.get("/api/storage-test", asyncHandler(async (req, res) => {
+  try {
+    const { getSupabaseClient } = await import("./lib/supabase.js");
+    const client = getSupabaseClient();
+    const { data, error } = await client.storage.listBuckets();
+    if (error) {
+      console.error("[STORAGE TEST] Error:", error);
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+    console.log("[STORAGE TEST] Buckets:", data);
+    res.json({ ok: true, buckets: data });
+  } catch (err) {
+    console.error("[STORAGE TEST] Exception:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
 }));
 
 app.get("/", (req, res) => {
   res.json({ status: "ok", message: "CPS API is running" });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 404 HANDLER
-// ─────────────────────────────────────────────────────────────────────────────
 app.use((req, res) => {
   log.warn("Route not found:", req.method, req.originalUrl);
   res.status(404).json({
@@ -155,20 +149,15 @@ app.use((req, res) => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GLOBAL ERROR HANDLER
-// ─────────────────────────────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
   const statusCode = err.statusCode || 500;
   const isOperational = err.isOperational || false;
   const isDev = process.env.NODE_ENV !== "production";
 
-  log.error(`[${err.code || "UNHANDLED"}] ${err.message}`, {
-    path: req.originalUrl,
-    method: req.method,
-    ip: req.ip,
-    ...(isDev && { stack: err.stack }),
-  });
+  // ── DEBUG: Full error print ───────────────────────────────────
+  console.error(`\n[ERROR HANDLER] ${req.method} ${req.originalUrl}`);
+  console.error(`[ERROR HANDLER] Message: ${err.message}`);
+  console.error(`[ERROR HANDLER] Stack:\n${err.stack}`);
 
   const clientMessage = isOperational || isDev
     ? err.message
@@ -178,31 +167,20 @@ app.use((err, req, res, next) => {
     status: "error",
     code: err.code || "INTERNAL_ERROR",
     message: clientMessage,
-    ...(isDev && !isOperational && { stack: err.stack }),
+    ...(isDev && { stack: err.stack }),
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DB INIT — runs on BOTH local and production (Vercel cold start)
-// ─────────────────────────────────────────────────────────────────────────────
-// ✅ FIX: Previously initDB() only ran in non-production block.
-//         On Vercel, NODE_ENV = "production" so DB was never initialised,
-//         causing "Token invalid" errors because user lookups failed silently.
-//         Now initDB() runs unconditionally on module load.
 initDB()
   .then(() => log.ok("DB initialised"))
   .catch((err) => log.error("DB init failed:", err.message));
 
-// ─────────────────────────────────────────────────────────────────────────────
-// LOCAL DEV SERVER BOOTSTRAP
-// Skipped in production — Vercel imports app directly and handles the port.
-// ─────────────────────────────────────────────────────────────────────────────
 if (process.env.NODE_ENV !== "production") {
   const PORT = process.env.PORT || 5000;
 
   async function startServer() {
     try {
-      await initDB(); // safe — initDB() is idempotent (isInitialized guard)
+      await initDB();
       app.listen(PORT, () => {
         log.ok(`Server running on port ${PORT}`);
         log.info("Allowed origins:", allowedOrigins);
@@ -216,8 +194,5 @@ if (process.env.NODE_ENV !== "production") {
   startServer();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// EXPORTS
-// ─────────────────────────────────────────────────────────────────────────────
 export { AppError, asyncHandler };
-export default app;
+export default app; 
