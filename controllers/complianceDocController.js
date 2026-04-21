@@ -504,6 +504,6 @@ export const duplicateDocumentGroup = async (req, res) => {
     res.status(201).json({ group: populated, message: "Group duplicated successfully" });
   } catch (err) {
     console.error("duplicateDocumentGroup ERROR:", err.message);
-    res.status(500).json({ message:  "Failed to duplicate group" });
+    res.status(500).json({ message: "Failed to duplicate group" });
   }
 };
