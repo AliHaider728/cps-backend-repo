@@ -1,15 +1,10 @@
 /**
  * clientController.js — CPS Client Management
  * CONVERTED TO POSTGRESQL (Apr 2026)
- *
- * All MongoDB/Mongoose replaced with PostgreSQL query() from config/db.js
- * Data stored in app_records table:
- *   model = "icb"             → ICBs
- *   model = "federation"      → Federations
- *   model = "client"          → PCNs/Clients
- *   model = "practice"        → Practices
- *   model = "contact_history" → Contact History
- *   model = "audit_log"       → Audit logs
+ * FIXED (Apr 2026):
+ *   - getPracticeById: now populates client with icb + federation
+ *   - getPracticeById: now populates complianceGroup object
+ *   - getPractices (list): now populates client.icb + client.federation for each practice
  */
 
 import { v4 as uuidv4 } from "uuid";
@@ -23,11 +18,12 @@ import { uploadBufferToStorage } from "../lib/supabase.js";
 /* ══════════════════════════════════════════════════════════════════
    CONSTANTS
 ══════════════════════════════════════════════════════════════════ */
-const ICB_MODEL     = "icb";
-const FED_MODEL     = "federation";
-const CLIENT_MODEL  = "client";       // PCN
-const PRACTICE_MODEL= "practice";
-const HISTORY_MODEL = "contact_history";
+const ICB_MODEL      = "icb";
+const FED_MODEL      = "federation";
+const CLIENT_MODEL   = "client";
+const PRACTICE_MODEL = "practice";
+const HISTORY_MODEL  = "contact_history";
+const DOC_GROUP_MODEL = "document_group";
 
 /* ══════════════════════════════════════════════════════════════════
    DB HELPERS
@@ -94,15 +90,63 @@ async function softDelete(model, id) {
   return updateRecord(model, id, { isActive: false });
 }
 
-async function countActive(model, fieldPath, value) {
-  const result = await query(
-    `SELECT COUNT(*) FROM app_records
-     WHERE model = $1
-     AND COALESCE((data->>'isActive')::boolean, true) = true
-     AND data->'${fieldPath}' @> $2::jsonb`,
-    [model, JSON.stringify(value)]
-  );
-  return parseInt(result.rows[0].count, 10);
+/* ══════════════════════════════════════════════════════════════════
+   POPULATE HELPERS
+══════════════════════════════════════════════════════════════════ */
+
+/**
+ * Given a raw practice object, populate:
+ *  - practice.client  → full client record with icb + federation
+ *  - practice.complianceGroup → full group record
+ */
+async function populatePractice(practice) {
+  if (!practice) return practice;
+
+  // ── 1. Populate client with ICB + Federation ─────────────────
+  const clientId = practice.client?._id || practice.client?.id || practice.client;
+  if (clientId && typeof clientId === "string") {
+    const clientRecord = await findById(CLIENT_MODEL, clientId);
+    if (clientRecord) {
+      // Populate ICB inside client
+      let icbObj = clientRecord.icb || null;
+      const icbId = icbObj?._id || icbObj?.id || icbObj;
+      if (icbId && typeof icbId === "string" && !icbObj?.name) {
+        const icbRecord = await findById(ICB_MODEL, icbId);
+        if (icbRecord) icbObj = { _id: icbRecord._id, id: icbRecord._id, name: icbRecord.name, code: icbRecord.code, region: icbRecord.region };
+      }
+
+      // Populate Federation inside client
+      let fedObj = clientRecord.federation || null;
+      const fedId = fedObj?._id || fedObj?.id || fedObj;
+      if (fedId && typeof fedId === "string" && !fedObj?.name) {
+        const fedRecord = await findById(FED_MODEL, fedId);
+        if (fedRecord) fedObj = { _id: fedRecord._id, id: fedRecord._id, name: fedRecord.name, type: fedRecord.type };
+      }
+
+      practice.client = {
+        _id:        clientRecord._id,
+        id:         clientRecord._id,
+        name:       clientRecord.name,
+        icb:        icbObj,
+        federation: fedObj,
+      };
+    }
+  }
+
+  // ── 2. Populate complianceGroup ──────────────────────────────
+  const cgId = practice.complianceGroup?._id || practice.complianceGroup?.id || practice.complianceGroup;
+  if (cgId && typeof cgId === "string") {
+    const groupRecord = await findById(DOC_GROUP_MODEL, cgId);
+    if (groupRecord) {
+      practice.complianceGroup = {
+        _id:  groupRecord._id,
+        id:   groupRecord._id,
+        name: groupRecord.name,
+      };
+    }
+  }
+
+  return practice;
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -209,7 +253,6 @@ export const addToReportingArchive = async (req, res) => {
     const archive = [...(entity.reportingArchive || []), reportEntry];
     await updateRecord(model, entityId, { reportingArchive: archive });
 
-    // Auto contact history entry
     await insertRecord(HISTORY_MODEL, {
       entityType, entityId, type: "report",
       subject: `Monthly Report — ${String(month).padStart(2, "0")}/${year}`,
@@ -356,7 +399,6 @@ export const getClientFacingData = async (req, res) => {
       .filter(m => m.date && new Date(m.date) >= now)
       .sort((a, b) => new Date(a.date) - new Date(b.date));
 
-    // Fetch linked clinicians names
     const clinicians = [];
     for (const cId of (client.activeClinicians || [])) {
       const u = await findById("user", cId);
@@ -414,11 +456,9 @@ export const getHierarchy = async (req, res) => {
       findAll(PRACTICE_MODEL, [`COALESCE((data->>'isActive')::boolean, true) = true`]),
     ]);
 
-    // Build federation map
     const fedMapById = {};
     for (const f of federations) fedMapById[f._id] = f;
 
-    // Group practices by client id
     const practicesByClient = {};
     for (const p of practices) {
       const key = p.client?._id || p.client?.id || p.client;
@@ -427,7 +467,6 @@ export const getHierarchy = async (req, res) => {
       practicesByClient[key].push(p);
     }
 
-    // Group clients by ICB id
     const clientsByICB = {};
     for (const c of clients) {
       const icbKey = c.icb?._id || c.icb?.id || c.icb;
@@ -482,7 +521,6 @@ export const getICBById = async (req, res) => {
       [FED_MODEL, req.params.id]
     ).then(r => mapRows(r.rows));
 
-    // Clients for this ICB
     const clientsRaw = await query(
       `SELECT id, data FROM app_records WHERE model = $1
        AND COALESCE((data->>'isActive')::boolean, true) = true
@@ -491,7 +529,6 @@ export const getICBById = async (req, res) => {
       [CLIENT_MODEL, req.params.id]
     ).then(r => mapRows(r.rows));
 
-    // Practices for those clients
     const clientIds = clientsRaw.map(c => c._id);
     const practicesByClient = {};
     if (clientIds.length) {
@@ -519,7 +556,6 @@ export const createICB = async (req, res) => {
     const { name, region, code, notes } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: "ICB name is required" });
 
-    // Duplicate check
     const existing = await query(
       `SELECT id FROM app_records WHERE model = $1 AND LOWER(data->>'name') = LOWER($2) LIMIT 1`,
       [ICB_MODEL, name.trim()]
@@ -557,7 +593,6 @@ export const updateICB = async (req, res) => {
 
 export const deleteICB = async (req, res) => {
   try {
-    // Count linked active clients
     const clientCount = await query(
       `SELECT COUNT(*) FROM app_records WHERE model = $1
        AND COALESCE((data->>'isActive')::boolean, true) = true
@@ -596,7 +631,6 @@ export const getFederations = async (req, res) => {
     }
 
     const federations = await findAll(FED_MODEL, conditions, params);
-    // Populate ICB name
     const result = await Promise.all(federations.map(async f => {
       const icbId = f.icb?._id || f.icb?.id || f.icb;
       if (icbId && typeof icbId === "string") {
@@ -697,14 +731,12 @@ export const getPCNById = async (req, res) => {
     const client = await findById(CLIENT_MODEL, req.params.id);
     if (!client) return res.status(404).json({ message: "PCN not found" });
 
-    // Last 3 reporting archive entries
     if (Array.isArray(client.reportingArchive)) {
       client.reportingArchive = [...client.reportingArchive]
         .sort((a, b) => b.year !== a.year ? b.year - a.year : b.month - a.month)
         .slice(0, 3);
     }
 
-    // Get practices
     const practicesResult = await query(
       `SELECT id, data FROM app_records WHERE model = $1
        AND COALESCE((data->>'isActive')::boolean, true) = true
@@ -727,7 +759,6 @@ export const createPCN = async (req, res) => {
     if (!name?.trim()) return res.status(400).json({ message: "PCN name is required" });
     if (!icb)          return res.status(400).json({ message: "ICB is required" });
 
-    // Embed ICB object
     const icbRecord = await findById(ICB_MODEL, icb);
     const fedId     = req.body.federation;
     const fedRecord = fedId ? await findById(FED_MODEL, fedId) : null;
@@ -767,7 +798,6 @@ export const updatePCN = async (req, res) => {
 
     let payload = normalizeComplianceGroup(req.body);
 
-    // Clear groupDocuments if compliance groups changed
     if (
       Object.prototype.hasOwnProperty.call(payload, "complianceGroups") ||
       Object.prototype.hasOwnProperty.call(payload, "complianceGroup")
@@ -777,7 +807,6 @@ export const updatePCN = async (req, res) => {
       if (JSON.stringify(prevGroups) !== JSON.stringify(nextGroups)) payload.groupDocuments = [];
     }
 
-    // Embed ICB/Federation if IDs changed
     if (req.body.icb && typeof req.body.icb === "string") {
       const icbRecord = await findById(ICB_MODEL, req.body.icb);
       if (icbRecord) payload.icb = { _id: icbRecord._id, name: icbRecord.name, code: icbRecord.code, region: icbRecord.region };
@@ -787,7 +816,6 @@ export const updatePCN = async (req, res) => {
       if (fedRecord) { payload.federation = { _id: fedRecord._id, name: fedRecord.name, type: fedRecord.type }; payload.federationName = fedRecord.name; }
     }
 
-    // Selective merge for new fields
     if (!Object.prototype.hasOwnProperty.call(req.body, "decisionMakers"))  delete payload.decisionMakers;
     if (!Object.prototype.hasOwnProperty.call(req.body, "financeContacts")) delete payload.financeContacts;
     if (!Object.prototype.hasOwnProperty.call(req.body, "tags"))            delete payload.tags;
@@ -849,7 +877,6 @@ export const updateRestrictedClinicians = async (req, res) => {
   }
 };
 
-/* ── Meetings & Rollup ───────────────────────────────────────────── */
 export const getMonthlyMeetings = async (req, res) => {
   try {
     const pcn = await findById(CLIENT_MODEL, req.params.id);
@@ -909,6 +936,7 @@ export const getPCNRollup = async (req, res) => {
 
 /* ══════════════════════════════════════════════════════════════════
    PRACTICE CRUD
+   ✅ FIX: getPractices + getPracticeById now populate client & complianceGroup
 ══════════════════════════════════════════════════════════════════ */
 export const getPractices = async (req, res) => {
   try {
@@ -920,9 +948,14 @@ export const getPractices = async (req, res) => {
       params.push(req.query.pcn);
     }
 
-    const practices = await findAll(PRACTICE_MODEL, conditions, params);
+    const rawPractices = await findAll(PRACTICE_MODEL, conditions, params);
+
+    // ✅ FIX: Populate client (with icb+federation) and complianceGroup for ALL practices
+    const practices = await Promise.all(rawPractices.map(p => populatePractice(p)));
+
     res.json({ practices });
   } catch (err) {
+    console.error("getPractices ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch practices" });
   }
 };
@@ -932,14 +965,16 @@ export const getPracticeById = async (req, res) => {
     const practice = await findById(PRACTICE_MODEL, req.params.id);
     if (!practice) return res.status(404).json({ message: "Practice not found" });
 
-    // Last 3 reporting archive
     if (Array.isArray(practice.reportingArchive)) {
       practice.reportingArchive = [...practice.reportingArchive]
         .sort((a, b) => b.year !== a.year ? b.year - a.year : b.month - a.month)
         .slice(0, 3);
     }
 
-    res.json({ practice });
+    // ✅ FIX: Populate client (icb + federation) and complianceGroup
+    const populated = await populatePractice(practice);
+
+    res.json({ practice: populated });
   } catch (err) {
     console.error("getPracticeById ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch practice" });
@@ -952,7 +987,6 @@ export const createPractice = async (req, res) => {
     if (!name?.trim()) return res.status(400).json({ message: "Practice name is required" });
     if (!pcn)          return res.status(400).json({ message: "PCN is required" });
 
-    // Embed client reference
     const clientRecord = await findById(CLIENT_MODEL, pcn);
     const payload = normalizeComplianceGroup({
       ...req.body,
@@ -980,14 +1014,12 @@ export const updatePractice = async (req, res) => {
 
     let payload = normalizeComplianceGroup(req.body);
 
-    // Clear groupDocuments if compliance group changed
     if (Object.prototype.hasOwnProperty.call(payload, "complianceGroup")) {
       const prev = String(existing.complianceGroup?._id || existing.complianceGroup || "");
       const next = String(payload.complianceGroup || "");
       if (prev !== next) payload.groupDocuments = [];
     }
 
-    // Embed client reference if changed
     if (req.body.pcn && typeof req.body.pcn === "string") {
       const clientRecord = await findById(CLIENT_MODEL, req.body.pcn);
       if (clientRecord) payload.client = { _id: clientRecord._id, name: clientRecord.name };
@@ -1045,12 +1077,10 @@ export const getContactHistory = async (req, res) => {
     const entityId   = validateId(req.params.entityId, "entityId");
     const { type, starred, page = 1, limit = 100 } = req.query;
 
-    // Verify entity exists
     const model  = getModelByEntityType(entityType);
     const entity = await findById(model, entityId);
     if (!entity) return res.status(404).json({ message: `${entityType} not found` });
 
-    // Build conditions
     const conditions = [
       `data->>'entityId' = $2`,
       `data->>'entityType' = $3`,
@@ -1061,8 +1091,8 @@ export const getContactHistory = async (req, res) => {
     if (type && type !== "all") { conditions.push(`data->>'type' = $${idx++}`); params.push(type); }
     if (starred === "true")      { conditions.push(`(data->>'starred')::boolean = true`); }
 
-    const offset  = (Number(page) - 1) * Number(limit);
-    const where   = [`model = $1`, ...conditions].join(" AND ");
+    const offset = (Number(page) - 1) * Number(limit);
+    const where  = [`model = $1`, ...conditions].join(" AND ");
 
     const [logsResult, countResult] = await Promise.all([
       query(
@@ -1077,7 +1107,6 @@ export const getContactHistory = async (req, res) => {
     const logs  = mapRows(logsResult.rows);
     const total = parseInt(countResult.rows[0].count, 10);
 
-    // Populate createdBy
     const populated = await Promise.all(logs.map(async log => {
       if (log.createdBy && typeof log.createdBy === "string") {
         const u = await findById("user", log.createdBy);
@@ -1102,26 +1131,24 @@ export const addContactHistory = async (req, res) => {
     if (!subject?.trim()) return res.status(400).json({ message: "Subject is required" });
     if (!type)            return res.status(400).json({ message: "Type is required" });
 
-    // Verify entity exists
     const model  = getModelByEntityType(entityType);
     const entity = await findById(model, entityId);
     if (!entity) return res.status(404).json({ message: `${entityType} not found` });
 
     const log = await insertRecord(HISTORY_MODEL, {
       entityType, entityId, type,
-      subject:     subject.trim(),
-      notes:       notes || "",
-      date:        date ? new Date(date).toISOString() : new Date().toISOString(),
-      time:        time || new Date().toTimeString().slice(0, 5),
-      attachments: attachments || [],
-      outcome:     outcome?.trim()    || "",
+      subject:      subject.trim(),
+      notes:        notes || "",
+      date:         date ? new Date(date).toISOString() : new Date().toISOString(),
+      time:         time || new Date().toTimeString().slice(0, 5),
+      attachments:  attachments || [],
+      outcome:      outcome?.trim()     || "",
       followUpDate: followUpDate ? new Date(followUpDate).toISOString() : null,
       followUpNote: followUpNote?.trim() || "",
-      starred:     false,
-      createdBy:   req.user._id,
+      starred:      false,
+      createdBy:    req.user._id,
     });
 
-    // Populate createdBy for response
     const u = await findById("user", req.user._id);
     const populated = { ...log, createdBy: u ? { _id: u._id, name: u.name, role: u.role } : req.user._id };
 
@@ -1141,14 +1168,14 @@ export const updateContactHistory = async (req, res) => {
     if (!log) return res.status(404).json({ message: "Log not found" });
 
     const updated = await updateRecord(HISTORY_MODEL, logId, {
-      ...(subject           !== undefined && { subject }),
-      ...(notes             !== undefined && { notes }),
-      ...(type              !== undefined && { type }),
-      ...(date              !== undefined && { date }),
-      ...(time              !== undefined && { time }),
-      ...(outcome           !== undefined && { outcome: outcome?.trim() || "" }),
-      ...(followUpDate      !== undefined && { followUpDate: followUpDate ? new Date(followUpDate).toISOString() : null }),
-      ...(followUpNote      !== undefined && { followUpNote: followUpNote?.trim() || "" }),
+      ...(subject      !== undefined && { subject }),
+      ...(notes        !== undefined && { notes }),
+      ...(type         !== undefined && { type }),
+      ...(date         !== undefined && { date }),
+      ...(time         !== undefined && { time }),
+      ...(outcome      !== undefined && { outcome: outcome?.trim() || "" }),
+      ...(followUpDate !== undefined && { followUpDate: followUpDate ? new Date(followUpDate).toISOString() : null }),
+      ...(followUpNote !== undefined && { followUpNote: followUpNote?.trim() || "" }),
     });
 
     const u = await findById("user", updated.createdBy?._id || updated.createdBy);
@@ -1266,7 +1293,6 @@ export const sendMassEmail = async (req, res) => {
 
 export const trackEmailOpen = async (req, res) => {
   try {
-    // Find history log with this trackingId and mark opened
     await query(
       `UPDATE app_records
        SET data = data || '{"emailTracking": {"opened": true}}'::jsonb
