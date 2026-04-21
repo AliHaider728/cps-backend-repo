@@ -13,6 +13,7 @@ import { allowRoles }   from "../middleware/roleCheck.js";
 import {
   login, loginLimiter,
   getMe, logout,
+  refreshToken,
   getAllUsers,
   getUserById,       // ── NEW (spec §4)
   createUser, updateUser, deleteUser,
@@ -24,6 +25,7 @@ const router = Router();
 
 /* ── Public ───────────────────────────────────────────────────── */
 router.post("/login", loginLimiter, login);
+router.post("/refresh-token", refreshToken);
 
 /* ── Authenticated (any role) ────────────────────────────────── */
 router.get ("/me",              verifyToken, getMe);

@@ -21,7 +21,6 @@
 import { Router } from "express";
 import { verifyToken } from "../middleware/auth.js";
 import { allowRoles  } from "../middleware/roleCheck.js";
-import { upload }      from "../middleware/upload.js";
 import {
   getHierarchy, searchClients,
   getICBs, getICBById, createICB, updateICB, deleteICB,
@@ -123,7 +122,7 @@ router.get   ("/:entityType/:entityId/reporting-archive",
               ...adminFin, getReportingArchive);
 
 router.post  ("/:entityType/:entityId/reporting-archive",
-              ...admin, upload.single("file"), addToReportingArchive);
+              ...admin, addToReportingArchive);
 
 router.delete("/:entityType/:entityId/reporting-archive/:reportId",
               ...admin, deleteFromReportingArchive);
@@ -148,10 +147,10 @@ router.get   ("/:entityType/:entityId/documents",
               ...adminFin, getEntityDocuments);
 
 router.patch ("/:entityType/:entityId/documents/:documentId",
-              ...admin, upload.single("file"), upsertEntityDocument);
+              ...admin, upsertEntityDocument);
 
 router.post  ("/:entityType/:entityId/documents/:groupId/:documentId/uploads",
-              ...admin, upload.array("files"), addEntityDocumentUploads);
+              ...admin, addEntityDocumentUploads);
 
 router.patch ("/:entityType/:entityId/documents/:groupId/:documentId/uploads/:uploadId",
               ...admin, updateEntityDocumentUpload);
@@ -164,7 +163,7 @@ router.get  ("/:entityType/:entityId/compliance/status",
              ...adminFin, getComplianceStatus);
 
 router.patch("/:entityType/:entityId/compliance/:docKey",
-             ...admin, upload.single("file"), upsertComplianceDoc);
+             ...admin, upsertComplianceDoc);
 
 router.post ("/:entityType/:entityId/compliance/:docKey/approve",
              ...admin, approveComplianceDoc);

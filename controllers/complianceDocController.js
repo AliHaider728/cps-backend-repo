@@ -49,7 +49,7 @@ async function insertRecord(model, payload) {
 async function updateRecord(model, id, patch) {
   const data = { ...patch, updatedAt: new Date().toISOString() };
   const r    = await query(
-    `UPDATE app_records SET data = COALESCE(data,'{}':jsonb) || $3::jsonb, updated_at = NOW()
+    `UPDATE app_records SET data = COALESCE(data,'{}'::jsonb) || $3::jsonb, updated_at = NOW()
      WHERE model = $1 AND id = $2 RETURNING id, data, created_at, updated_at`,
     [model, id, JSON.stringify(data)]
   );

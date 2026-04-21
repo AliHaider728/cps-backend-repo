@@ -1,30 +1,10 @@
 import jwt from "jsonwebtoken";
-import { query } from "../config/db.js";
+import { findAppRecordById } from "../config/db.js";
 
-function mapUserRow(row) {
-  if (!row) return null;
-
-  return {
-    _id: row.id,
-    id: row.id,
-    ...(row.data || {}),
-    createdAt: row.data?.createdAt || row.created_at?.toISOString?.() || row.created_at || null,
-    updatedAt: row.data?.updatedAt || row.updated_at?.toISOString?.() || row.updated_at || null,
-  };
-}
+const USER_MODEL = "user";
 
 async function findUserById(id) {
-  const result = await query(
-    `
-      SELECT id, data, created_at, updated_at
-      FROM app_records
-      WHERE model = $1 AND id = $2
-      LIMIT 1
-    `,
-    ["user", id]
-  );
-
-  return mapUserRow(result.rows[0]);
+  return findAppRecordById(USER_MODEL, id);
 }
 
 export const verifyToken = async (req, res, next) => {
@@ -35,7 +15,10 @@ export const verifyToken = async (req, res, next) => {
   }
 
   if (!token) {
-    return res.status(401).json({ message: "Not authorised - no token provided" });
+    return res.status(401).json({
+      code: "AUTH_TOKEN_MISSING",
+      message: "Not authorised - no token provided",
+    });
   }
 
   try {
@@ -43,16 +26,64 @@ export const verifyToken = async (req, res, next) => {
     const user = await findUserById(decoded.id);
 
     if (!user) {
-      return res.status(401).json({ message: "User not found" });
+      return res.status(401).json({
+        code: "AUTH_USER_NOT_FOUND",
+        message: "User not found",
+      });
     }
 
     if (user.isActive === false) {
-      return res.status(403).json({ message: "Account deactivated - contact admin" });
+      return res.status(403).json({
+        code: "AUTH_ACCOUNT_DEACTIVATED",
+        message: "Account deactivated - contact admin",
+      });
     }
 
     req.user = user;
     return next();
-  } catch {
-    return res.status(401).json({ message: "Token invalid or expired" });
+  } catch (error) {
+    if (error.name === "TokenExpiredError") {
+      return res.status(401).json({
+        code: "TOKEN_EXPIRED",
+        message: "Session expired. Please refresh your token.",
+        expiredAt: error.expiredAt,
+        requiresRefresh: true, // Signal to frontend that refresh is needed
+      });
+    }
+
+    if (error.name === "JsonWebTokenError" || error.name === "NotBeforeError") {
+      return res.status(401).json({
+        code: "TOKEN_INVALID",
+        message: "Token invalid",
+      });
+    }
+
+    return next(error);
   }
+};
+
+// Optional auth middleware - doesn't fail if no token
+export const optionalAuth = async (req, res, next) => {
+  let token;
+
+  if (req.headers.authorization?.startsWith("Bearer ")) {
+    token = req.headers.authorization.split(" ")[1];
+  }
+
+  if (!token) {
+    return next(); // Continue without user
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await findUserById(decoded.id);
+    if (user && user.isActive !== false) {
+      req.user = user;
+    }
+  } catch (error) {
+    // Ignore errors for optional auth
+    console.warn("[optionalAuth] Token validation failed:", error.message);
+  }
+
+  return next();
 };

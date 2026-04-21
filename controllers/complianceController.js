@@ -14,7 +14,6 @@ import nodemailer           from "nodemailer";
 import { query }            from "../config/db.js";
 import { logAudit }         from "../middleware/auditLogger.js";
 import { createId, isValidId } from "../lib/ids.js";
-import { uploadBufferToStorage } from "../lib/supabase.js";
 
 /* ── Model names ────────────────────────────────────────────────── */
 const CLIENT_MODEL   = "client";
@@ -88,7 +87,7 @@ async function findById(model, id) {
 async function updateRecord(model, id, patch) {
   const data = { ...patch, updatedAt: new Date().toISOString() };
   const r    = await query(
-    `UPDATE app_records SET data = COALESCE(data,'{}':jsonb) || $3::jsonb, updated_at = NOW()
+    `UPDATE app_records SET data = COALESCE(data,'{}'::jsonb) || $3::jsonb, updated_at = NOW()
      WHERE model = $1 AND id = $2 RETURNING id, data, created_at, updated_at`,
     [model, id, JSON.stringify(data)]
   );
@@ -247,23 +246,33 @@ function makeUploadEntry(payload, userId, docDef) {
   return normalized;
 }
 
-async function getMultipartUploads(req) {
-  const files = Array.isArray(req.files) ? req.files : (req.file ? [req.file] : []);
-  return Promise.all(files.map(async file => {
-    const uploaded = await uploadBufferToStorage({
-      buffer: file.buffer, contentType: file.mimetype || "application/octet-stream",
-      fileName: file.originalname || "upload.bin",
-    });
-    return {
-      fileName:    file.originalname || "upload.bin",
-      fileUrl:     uploaded.publicUrl,
-      mimeType:    file.mimetype || "application/octet-stream",
-      fileSize:    file.size || 0,
+/* ── File uploads now come from frontend Supabase direct upload ─────
+   req.body.uploads is an array of { fileUrl, fileName, mimeType, fileSize }
+   uploaded directly to Supabase Storage by the frontend.               */
+function getMultipartUploads(req) {
+  const uploads = Array.isArray(req.body.uploads) ? req.body.uploads : [];
+  if (!uploads.length && req.body.fileUrl) {
+    // Single-file upload (legacy compliance doc route)
+    return [{
+      fileName:    req.body.fileName    || "upload.bin",
+      fileUrl:     req.body.fileUrl,
+      mimeType:    req.body.mimeType    || "application/octet-stream",
+      fileSize:    req.body.fileSize    || 0,
       expiryDate:  req.body.expiryDate  || null,
       renewalDate: req.body.renewalDate || null,
       notes:       req.body.notes       || "",
       reference:   req.body.reference   || "",
-    };
+    }];
+  }
+  return uploads.map(u => ({
+    fileName:    u.fileName    || "upload.bin",
+    fileUrl:     u.fileUrl,
+    mimeType:    u.mimeType    || "application/octet-stream",
+    fileSize:    u.fileSize    || 0,
+    expiryDate:  req.body.expiryDate  || null,
+    renewalDate: req.body.renewalDate || null,
+    notes:       req.body.notes       || "",
+    reference:   req.body.reference   || "",
   }));
 }
 
@@ -653,18 +662,13 @@ export const upsertComplianceDoc = async (req, res) => {
     if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
 
     const existing = entity.complianceDocs?.[docKey] || {};
-    const uploadedFile = req.file
-      ? await uploadBufferToStorage({
-          buffer: req.file.buffer, contentType: req.file.mimetype || "application/octet-stream",
-          fileName: req.file.originalname || "upload.bin",
-        }).then(u => ({ fileName: req.file.originalname, fileUrl: u.publicUrl, mimeType: req.file.mimetype, fileSize: req.file.size || 0 }))
-      : null;
 
-    const { fileName, mimeType, fileSize, expiryDate, renewalDate, notes, status } = req.body;
-    const nextFileUrl  = uploadedFile?.fileUrl;
-    const nextFileName = uploadedFile?.fileName ?? fileName;
-    const nextMimeType = uploadedFile?.mimeType ?? mimeType;
-    const nextFileSize = uploadedFile?.fileSize ?? fileSize;
+    // File metadata from frontend Supabase direct upload
+    const { fileUrl, fileName, mimeType, fileSize, expiryDate, renewalDate, notes, status } = req.body;
+    const nextFileUrl  = fileUrl  || null;
+    const nextFileName = fileName || null;
+    const nextMimeType = mimeType || null;
+    const nextFileSize = fileSize || 0;
 
     const newMeta = {
       ...existing,

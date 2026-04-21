@@ -10,10 +10,9 @@
 import { v4 as uuidv4 } from "uuid";
 import nodemailer        from "nodemailer";
 import crypto            from "crypto";
-import { query }         from "../config/db.js";
+import { mergeAppRecordData, query } from "../config/db.js";
 import { logAudit }      from "../middleware/auditLogger.js";
 import { normalizeId }   from "../lib/ids.js";
-import { uploadBufferToStorage } from "../lib/supabase.js";
 
 /* ══════════════════════════════════════════════════════════════════
    CONSTANTS
@@ -75,15 +74,7 @@ async function insertRecord(model, payload) {
 }
 
 async function updateRecord(model, id, patch) {
-  const data   = { ...patch, updatedAt: new Date().toISOString() };
-  const result = await query(
-    `UPDATE app_records
-     SET data = COALESCE(data, '{}'::jsonb) || $3::jsonb, updated_at = NOW()
-     WHERE model = $1 AND id = $2
-     RETURNING id, data, created_at, updated_at`,
-    [model, id, JSON.stringify(data)]
-  );
-  return mapRow(result.rows[0]);
+  return mergeAppRecordData(model, id, patch, { throwIfMissing: true });
 }
 
 async function softDelete(model, id) {
@@ -234,20 +225,16 @@ export const addToReportingArchive = async (req, res) => {
     const entity = await findById(model, entityId);
     if (!entity) return res.status(404).json({ message: `${entityType} not found` });
 
-    const { month, year, notes, starred } = req.body;
+    const { month, year, notes, starred, fileUrl, fileName, fileSize, mimeType } = req.body;
     if (!month || !year) return res.status(400).json({ message: "month and year are required" });
-    if (!req.file)        return res.status(400).json({ message: "A report file is required" });
-
-    const uploaded = await uploadBufferToStorage({
-      buffer: req.file.buffer, contentType: req.file.mimetype || "application/octet-stream",
-      fileName: req.file.originalname || "report.pdf",
-    });
+    if (!fileUrl)       return res.status(400).json({ message: "fileUrl is required (upload file to Supabase first)" });
 
     const reportEntry = {
       id: uuidv4(), month: Number(month), year: Number(year),
-      reportUrl: uploaded.publicUrl, fileName: req.file.originalname || "report.pdf",
+      reportUrl: fileUrl, fileName: fileName || "report.pdf",
+      fileSize: fileSize || 0, mimeType: mimeType || "application/pdf",
       uploadedAt: new Date().toISOString(), uploadedBy: req.user._id,
-      notes: notes?.trim() || "", starred: starred === "true" || starred === true,
+      notes: notes?.trim() || "", starred: starred === true,
     };
 
     const archive = [...(entity.reportingArchive || []), reportEntry];
