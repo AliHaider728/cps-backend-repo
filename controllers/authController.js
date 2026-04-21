@@ -147,14 +147,9 @@ async function insertAuditRecord(req, data) {
   );
 }
 
-const signToken = (id, expiresIn = null) =>
+const signToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: expiresIn || process.env.JWT_EXPIRES_IN || "7d", // Reduced to 7 days for better security
-  });
-
-const signRefreshToken = (id) =>
-  jwt.sign({ id, type: 'refresh' }, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || "30d", // Longer refresh token
+    expiresIn: process.env.JWT_EXPIRES_IN || "7d",
   });
 
 /* ── Rate limiter ─────────────────────────────────────────────────── */
@@ -169,46 +164,6 @@ export const loginLimiter = rateLimit({
     res.status(429).json({ message: "Too many failed login attempts. Please try again in 15 minutes." });
   },
 });
-
-/* ── Token refresh ──────────────────────────────────────────────────── */
-export const refreshToken = async (req, res) => {
-  try {
-    const { refreshToken: refreshTokenFromClient } = req.body;
-    
-    if (!refreshTokenFromClient) {
-      return res.status(401).json({ message: "Refresh token required" });
-    }
-
-    const decoded = jwt.verify(refreshTokenFromClient, process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET);
-    
-    if (decoded.type !== 'refresh') {
-      return res.status(401).json({ message: "Invalid refresh token" });
-    }
-
-    const user = await findUserById(decoded.id);
-    if (!user || user.isActive === false) {
-      return res.status(401).json({ message: "User not found or inactive" });
-    }
-
-    const newAccessToken = signToken(user._id);
-    const newRefreshToken = signRefreshToken(user._id);
-
-    await logAudit(req, "TOKEN_REFRESH", "User", {
-      resourceId: user._id,
-      detail: `${user.name} refreshed tokens`,
-    });
-
-    return res.json({
-      success: true,
-      token: newAccessToken,
-      refreshToken: newRefreshToken,
-      user: buildAuthUser(user)
-    });
-  } catch (error) {
-    console.error("[refreshToken ERROR]", error.message);
-    return res.status(401).json({ message: "Invalid or expired refresh token" });
-  }
-};
 
 /* ── Auth ─────────────────────────────────────────────────────────── */
 export const login = async (req, res) => {
@@ -244,14 +199,7 @@ export const login = async (req, res) => {
     await logAudit(req, "LOGIN", "User", {
       resourceId: user._id, detail: `${user.name} logged in (${user.role})`,
     });
-    const accessToken = signToken(user._id);
-    const refreshToken = signRefreshToken(user._id);
-    return res.json({ 
-      success: true, 
-      token: accessToken, 
-      refreshToken: refreshToken,
-      user: buildAuthUser(req.user) 
-    });
+    return res.json({ success: true, token: signToken(user._id), user: buildAuthUser(req.user) });
   } catch (error) {
     console.error("[login ERROR]", error.message);
     return res.status(500).json({ message: error.message });
