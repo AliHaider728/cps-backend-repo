@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { verifyToken } from "../middleware/auth.js";
 import { allowRoles  } from "../middleware/roleCheck.js";
-import { upload }     from "../middleware/upload.js"; //  KEEP for legacy only
+import { upload }     from "../middleware/upload.js"; // KEEP for legacy compliance only
 
 import {
   getHierarchy, searchClients,
@@ -25,7 +25,6 @@ import {
   updateFinanceContacts,
   getClientFacingData,
   updateClientFacingData,
-
 } from "../controllers/clientController.js";
 
 import {
@@ -48,128 +47,163 @@ const admin     = [verifyToken, allowRoles("super_admin", "director", "ops_manag
 const adminFin  = [verifyToken, allowRoles("super_admin", "director", "ops_manager", "finance")];
 const superOnly = [verifyToken, allowRoles("super_admin")];
 
-/* ── Public ── */
+/* 
+   PUBLIC
+ */
 router.get("/track/:trackingId", trackEmailOpen);
 
-/* ── Hierarchy & Search ── */
+/* 
+   HIERARCHY & SEARCH
+ */
 router.get("/hierarchy", ...admin, getHierarchy);
-router.get("/search", ...adminFin, searchClients);
+router.get("/search",    ...adminFin, searchClients);
 
-/* ── ICB ── */
-router.get("/icb", ...adminFin, getICBs);
-router.get("/icb/:id", ...adminFin, getICBById);
-router.post("/icb", ...admin, createICB);
-router.put("/icb/:id", ...admin, updateICB);
+/* 
+   ICB
+ */
+router.get("/icb",      ...adminFin, getICBs);
+router.get("/icb/:id",  ...adminFin, getICBById);
+router.post("/icb",     ...admin,    createICB);
+router.put("/icb/:id",  ...admin,    updateICB);
 router.delete("/icb/:id", ...superOnly, deleteICB);
 
-/* ── Federation ── */
-router.get("/federation", ...adminFin, getFederations);
-router.post("/federation", ...admin, createFederation);
-router.put("/federation/:id", ...admin, updateFederation);
+/* 
+   FEDERATION
+ */
+router.get("/federation",      ...adminFin, getFederations);
+router.post("/federation",     ...admin,    createFederation);
+router.put("/federation/:id",  ...admin,    updateFederation);
 router.delete("/federation/:id", ...superOnly, deleteFederation);
 
-/* ── PCN ── */
-router.get("/pcn", ...adminFin, getPCNs);
-router.get("/pcn/:id", ...adminFin, getPCNById);
+/* 
+   PCN
+ */
+router.get("/pcn",         ...adminFin, getPCNs);
+router.get("/pcn/:id",     ...adminFin, getPCNById);
 router.get("/pcn/:id/rollup", ...adminFin, getPCNRollup);
-router.post("/pcn", ...admin, createPCN);
-router.put("/pcn/:id", ...admin, updatePCN);
-router.delete("/pcn/:id", ...superOnly, deletePCN);
+router.post("/pcn",        ...admin,    createPCN);
+router.put("/pcn/:id",     ...admin,    updatePCN);
+router.delete("/pcn/:id",  ...superOnly, deletePCN);
 router.patch("/pcn/:id/restricted", ...admin, updateRestrictedClinicians);
-router.get("/pcn/:id/meetings", ...admin, getMonthlyMeetings);
-router.post("/pcn/:id/meetings", ...admin, upsertMonthlyMeeting);
+router.get("/pcn/:id/meetings",     ...admin, getMonthlyMeetings);
+router.post("/pcn/:id/meetings",    ...admin, upsertMonthlyMeeting);
 
-// Client-facing
+// Client-facing data
 router.get("/pcn/:id/client-facing", ...adminFin, getClientFacingData);
-router.put("/pcn/:id/client-facing", ...admin, updateClientFacingData);
+router.put("/pcn/:id/client-facing", ...admin,    updateClientFacingData);
 
-/* ── Practice ── */
-router.get("/practice", ...adminFin, getPractices);
-router.get("/practice/:id", ...adminFin, getPracticeById);
-router.post("/practice", ...admin, createPractice);
-router.put("/practice/:id", ...admin, updatePractice);
+/* 
+   PRACTICE
+ */
+router.get("/practice",        ...adminFin, getPractices);
+router.get("/practice/:id",    ...adminFin, getPracticeById);
+router.post("/practice",       ...admin,    createPractice);
+router.put("/practice/:id",    ...admin,    updatePractice);
 router.delete("/practice/:id", ...superOnly, deletePractice);
 router.patch("/practice/:id/restricted", ...admin, updatePracticeRestricted);
 
-/* ── Static Compliance ── */
-router.get("/compliance/expiring", ...adminFin, getExpiringDocs);
-router.post("/compliance/run-expiry", ...admin, runExpiryCheck);
+/* 
+   STATIC COMPLIANCE
+ */
+router.get("/compliance/expiring",     ...adminFin, getExpiringDocs);
+router.post("/compliance/run-expiry",  ...admin,    runExpiryCheck);
 
-/* ── Reporting Archive ( FIXED - NO MULTER) ── */
-router.get("/:entityType/:entityId/reporting-archive", ...adminFin, getReportingArchive);
-
+/* 
+   REPORTING ARCHIVE  (JSON-based — no multer)
+   addToReportingArchive expects JSON body:
+     { month, year, reportUrl, fileName, notes, starred }
+ */
+router.get(
+  "/:entityType/:entityId/reporting-archive",
+  ...adminFin,
+  getReportingArchive
+);
 router.post(
   "/:entityType/:entityId/reporting-archive",
   ...admin,
-  addToReportingArchive   //  JSON only
+  addToReportingArchive   // JSON only — no multer
 );
-
 router.delete(
   "/:entityType/:entityId/reporting-archive/:reportId",
   ...admin,
   deleteFromReportingArchive
 );
 
-/* ── Decision Makers ── */
+/* 
+   DECISION MAKERS
+ */
 router.get("/:entityType/:entityId/decision-makers", ...adminFin, getDecisionMakers);
-router.put("/:entityType/:entityId/decision-makers", ...admin, updateDecisionMakers);
+router.put("/:entityType/:entityId/decision-makers", ...admin,    updateDecisionMakers);
 
-/* ── Finance Contacts ── */
+/* 
+   FINANCE CONTACTS
+ */
 router.get("/:entityType/:entityId/finance-contacts", ...adminFin, getFinanceContacts);
-router.put("/:entityType/:entityId/finance-contacts", ...admin, updateFinanceContacts);
+router.put("/:entityType/:entityId/finance-contacts", ...admin,    updateFinanceContacts);
 
-/* ── Entity Documents ( FIXED - NO MULTER) ── */
-router.get("/:entityType/:entityId/documents", ...adminFin, getEntityDocuments);
-
-router.patch("/:entityType/:entityId/documents/:documentId",
+/* 
+   ENTITY DOCUMENTS  (JSON-based — no multer)
+ */
+router.get(
+  "/:entityType/:entityId/documents",
+  ...adminFin,
+  getEntityDocuments
+);
+router.patch(
+  "/:entityType/:entityId/documents/:documentId",
   ...admin,
   upsertEntityDocument
 );
-
-//  MOST IMPORTANT FIX
 router.post(
   "/:entityType/:entityId/documents/:groupId/:documentId/uploads",
   ...admin,
-  addEntityDocumentUploads   //  JSON uploads[]
+  addEntityDocumentUploads   // JSON uploads[]
 );
-
 router.patch(
   "/:entityType/:entityId/documents/:groupId/:documentId/uploads/:uploadId",
   ...admin,
   updateEntityDocumentUpload
 );
-
 router.delete(
   "/:entityType/:entityId/documents/:groupId/:documentId/uploads/:uploadId",
   ...admin,
   deleteEntityDocumentUpload
 );
 
-/* ── Compliance ( KEEP MULTER HERE ONLY) ── */
-router.get("/:entityType/:entityId/compliance/status", ...adminFin, getComplianceStatus);
-
-//  ONLY PLACE MULTER SHOULD EXIST
+/* 
+   COMPLIANCE  (multer ONLY here)
+ */
+router.get(
+  "/:entityType/:entityId/compliance/status",
+  ...adminFin,
+  getComplianceStatus
+);
 router.patch(
   "/:entityType/:entityId/compliance/:docKey",
   ...admin,
-  upload.single("file"),
+  upload.single("file"),   // ONLY place multer is used
   upsertComplianceDoc
 );
-
 router.post("/:entityType/:entityId/compliance/:docKey/approve", ...admin, approveComplianceDoc);
-router.post("/:entityType/:entityId/compliance/:docKey/reject", ...admin, rejectComplianceDoc);
+router.post("/:entityType/:entityId/compliance/:docKey/reject",  ...admin, rejectComplianceDoc);
 
-/* ── System Access ── */
+/* 
+   SYSTEM ACCESS REQUEST
+ */
 router.post("/:entityType/:entityId/system-access-request", ...admin, requestSystemAccess);
 
-/* ── Contact History ── */
-router.get("/:entityType/:entityId/history", ...adminFin, getContactHistory);
-router.post("/:entityType/:entityId/history", ...admin, addContactHistory);
-router.put("/history/:logId", ...admin, updateContactHistory);
-router.patch("/history/:logId/star", ...admin, toggleStarred);
-router.delete("/history/:logId", ...superOnly, deleteContactHistory);
+/* 
+   CONTACT HISTORY
+ */
+router.get("/:entityType/:entityId/history",    ...adminFin, getContactHistory);
+router.post("/:entityType/:entityId/history",   ...admin,    addContactHistory);
+router.put("/history/:logId",                   ...admin,    updateContactHistory);
+router.patch("/history/:logId/star",            ...admin,    toggleStarred);
+router.delete("/history/:logId",                ...superOnly, deleteContactHistory);
 
-/* ── Mass Email ── */
+/* 
+   MASS EMAIL
+ */
 router.post("/:entityType/:entityId/mass-email", ...admin, sendMassEmail);
 
 export default router;
