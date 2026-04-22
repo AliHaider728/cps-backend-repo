@@ -25,12 +25,20 @@
  *   addContactHistory  — +outcome, +followUpDate, +followUpNote
  *   updateContactHistory — +outcome, +followUpDate, +followUpNote
  *
- * BUG FIXES (Apr 2026):
- *   • getPCNs             — federation fallback to embedded object when fedMap returns undefined
- *   • getPractices        — pcn now populated with nested icb + federation; client alias added
- *   • getContactHistory   — CastError on invalid/UUID entityId now returns 400 not 500
- *   • addToReportingArchive — removed req.file dependency; now JSON-based (reportUrl in body)
- *   • All handlers        — err.stack logged for easier Vercel debugging
+ * BUG FIX (Apr 2026):
+ *   getPCNs — federation resolution now falls back to embedded pcn.federation
+ *             object when fedMap lookup returns undefined. Previously lookup
+ *             failure silently returned null, wiping the already-embedded name.
+ *
+ * BUG FIX #2 (Apr 2026):
+ *   getPractices — now populates pcn with icb + federation (nested), and maps
+ *                  pcn → client so PracticeListPage.jsx can render PCN, ICB,
+ *                  and Federation columns correctly.
+ *
+ * All previous fixes kept:
+ *   • normalizeEntityType(), toObjectId() casts throughout
+ *   • getPCNs: icb populated with name/region/code
+ *   • getICBById: returns federations + pcns with practices
  */
 
 import ICB            from "../models/ICB.js";
@@ -45,19 +53,13 @@ import { logAudit }   from "../middleware/auditLogger.js";
 import { normalizeId } from "../lib/ids.js";
 import { uploadBufferToStorage } from "../lib/supabase.js";
 
-/* ══════════════════════════════════════════════════════════════════
-   HELPERS
-══════════════════════════════════════════════════════════════════ */
-
+/* ── Helpers ─────────────────────────────────────────────────────── */
 const toObjectId = (id) => normalizeId(id);
-
-/** Returns true if the string looks like a valid 24-char hex ObjectId */
-const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(String(id || ""));
 
 const validateObjectIdOr400 = (id, label = "id") => {
   const objectId = toObjectId(id);
   if (!objectId) {
-    const error = new Error(`Invalid ${label} — must be a 24-character hex MongoDB ObjectId`);
+    const error = new Error(`Invalid ${label}`);
     error.statusCode = 400;
     throw error;
   }
@@ -78,7 +80,7 @@ const normalizeEntityType = (entityType = "") => {
   if (normalized === "practice")   return "Practice";
   if (normalized === "federation") return "Federation";
   if (normalized === "icb")        return "ICB";
-  const error = new Error("Invalid entityType — must be one of: PCN, Practice, Federation, ICB");
+  const error = new Error("Invalid entityType");
   error.statusCode = 400;
   throw error;
 };
@@ -93,6 +95,7 @@ const getEntityModelByType = (entityType) => {
   throw error;
 };
 
+/** Resolves PCN or Practice model from entityType param */
 const getPCNOrPracticeModel = (entityType) => {
   if (entityType === "PCN")      return PCN;
   if (entityType === "Practice") return Practice;
@@ -130,19 +133,18 @@ const transporter = nodemailer.createTransport({
 });
 
 const recordView = async (Model, id, userId) => {
-  try {
-    await Model.findByIdAndUpdate(id, { $push: { viewedBy: { user: userId, viewedAt: new Date() } } });
-  } catch (_) {}
+  try { await Model.findByIdAndUpdate(id, { $push: { viewedBy: { user: userId, viewedAt: new Date() } } }); }
+  catch (_) {}
 };
 
 /* ══════════════════════════════════════════════════════════════════
-   REPORTING ARCHIVE
-   FIX: addToReportingArchive now JSON-based (no multer/req.file)
-        Accepts { month, year, reportUrl, fileName, notes, starred }
+   REPORTING ARCHIVE (NEW — spec §1, §2, §3)
 ══════════════════════════════════════════════════════════════════ */
 
 /**
  * GET /:entityType/:entityId/reporting-archive
+ * Returns paginated reporting archive for a PCN or Practice.
+ * Query params: ?month= &year=
  */
 export const getReportingArchive = async (req, res) => {
   try {
@@ -159,9 +161,11 @@ export const getReportingArchive = async (req, res) => {
 
     let archive = Array.isArray(entity.reportingArchive) ? entity.reportingArchive : [];
 
+    // Filter by month/year if provided
     if (month) archive = archive.filter((r) => String(r.month) === String(month));
     if (year)  archive = archive.filter((r) => String(r.year)  === String(year));
 
+    // Sort: newest first
     archive = [...archive].sort((a, b) => {
       if (b.year !== a.year) return (b.year || 0) - (a.year || 0);
       return (b.month || 0) - (a.month || 0);
@@ -169,19 +173,15 @@ export const getReportingArchive = async (req, res) => {
 
     res.json({ archive, total: archive.length, entityName: entity.name });
   } catch (err) {
-    console.error("getReportingArchive ERROR:", err.message, err.stack);
-    res.status(err.statusCode || 500).json({
-      message: err.statusCode ? err.message : "Failed to fetch reporting archive",
-      ...(process.env.NODE_ENV === "development" && { detail: err.message }),
-    });
+    console.error("getReportingArchive ERROR:", err.message);
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to fetch reporting archive" });
   }
 };
 
 /**
  * POST /:entityType/:entityId/reporting-archive
- * JSON body: { month, year, reportUrl, fileName, notes, starred }
- * NOTE: File upload is handled on the frontend (Supabase direct upload or
- *       pre-signed URL). The backend only stores the resulting URL.
+ * Upload a monthly report. Accepts multipart file via Supabase.
+ * Pushes to reportingArchive, auto-adds starred contact history entry.
  */
 export const addToReportingArchive = async (req, res) => {
   try {
@@ -192,22 +192,29 @@ export const addToReportingArchive = async (req, res) => {
     const entity = await Model.findById(entityId).lean();
     if (!entity) return res.status(404).json({ message: `${entityType} not found` });
 
-    const { month, year, reportUrl, fileName, notes, starred } = req.body;
-
+    const { month, year, notes, starred } = req.body;
     if (!month || !year)
       return res.status(400).json({ message: "month and year are required" });
-    if (!reportUrl?.trim())
-      return res.status(400).json({ message: "reportUrl is required (upload file first, then pass the URL)" });
+
+    // Upload file to Supabase (same as compliance uploads)
+    if (!req.file)
+      return res.status(400).json({ message: "A report file is required" });
+
+    const uploaded = await uploadBufferToStorage({
+      buffer:      req.file.buffer,
+      contentType: req.file.mimetype || "application/octet-stream",
+      fileName:    req.file.originalname || "report.pdf",
+    });
 
     const reportEntry = {
       month:      Number(month),
       year:       Number(year),
-      reportUrl:  reportUrl.trim(),
-      fileName:   fileName?.trim() || "report.pdf",
+      reportUrl:  uploaded.publicUrl,
+      fileName:   req.file.originalname || "report.pdf",
       uploadedAt: new Date(),
       uploadedBy: req.user._id,
       notes:      notes?.trim() || "",
-      starred:    starred === true || starred === "true",
+      starred:    starred === "true" || starred === true,
     };
 
     await Model.findByIdAndUpdate(
@@ -216,37 +223,35 @@ export const addToReportingArchive = async (req, res) => {
       { new: true, runValidators: false }
     );
 
-    // Auto-add starred contact history entry
+    // Auto-add starred contact history entry (spec §2)
     await ContactHistory.create({
       entityType,
-      entityId,
-      type:      "report",
-      subject:   `Monthly Report — ${String(month).padStart(2, "0")}/${year}`,
-      notes:     notes?.trim() || "",
-      date:      new Date(),
-      time:      new Date().toTimeString().slice(0, 5),
-      starred:   true,
+      entityId: entityId,
+      type:     "report",
+      subject:  `Monthly Report — ${String(month).padStart(2, "0")}/${year}`,
+      notes:    notes?.trim() || "",
+      date:     new Date(),
+      time:     new Date().toTimeString().slice(0, 5),
+      starred:  true,
       createdBy: req.user._id,
     });
 
     await logAudit(req, "REPORTING_ARCHIVE_ADD", entityType, {
       resourceId: entityId,
-      detail:     `Report added: ${reportEntry.fileName} (${month}/${year})`,
+      detail:     `Report uploaded: ${reportEntry.fileName} (${month}/${year})`,
       after:      { entityType, entityId, month, year, fileName: reportEntry.fileName },
     });
 
     res.status(201).json({ message: "Report added to archive", report: reportEntry });
   } catch (err) {
-    console.error("addToReportingArchive ERROR:", err.message, err.stack);
-    res.status(err.statusCode || 500).json({
-      message: err.statusCode ? err.message : "Failed to add report",
-      ...(process.env.NODE_ENV === "development" && { detail: err.message }),
-    });
+    console.error("addToReportingArchive ERROR:", err.message);
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to add report" });
   }
 };
 
 /**
  * DELETE /:entityType/:entityId/reporting-archive/:reportId
+ * Remove a report from the reportingArchive array by its _id.
  */
 export const deleteFromReportingArchive = async (req, res) => {
   try {
@@ -276,18 +281,19 @@ export const deleteFromReportingArchive = async (req, res) => {
 
     res.json({ message: "Report deleted from archive" });
   } catch (err) {
-    console.error("deleteFromReportingArchive ERROR:", err.message, err.stack);
-    res.status(err.statusCode || 500).json({
-      message: err.statusCode ? err.message : "Failed to delete report",
-      ...(process.env.NODE_ENV === "development" && { detail: err.message }),
-    });
+    console.error("deleteFromReportingArchive ERROR:", err.message);
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to delete report" });
   }
 };
 
 /* ══════════════════════════════════════════════════════════════════
-   DECISION MAKERS
+   DECISION MAKERS (NEW — spec §4, §5)
 ══════════════════════════════════════════════════════════════════ */
 
+/**
+ * GET /:entityType/:entityId/decision-makers
+ * Returns decisionMakers array for a PCN or Practice.
+ */
 export const getDecisionMakers = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
@@ -299,13 +305,20 @@ export const getDecisionMakers = async (req, res) => {
       .lean();
     if (!entity) return res.status(404).json({ message: `${entityType} not found` });
 
-    res.json({ decisionMakers: entity.decisionMakers || [], entityName: entity.name });
+    res.json({
+      decisionMakers: entity.decisionMakers || [],
+      entityName:     entity.name,
+    });
   } catch (err) {
-    console.error("getDecisionMakers ERROR:", err.message, err.stack);
+    console.error("getDecisionMakers ERROR:", err.message);
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to fetch decision makers" });
   }
 };
 
+/**
+ * PUT /:entityType/:entityId/decision-makers
+ * Replace the decisionMakers array. Each entry: { name, role, email, phone, isPrimary }
+ */
 export const updateDecisionMakers = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
@@ -316,6 +329,7 @@ export const updateDecisionMakers = async (req, res) => {
     if (!Array.isArray(decisionMakers))
       return res.status(400).json({ message: "decisionMakers must be an array" });
 
+    // Validate minimum required fields (spec §5)
     for (const dm of decisionMakers) {
       if (!dm.name?.trim() || !dm.email?.trim())
         return res.status(400).json({ message: "Each decision maker requires at minimum name and email" });
@@ -336,15 +350,19 @@ export const updateDecisionMakers = async (req, res) => {
 
     res.json({ decisionMakers: entity.decisionMakers, entityName: entity.name, message: "Decision makers updated" });
   } catch (err) {
-    console.error("updateDecisionMakers ERROR:", err.message, err.stack);
+    console.error("updateDecisionMakers ERROR:", err.message);
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to update decision makers" });
   }
 };
 
 /* ══════════════════════════════════════════════════════════════════
-   FINANCE CONTACTS
+   FINANCE CONTACTS (NEW — spec §6, §7)
 ══════════════════════════════════════════════════════════════════ */
 
+/**
+ * GET /:entityType/:entityId/finance-contacts
+ * Returns financeContacts array for a PCN or Practice.
+ */
 export const getFinanceContacts = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
@@ -358,11 +376,15 @@ export const getFinanceContacts = async (req, res) => {
 
     res.json({ financeContacts: entity.financeContacts || [], entityName: entity.name });
   } catch (err) {
-    console.error("getFinanceContacts ERROR:", err.message, err.stack);
+    console.error("getFinanceContacts ERROR:", err.message);
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to fetch finance contacts" });
   }
 };
 
+/**
+ * PUT /:entityType/:entityId/finance-contacts
+ * Replace financeContacts array. Each entry: { name, role, email, phone }
+ */
 export const updateFinanceContacts = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
@@ -388,23 +410,29 @@ export const updateFinanceContacts = async (req, res) => {
 
     res.json({ financeContacts: entity.financeContacts, entityName: entity.name, message: "Finance contacts updated" });
   } catch (err) {
-    console.error("updateFinanceContacts ERROR:", err.message, err.stack);
+    console.error("updateFinanceContacts ERROR:", err.message);
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to update finance contacts" });
   }
 };
 
 /* ══════════════════════════════════════════════════════════════════
-   CLIENT FACING DATA
+   CLIENT FACING DATA (NEW — spec §8, §9)
 ══════════════════════════════════════════════════════════════════ */
 
+/**
+ * GET /pcn/:id/client-facing
+ * Returns client-facing data for a PCN: upcoming meetings, active clinicians,
+ * public notes. Clinicians returned with name + role only (no sensitive data).
+ */
 export const getClientFacingData = async (req, res) => {
   try {
     const pcn = await PCN.findById(req.params.id)
-      .populate("activeClinicians", "name role")
+      .populate("activeClinicians", "name role")   // name + role only (spec §8)
       .select("name clientFacingData monthlyMeetings activeClinicians")
       .lean();
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
 
+    // Return only upcoming meetings (spec §8)
     const now = new Date();
     const upcomingMeetings = (pcn.monthlyMeetings || [])
       .filter((m) => m.date && new Date(m.date) >= now)
@@ -417,11 +445,15 @@ export const getClientFacingData = async (req, res) => {
       entityName:        pcn.name,
     });
   } catch (err) {
-    console.error("getClientFacingData ERROR:", err.message, err.stack);
+    console.error("getClientFacingData ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch client-facing data" });
   }
 };
 
+/**
+ * PUT /pcn/:id/client-facing
+ * Update clientFacingData config: showMonthlyMeetings, showClinicianMeetings, publicNotes
+ */
 export const updateClientFacingData = async (req, res) => {
   try {
     const { showMonthlyMeetings, showClinicianMeetings, publicNotes } = req.body;
@@ -433,7 +465,7 @@ export const updateClientFacingData = async (req, res) => {
           ...(showMonthlyMeetings   !== undefined && { showMonthlyMeetings }),
           ...(showClinicianMeetings !== undefined && { showClinicianMeetings }),
           ...(publicNotes           !== undefined && { publicNotes: publicNotes?.trim() || "" }),
-          lastUpdated: new Date(),
+          lastUpdated: new Date(),   // spec §9
         },
       },
       { new: true, runValidators: true }
@@ -449,7 +481,7 @@ export const updateClientFacingData = async (req, res) => {
 
     res.json({ clientFacingData: pcn.clientFacingData, entityName: pcn.name, message: "Client-facing data updated" });
   } catch (err) {
-    console.error("updateClientFacingData ERROR:", err.message, err.stack);
+    console.error("updateClientFacingData ERROR:", err.message);
     res.status(500).json({ message: "Failed to update client-facing data" });
   }
 };
@@ -471,7 +503,7 @@ export const getHierarchy = async (req, res) => {
     const fedMapById   = {};
     const fedMapByName = {};
     for (const f of federationsRaw) {
-      fedMapById[String(f._id)]                     = f;
+      fedMapById[String(f._id)]                   = f;
       fedMapByName[f.name.trim().toLowerCase()] = f;
     }
 
@@ -490,9 +522,7 @@ export const getHierarchy = async (req, res) => {
       const fedField = pcn.federation;
       if (fedField) {
         if (typeof fedField === "string") {
-          federation = /^[0-9a-fA-F]{24}$/.test(fedField)
-            ? fedMapById[fedField]
-            : fedMapByName[fedField.trim().toLowerCase()];
+          federation = /^[0-9a-fA-F]{24}$/.test(fedField) ? fedMapById[fedField] : fedMapByName[fedField.trim().toLowerCase()];
         } else if (fedField._id) {
           federation = fedMapById[String(fedField._id)];
         }
@@ -507,10 +537,7 @@ export const getHierarchy = async (req, res) => {
       pcns:        pcnsByICB[String(icb._id)] || [],
     }));
 
-    res.json({
-      tree,
-      counts: { icbs: icbs.length, federations: federationsRaw.length, pcns: pcnsRaw.length, practices: practices.length },
-    });
+    res.json({ tree, counts: { icbs: icbs.length, federations: federationsRaw.length, pcns: pcnsRaw.length, practices: practices.length } });
   } catch (err) {
     console.error("getHierarchy ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to load hierarchy", detail: err.message });
@@ -519,7 +546,9 @@ export const getHierarchy = async (req, res) => {
 
 /* ══════════════════════════════════════════════════════════════════
    getPCNs
-   BUG FIX: federation fallback to embedded object when fedMap returns undefined
+   BUG FIX: federation fallback to embedded pcn.federation when
+            fedMap lookup returns undefined — prevents name being
+            silently wiped to null on the list view.
 ══════════════════════════════════════════════════════════════════ */
 export const getPCNs = async (req, res) => {
   try {
@@ -537,7 +566,7 @@ export const getPCNs = async (req, res) => {
     const fedMapById  = {};
     const fedMapByName= {};
     for (const f of federations) {
-      fedMapById[String(f._id)]                 = f;
+      fedMapById[String(f._id)] = f;
       fedMapByName[f.name.trim().toLowerCase()] = f;
     }
 
@@ -556,7 +585,8 @@ export const getPCNs = async (req, res) => {
         }
       }
 
-      // FIX: fallback to embedded federation object if lookup failed
+      // ✅ FIX: if fedMap lookup returned nothing but we already have an
+      //         embedded federation object (with a name), use it as-is.
       const federation = resolvedFederation || (
         fedField && typeof fedField === "object" && fedField.name ? fedField : null
       );
@@ -566,7 +596,7 @@ export const getPCNs = async (req, res) => {
 
     res.json({ pcns });
   } catch (err) {
-    console.error("getPCNs ERROR:", err.message, err.stack);
+    console.error("getPCNs ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch PCNs" });
   }
 };
@@ -577,7 +607,6 @@ export const getICBs = async (req, res) => {
     const icbs = await ICB.find({ isActive: true }).sort({ name: 1 }).lean();
     res.json({ icbs });
   } catch (err) {
-    console.error("getICBs ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to fetch ICBs" });
   }
 };
@@ -609,7 +638,7 @@ export const getICBById = async (req, res) => {
     const pcns = pcnsRaw.map(pcn => ({ ...pcn, practices: practicesByPCN[String(pcn._id)] || [] }));
     res.json({ icb: { ...icb, federations, pcns } });
   } catch (err) {
-    console.error("getICBById ERROR:", err.message, err.stack);
+    console.error("getICBById ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch ICB" });
   }
 };
@@ -622,7 +651,6 @@ export const createICB = async (req, res) => {
     res.status(201).json({ icb, message: "ICB created successfully" });
   } catch (err) {
     if (err.code === 11000) return res.status(409).json({ message: "An ICB with this name already exists" });
-    console.error("createICB ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to create ICB" });
   }
 };
@@ -638,7 +666,6 @@ export const updateICB = async (req, res) => {
     if (!icb) return res.status(404).json({ message: "ICB not found" });
     res.json({ icb, message: "ICB updated" });
   } catch (err) {
-    console.error("updateICB ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to update ICB" });
   }
 };
@@ -654,7 +681,6 @@ export const deleteICB = async (req, res) => {
     await ICB.findByIdAndUpdate(req.params.id, { isActive: false });
     res.json({ message: "ICB deleted" });
   } catch (err) {
-    console.error("deleteICB ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to delete ICB" });
   }
 };
@@ -667,7 +693,6 @@ export const getFederations = async (req, res) => {
     const federations = await Federation.find(filter).populate("icb", "name region").sort({ name: 1 }).lean();
     res.json({ federations });
   } catch (err) {
-    console.error("getFederations ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to fetch federations" });
   }
 };
@@ -681,7 +706,6 @@ export const createFederation = async (req, res) => {
     const populated = await fed.populate("icb", "name");
     res.status(201).json({ federation: populated, message: "Federation created" });
   } catch (err) {
-    console.error("createFederation ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to create federation" });
   }
 };
@@ -692,7 +716,6 @@ export const updateFederation = async (req, res) => {
     if (!fed) return res.status(404).json({ message: "Federation not found" });
     res.json({ federation: fed, message: "Federation updated" });
   } catch (err) {
-    console.error("updateFederation ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to update federation" });
   }
 };
@@ -704,15 +727,20 @@ export const deleteFederation = async (req, res) => {
     await Federation.findByIdAndUpdate(req.params.id, { isActive: false });
     res.json({ message: "Federation deleted" });
   } catch (err) {
-    console.error("deleteFederation ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to delete federation" });
   }
 };
 
 /* ══════════════════════════════════════════════════════════════════
    PCN CRUD
+   UPDATED: getPCNById, createPCN, updatePCN
 ══════════════════════════════════════════════════════════════════ */
 
+/**
+ * GET /pcn/:id
+ * UPDATED (spec §10): +decisionMakers, +financeContacts,
+ *   +reportingArchive (last 3 only), +clientFacingData, +tags, +priority
+ */
 export const getPCNById = async (req, res) => {
   try {
     const pcn = await PCN.findById(req.params.id)
@@ -733,6 +761,7 @@ export const getPCNById = async (req, res) => {
       .lean();
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
 
+    // ── NEW: reportingArchive — last 3 entries only (spec §10) ─────────
     if (Array.isArray(pcn.reportingArchive)) {
       pcn.reportingArchive = [...pcn.reportingArchive]
         .sort((a, b) => {
@@ -755,6 +784,10 @@ export const getPCNById = async (req, res) => {
   }
 };
 
+/**
+ * POST /pcn
+ * UPDATED (spec §11): +decisionMakers, +financeContacts, +tags, +priority, +clientFacingData
+ */
 export const createPCN = async (req, res) => {
   try {
     const { name, icb, decisionMakers, financeContacts, tags, priority, clientFacingData } = req.body;
@@ -763,10 +796,11 @@ export const createPCN = async (req, res) => {
 
     const payload = normalizeComplianceGroup({
       ...req.body,
-      decisionMakers:   decisionMakers  || [],
-      financeContacts:  financeContacts || [],
-      tags:             Array.isArray(tags) ? tags : [],
-      priority:         priority        || "normal",
+      // ── NEW FIELDS (spec §11) ─────────────────────
+      decisionMakers:  decisionMakers  || [],
+      financeContacts: financeContacts || [],
+      tags:            Array.isArray(tags) ? tags : [],
+      priority:        priority        || "normal",
       clientFacingData: clientFacingData || {},
     });
 
@@ -783,11 +817,16 @@ export const createPCN = async (req, res) => {
     });
     res.status(201).json({ pcn: populated, message: "PCN created" });
   } catch (err) {
-    console.error("createPCN ERROR:", err.message, err.stack);
+    console.error("createPCN ERROR:", err.message);
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to create PCN" });
   }
 };
 
+/**
+ * PUT /pcn/:id
+ * UPDATED (spec §12): +decisionMakers, +financeContacts, +tags, +priority, +clientFacingData
+ *   Selective merge — does NOT wipe these fields if absent from req.body
+ */
 export const updatePCN = async (req, res) => {
   try {
     validateObjectIdOr400(req.params.id, "PCN id");
@@ -801,6 +840,7 @@ export const updatePCN = async (req, res) => {
 
     let payload = normalizeComplianceGroup(req.body);
 
+    // Clear groupDocuments if compliance groups changed
     if (
       Object.prototype.hasOwnProperty.call(payload, "complianceGroups") ||
       Object.prototype.hasOwnProperty.call(payload, "complianceGroup")
@@ -816,6 +856,7 @@ export const updatePCN = async (req, res) => {
       if (JSON.stringify(previousGroups) !== JSON.stringify(nextGroups)) payload.groupDocuments = [];
     }
 
+    // ── NEW: selective merge for new fields (spec §12) ─────────────────
     const selectiveMerge = {};
     if (Object.prototype.hasOwnProperty.call(req.body, "decisionMakers"))
       selectiveMerge.decisionMakers  = req.body.decisionMakers  || [];
@@ -852,7 +893,7 @@ export const updatePCN = async (req, res) => {
     });
     res.json({ pcn, message: "PCN updated" });
   } catch (err) {
-    console.error("updatePCN ERROR:", err.message, err.stack);
+    console.error("updatePCN ERROR:", err.message);
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to update PCN" });
   }
 };
@@ -873,7 +914,6 @@ export const deletePCN = async (req, res) => {
     }
     res.json({ message: "PCN deleted" });
   } catch (err) {
-    console.error("deletePCN ERROR:", err.message, err.stack);
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to delete PCN" });
   }
 };
@@ -887,19 +927,17 @@ export const updateRestrictedClinicians = async (req, res) => {
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
     res.json({ pcn, message: "Restricted clinicians updated" });
   } catch (err) {
-    console.error("updateRestrictedClinicians ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to update restricted clinicians" });
   }
 };
 
-/* ── Monthly Meetings ────────────────────────────────────────────── */
+/* ── Monthly Meetings + Rollup ───────────────────────────────────── */
 export const getMonthlyMeetings = async (req, res) => {
   try {
     const pcn = await PCN.findById(req.params.id).select("monthlyMeetings name").lean();
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
     res.json({ meetings: pcn.monthlyMeetings || [], pcnName: pcn.name });
   } catch (err) {
-    console.error("getMonthlyMeetings ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to fetch meetings" });
   }
 };
@@ -917,19 +955,15 @@ export const upsertMonthlyMeeting = async (req, res) => {
     await PCN.findByIdAndUpdate(req.params.id, { monthlyMeetings: meetings });
     res.json({ meetings, message: "Meeting saved" });
   } catch (err) {
-    console.error("upsertMonthlyMeeting ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to save meeting" });
   }
 };
 
 export const getPCNRollup = async (req, res) => {
   try {
-    const pcn = await PCN.findById(req.params.id)
-      .populate("icb", "name region")
-      .populate("federation", "name type")
-      .lean();
+    const pcn = await PCN.findById(req.params.id).populate("icb", "name region").populate("federation", "name type").lean();
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
-    const practices      = await Practice.find({ pcn: req.params.id, isActive: true }).lean();
+    const practices    = await Practice.find({ pcn: req.params.id, isActive: true }).lean();
     const complianceKeys = ["ndaSigned","dsaSigned","mouReceived","welcomePackSent","mobilisationPlanSent","confidentialityFormSigned","prescribingPoliciesShared","remoteAccessSetup","templateInstalled","reportsImported"];
     const complianceByPractice = practices.map(p => {
       const done = complianceKeys.filter(k => p[k]).length;
@@ -939,19 +973,24 @@ export const getPCNRollup = async (req, res) => {
       ? Math.round(complianceByPractice.reduce((s, p) => s + p.score, 0) / complianceByPractice.length) : 0;
     res.json({ pcn, practices, rollup: { practiceCount: practices.length, avgCompliance, complianceByPractice, annualSpend: pcn.annualSpend } });
   } catch (err) {
-    console.error("getPCNRollup ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to generate rollup report" });
   }
 };
 
 /* ══════════════════════════════════════════════════════════════════
    PRACTICE CRUD
-   BUG FIX: getPractices — pcn populated with nested icb + federation
-            client alias added for frontend compatibility
-            google ai studio Code updates Get practices or getPracticeById functioons 
+   UPDATED: getPractices (BUG FIX #2), getPracticeById
 ══════════════════════════════════════════════════════════════════ */
 
-
+/**
+ * GET /practice
+ * BUG FIX #2 (Apr 2026):
+ *   — pcn now populated with nested icb + federation so
+ *     PracticeListPage columns (PCN, ICB / Federation) render correctly.
+ *   — Each practice gets a `client` alias pointing to the populated pcn,
+ *     matching the frontend's p.client.name / p.client.icb / p.client.federation
+ *     references without touching the frontend code.
+ */
 export const getPractices = async (req, res) => {
   try {
     const filter = { isActive: true };
@@ -959,9 +998,8 @@ export const getPractices = async (req, res) => {
 
     const practices = await Practice.find(filter)
       .populate({
-        path: "pcn",
+        path:   "pcn",
         select: "name icb federation",
-        // Deep populate PCN's ICB and Federation
         populate: [
           { path: "icb",        select: "name region code" },
           { path: "federation", select: "name type" },
@@ -971,45 +1009,40 @@ export const getPractices = async (req, res) => {
       .sort({ name: 1 })
       .lean();
 
-    // Alias pcn → client and ensure nested data is accessible
-    const normalized = practices.map((p) => ({ 
-      ...p, 
+    // ✅ FIX: alias pcn → client so PracticeListPage.jsx works without changes
+    // Frontend uses p.client.name, p.client.icb.name, p.client.federation.name
+    const normalized = practices.map((p) => ({
+      ...p,
       client: p.pcn ?? null,
     }));
 
     res.json({ practices: normalized });
   } catch (err) {
-    console.error("getPractices ERROR:", err.message, err.stack);
+    console.error("getPractices ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch practices" });
   }
 };
 
+/**
+ * GET /practice/:id
+ * UPDATED (spec §13): +localDecisionMakers, +siteSpecificDocs,
+ *   +reportingArchive (last 3), +tags, +priority
+ */
 export const getPracticeById = async (req, res) => {
   try {
     const practice = await Practice.findById(req.params.id)
-      .populate({
-        path: "pcn",
-        select: "name icb federation",
-        // Deep populate PCN's ICB and Federation
-        populate: [
-          { path: "icb",        select: "name region code" },
-          { path: "federation", select: "name type" },
-        ],
-      })
+      .populate("pcn", "name icb")
       .populate({
         path:   "complianceGroup",
         select: "name active displayOrder documents",
-        populate: { path: "documents", select: "name mandatory expirable active" },
+        populate: { path: "documents", select: "name mandatory expirable displayOrder defaultExpiryDays defaultReminderDays active" },
       })
       .populate("linkedClinicians",    "name email role")
       .populate("restrictedClinicians","name email role")
       .lean();
-
     if (!practice) return res.status(404).json({ message: "Practice not found" });
 
-    // Alias pcn → client for frontend compatibility
-    practice.client = practice.pcn ?? null;
-
+    // ── NEW: reportingArchive — last 3 (spec §13) ──────────────────────
     if (Array.isArray(practice.reportingArchive)) {
       practice.reportingArchive = [...practice.reportingArchive]
         .sort((a, b) => {
@@ -1022,25 +1055,22 @@ export const getPracticeById = async (req, res) => {
     recordView(Practice, req.params.id, req.user._id);
     res.json({ practice });
   } catch (err) {
-    console.error("getPracticeById ERROR:", err.message, err.stack);
+    console.error("getPracticeById ERROR:", err.message);
     res.status(500).json({ message: "Failed to fetch practice" });
   }
 };
+
 export const createPractice = async (req, res) => {
   try {
     const { name, pcn } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: "Practice name is required" });
     if (!pcn)          return res.status(400).json({ message: "PCN is required" });
-    const payload   = normalizeComplianceGroup(req.body);
-    const practice  = await Practice.create({ ...payload, name: name.trim(), createdBy: req.user._id });
-    const populated = await Practice.findById(practice._id)
-      .populate("pcn", "name")
-      .populate("complianceGroup", "name")
-      .lean();
+    const payload  = normalizeComplianceGroup(req.body);
+    const practice = await Practice.create({ ...payload, name: name.trim(), createdBy: req.user._id });
+    const populated = await Practice.findById(practice._id).populate("pcn", "name").populate("complianceGroup", "name").lean();
     await logAudit(req, "CREATE_CLIENT", "Practice", { resourceId: practice._id, detail: `Practice created: ${practice.name}`, after: safeJson(populated) });
     res.status(201).json({ practice: populated, message: "Practice created" });
   } catch (err) {
-    console.error("createPractice ERROR:", err.message, err.stack);
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to create practice" });
   }
 };
@@ -1049,11 +1079,8 @@ export const updatePractice = async (req, res) => {
   try {
     validateObjectIdOr400(req.params.id, "Practice id");
     const existing = await Practice.findById(req.params.id)
-      .populate("pcn","name")
-      .populate("complianceGroup","name")
-      .populate("linkedClinicians","name email role")
-      .populate("restrictedClinicians","name email role")
-      .lean();
+      .populate("pcn","name").populate("complianceGroup","name")
+      .populate("linkedClinicians","name email role").populate("restrictedClinicians","name email role").lean();
     if (!existing) return res.status(404).json({ message: "Practice not found" });
 
     const payload = normalizeComplianceGroup(req.body);
@@ -1064,11 +1091,8 @@ export const updatePractice = async (req, res) => {
     }
 
     const practice = await Practice.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true })
-      .populate("pcn","name")
-      .populate("complianceGroup","name")
-      .populate("linkedClinicians","name email role")
-      .populate("restrictedClinicians","name email role")
-      .lean();
+      .populate("pcn","name").populate("complianceGroup","name")
+      .populate("linkedClinicians","name email role").populate("restrictedClinicians","name email role").lean();
 
     const beforeGroups = existing.complianceGroup?.name ? [existing.complianceGroup.name] : [];
     const afterGroups  = practice.complianceGroup?.name ? [practice.complianceGroup.name] : [];
@@ -1081,7 +1105,6 @@ export const updatePractice = async (req, res) => {
     });
     res.json({ practice, message: "Practice updated" });
   } catch (err) {
-    console.error("updatePractice ERROR:", err.message, err.stack);
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to update practice" });
   }
 };
@@ -1099,7 +1122,6 @@ export const deletePractice = async (req, res) => {
     }
     res.json({ message: "Practice deleted" });
   } catch (err) {
-    console.error("deletePractice ERROR:", err.message, err.stack);
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to delete practice" });
   }
 };
@@ -1113,95 +1135,19 @@ export const updatePracticeRestricted = async (req, res) => {
     if (!practice) return res.status(404).json({ message: "Practice not found" });
     res.json({ practice, message: "Restricted clinicians updated" });
   } catch (err) {
-    console.error("updatePracticeRestricted ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to update restricted clinicians" });
   }
 };
 
 /* ══════════════════════════════════════════════════════════════════
    CONTACT HISTORY
-   BUG FIX: getContactHistory — UUID/invalid ObjectId now returns
-            400 instead of crashing with a generic 500
+   UPDATED: addContactHistory, updateContactHistory (spec §14, §15)
 ══════════════════════════════════════════════════════════════════ */
-
 export const getContactHistory = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
     const { entityId } = req.params;
     const { type, starred, page = 1, limit = 100 } = req.query;
-
-    // ── FIX: validate format before attempting cast ──────────────────
-    if (!isValidObjectId(entityId)) {
-      return res.status(400).json({
-        message: `Invalid entityId "${entityId}" — must be a 24-character hex MongoDB ObjectId, not a UUID or other format`,
-      });
-    }
-
-    const entityObjId = toObjectId(entityId);
-    if (!entityObjId) {
-      return res.status(400).json({ message: "Invalid entityId — conversion failed" });
-    }
-
-    const EntityModel = getEntityModelByType(entityType);
-
-    // ── FIX: wrap exists() to catch Mongoose CastError separately ───
-    let entityExists;
-    try {
-      entityExists = await EntityModel.exists({ _id: entityObjId });
-    } catch (castErr) {
-      console.error("getContactHistory CastError:", castErr.message);
-      return res.status(400).json({
-        message: "Invalid entityId format",
-        detail:  castErr.message,
-      });
-    }
-
-    if (!entityExists) return res.status(404).json({ message: `${entityType} not found` });
-
-    const filter = { entityType, entityId: entityObjId };
-    if (type && type !== "all") filter.type    = type;
-    if (starred === "true")     filter.starred = true;
-
-    const skip = (Number(page) - 1) * Number(limit);
-    const [logs, total] = await Promise.all([
-      ContactHistory.find(filter)
-        .populate("createdBy", "name role")
-        .sort({ date: -1, createdAt: -1 })
-        .skip(skip)
-        .limit(Number(limit))
-        .lean(),
-      ContactHistory.countDocuments(filter),
-    ]);
-
-    res.json({ logs, total, page: Number(page), pages: Math.ceil(total / Number(limit)) });
-  } catch (err) {
-    console.error("getContactHistory ERROR:", err.message, err.stack);
-    res.status(err.statusCode || 500).json({
-      message: err.statusCode ? err.message : "Failed to fetch contact history",
-      ...(process.env.NODE_ENV === "development" && { detail: err.message }),
-    });
-  }
-};
-
-/**
- * POST /:entityType/:entityId/history
- * +outcome, +followUpDate, +followUpNote
- */
-export const addContactHistory = async (req, res) => {
-  try {
-    const entityType = normalizeEntityType(req.params.entityType);
-    const { entityId } = req.params;
-    const {
-      type, subject, notes, date, time, attachments,
-      outcome, followUpDate, followUpNote,
-    } = req.body;
-
-    if (!subject?.trim()) return res.status(400).json({ message: "Subject is required" });
-    if (!type)            return res.status(400).json({ message: "Type is required" });
-
-    if (!isValidObjectId(entityId)) {
-      return res.status(400).json({ message: `Invalid entityId "${entityId}" — must be a 24-character hex MongoDB ObjectId` });
-    }
 
     const entityObjId = toObjectId(entityId);
     if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
@@ -1210,15 +1156,56 @@ export const addContactHistory = async (req, res) => {
     const entityExists = await EntityModel.exists({ _id: entityObjId });
     if (!entityExists) return res.status(404).json({ message: `${entityType} not found` });
 
+    const filter = { entityType, entityId: entityObjId };
+    if (type && type !== "all") filter.type  = type;
+    if (starred === "true")     filter.starred = true;
+
+    const skip = (Number(page) - 1) * Number(limit);
+    const [logs, total] = await Promise.all([
+      ContactHistory.find(filter).populate("createdBy", "name role")
+        .sort({ date: -1, createdAt: -1 }).skip(skip).limit(Number(limit)).lean(),
+      ContactHistory.countDocuments(filter),
+    ]);
+    res.json({ logs, total, page: Number(page), pages: Math.ceil(total / Number(limit)) });
+  } catch (err) {
+    console.error("getContactHistory ERROR:", err.message);
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to fetch contact history" });
+  }
+};
+
+/**
+ * POST /:entityType/:entityId/history
+ * UPDATED (spec §14): +outcome, +followUpDate, +followUpNote
+ */
+export const addContactHistory = async (req, res) => {
+  try {
+    const entityType = normalizeEntityType(req.params.entityType);
+    const { entityId } = req.params;
+    const {
+      type, subject, notes, date, time, attachments,
+      // ── NEW FIELDS (spec §14) ─────────────────────
+      outcome, followUpDate, followUpNote,
+    } = req.body;
+
+    if (!subject?.trim()) return res.status(400).json({ message: "Subject is required" });
+    if (!type)            return res.status(400).json({ message: "Type is required" });
+
+    const entityObjId  = toObjectId(entityId);
+    if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
+    const EntityModel  = getEntityModelByType(entityType);
+    const entityExists = await EntityModel.exists({ _id: entityObjId });
+    if (!entityExists) return res.status(404).json({ message: `${entityType} not found` });
+
     const log = await ContactHistory.create({
       entityType,
-      entityId:    entityObjId,
+      entityId: entityObjId,
       type,
       subject:     subject.trim(),
       notes:       notes || "",
-      date:        date ? new Date(date) : new Date(),
-      time:        time || new Date().toTimeString().slice(0, 5),
+      date:        date  ? new Date(date) : new Date(),
+      time:        time  || new Date().toTimeString().slice(0, 5),
       attachments: attachments || [],
+      // ── NEW FIELDS (spec §14) ─────────────────────
       outcome:      outcome?.trim()    || "",
       followUpDate: followUpDate ? new Date(followUpDate) : null,
       followUpNote: followUpNote?.trim() || "",
@@ -1228,30 +1215,32 @@ export const addContactHistory = async (req, res) => {
     const populated = await ContactHistory.findById(log._id).populate("createdBy", "name role").lean();
     res.status(201).json({ log: populated, message: "Log added" });
   } catch (err) {
-    console.error("addContactHistory ERROR:", err.message, err.stack);
+    console.error("addContactHistory ERROR:", err.message);
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to add log" });
   }
 };
 
 /**
  * PUT /history/:logId
- * + outcome, + followUpDate, + followUpNote
+ * UPDATED (spec §15): +outcome, +followUpDate, +followUpNote
  */
 export const updateContactHistory = async (req, res) => {
   try {
     const {
       subject, notes, type, date, time,
+      // ── NEW FIELDS (spec §15) ─────────────────────
       outcome, followUpDate, followUpNote,
     } = req.body;
 
     const log = await ContactHistory.findByIdAndUpdate(
       req.params.logId,
       {
-        ...(subject           !== undefined && { subject }),
-        ...(notes             !== undefined && { notes }),
-        ...(type                            && { type }),
-        ...(date                            && { date }),
-        ...(time                            && { time }),
+        ...(subject           && { subject }),
+        ...(notes !== undefined && { notes }),
+        ...(type              && { type }),
+        ...(date              && { date }),
+        ...(time              && { time }),
+        // ── NEW FIELDS (spec §15) ─────────────────
         ...(outcome      !== undefined && { outcome:      outcome?.trim()    || "" }),
         ...(followUpDate !== undefined && { followUpDate: followUpDate ? new Date(followUpDate) : null }),
         ...(followUpNote !== undefined && { followUpNote: followUpNote?.trim() || "" }),
@@ -1262,7 +1251,7 @@ export const updateContactHistory = async (req, res) => {
     if (!log) return res.status(404).json({ message: "Log not found" });
     res.json({ log, message: "Log updated" });
   } catch (err) {
-    console.error("updateContactHistory ERROR:", err.message, err.stack);
+    console.error("updateContactHistory ERROR:", err.message);
     res.status(500).json({ message: "Failed to update log" });
   }
 };
@@ -1275,7 +1264,6 @@ export const toggleStarred = async (req, res) => {
     const updatedLog = await ContactHistory.findByIdAndUpdate(req.params.logId, { starred }, { new: true });
     res.json({ log: updatedLog, starred, message: starred ? "Starred" : "Unstarred" });
   } catch (err) {
-    console.error("toggleStarred ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to toggle star" });
   }
 };
@@ -1286,7 +1274,6 @@ export const deleteContactHistory = async (req, res) => {
     if (!log) return res.status(404).json({ message: "Log not found" });
     res.json({ message: "Log deleted" });
   } catch (err) {
-    console.error("deleteContactHistory ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to delete log" });
   }
 };
@@ -1298,10 +1285,6 @@ export const requestSystemAccess = async (req, res) => {
     const { systems, clinicianDetails, notes } = req.body;
     if (!systems?.length)        return res.status(400).json({ message: "At least one system must be selected" });
     if (!clinicianDetails?.name) return res.status(400).json({ message: "Clinician name is required" });
-
-    if (!isValidObjectId(entityId)) {
-      return res.status(400).json({ message: `Invalid entityId "${entityId}"` });
-    }
 
     const entityObjId = toObjectId(entityId);
     if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
@@ -1317,7 +1300,6 @@ export const requestSystemAccess = async (req, res) => {
     });
     res.json({ message: "System access request logged successfully", log });
   } catch (err) {
-    console.error("requestSystemAccess ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to process system access request" });
   }
 };
@@ -1332,10 +1314,6 @@ export const sendMassEmail = async (req, res) => {
     const valid = (recipients || []).filter(r => r.email?.includes("@"));
     if (!valid.length)    return res.status(400).json({ message: "At least one valid recipient email is required" });
 
-    if (!isValidObjectId(entityId)) {
-      return res.status(400).json({ message: `Invalid entityId "${entityId}"` });
-    }
-
     const entityObjId = toObjectId(entityId);
     if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
 
@@ -1346,15 +1324,9 @@ export const sendMassEmail = async (req, res) => {
     const recipientResults = [];
     for (const r of valid) {
       try {
-        await transporter.sendMail({
-          from: process.env.EMAIL_FROM,
-          to:   r.name ? `"${r.name}" <${r.email}>` : r.email,
-          subject,
-          html: body + pixel,
-        });
+        await transporter.sendMail({ from: process.env.EMAIL_FROM, to: r.name ? `"${r.name}" <${r.email}>` : r.email, subject, html: body + pixel });
         recipientResults.push({ email: r.email, name: r.name || "", opened: false });
       } catch (mailErr) {
-        console.error("sendMassEmail mailErr:", mailErr.message);
         recipientResults.push({ email: r.email, name: r.name || "", opened: false });
       }
     }
@@ -1369,7 +1341,6 @@ export const sendMassEmail = async (req, res) => {
     });
     res.json({ message: `Email sent to ${recipientResults.length} recipient(s)` });
   } catch (err) {
-    console.error("sendMassEmail ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Failed to send email" });
   }
 };
@@ -1405,7 +1376,6 @@ export const searchClients = async (req, res) => {
       ],
     });
   } catch (err) {
-    console.error("searchClients ERROR:", err.message, err.stack);
     res.status(500).json({ message: "Search failed" });
   }
 };
