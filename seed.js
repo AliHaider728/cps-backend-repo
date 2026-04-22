@@ -10,10 +10,8 @@
  *   PRACTICE_DATA         — +localDecisionMakers, +tags, +priority
  *   ContactHistory        — +outcome, +followUpDate, +followUpNote
  *
- *   FIXED: All models are wiped before re-seeding so stale/old data
- *           never bleeds through. upsertRecord alone was not enough because
- *           it only merges — it never removes old records.
- *           insertRecord is now used directly after the wipe.
+ *   FIXED: Model name corrected back to "PCN" (was accidentally changed to "client").
+ *          Practice field corrected back to "pcn" reference.
  *
  * Run locally:  node seed.js
  * Run via npm:  npm run seed
@@ -34,7 +32,7 @@ const log = {
   error: (msg, ...a) => console.error(`[ERROR] ${msg}`, ...a),
 };
 
-/* ── DB helpers ─────────────────────────────────────────────────── */
+/* ── DB helpers  */
 async function insertRecord(model, payload) {
   const id        = uuidv4();
   const timestamp = new Date().toISOString();
@@ -93,7 +91,8 @@ const FEDERATION_DATA = [
   { icbName: "NHS Cheshire & Merseyside ICB",      name: "Cheshire & Wirral Foundation Trust",             type: "federation" },
 ];
 
-const CLIENT_DATA = [
+//  FIX: renamed CLIENT_DATA back to PCN_DATA for clarity — stored as "PCN" model
+const PCN_DATA = [
   {
     icbName:        "NHS Greater Manchester ICB",
     federationName: "Salford Together Federation",
@@ -202,6 +201,7 @@ const CLIENT_DATA = [
   },
 ];
 
+//  FIX: practice data key names unchanged — but pcn field will be used (not client)
 const PRACTICE_DATA = {
   "Salford Central Client": [
     {
@@ -374,22 +374,22 @@ export async function runSeed() {
 
   // ══════════════════════════════════════════════════════════════
   //   STEP 0 — WIPE ALL MODELS BEFORE RE-SEEDING
-  // Guarantees a clean slate. Old "pcn" model records are also
-  // wiped in case a previous seed run used a different model name.
   // ══════════════════════════════════════════════════════════════
   log.info("\nWiping existing data...");
   await deleteAllByModel("contact_history");
   await deleteAllByModel("practice");
-  await deleteAllByModel("client");
-  await deleteAllByModel("pcn");            // wipe old model name too
+  //  FIX: wipe both old names to ensure clean slate
+  await deleteAllByModel("PCN");
+  await deleteAllByModel("pcn");
+  await deleteAllByModel("client");   // wipe in case old seed ran with wrong name
   await deleteAllByModel("federation");
   await deleteAllByModel("icb");
   await deleteAllByModel("document_group");
   await deleteAllByModel("compliance_document");
-  await deleteAllByModel("user");           // comment out to keep existing logins
+  await deleteAllByModel("user");
   log.ok("Wipe complete — inserting fresh data");
 
-  // ── 1. Users ──────────────────────────────────────────────────
+  // ── 1. Users ──
   log.info("\nSeeding Users...");
   const seededUsers = [];
   for (const u of USERS) {
@@ -419,7 +419,7 @@ export async function runSeed() {
   const admin      = seededUsers.find(u => u.role === "super_admin");
   const clinicians = seededUsers.filter(u => u.role === "clinician");
 
-  // ── 2. ICBs ───────────────────────────────────────────────────
+  // ── 2. ICBs 
   log.info("\nSeeding ICBs...");
   const icbMap = {};
   for (const d of ICBS) {
@@ -428,7 +428,7 @@ export async function runSeed() {
     log.ok(d.name);
   }
 
-  // ── 3. Federations ────────────────────────────────────────────
+  // ── 3. Federations ──
   log.info("\nSeeding Federations...");
   const fedMap = {};
   for (const d of FEDERATION_DATA) {
@@ -439,38 +439,45 @@ export async function runSeed() {
     log.ok(`${d.name} [${d.type}]`);
   }
 
-  // ── 4. Clients ────────────────────────────────────────────────
-  log.info("\nSeeding Clients...");
-  const clientMap = {};
-  for (const group of CLIENT_DATA) {
+  // ── 4. PCNs (stored as "PCN" model — display label is "Client") ──
+  log.info("\nSeeding PCNs (Clients)...");
+  const pcnMap = {};
+  for (const group of PCN_DATA) {
     const icb = icbMap[group.icbName];
     const fed = fedMap[group.federationName];
     if (!icb) { log.warn(`ICB not found: ${group.icbName}`); continue; }
     for (const d of group.clients) {
-      const client = await insertRecord("client", {
+      //  FIX: model is "PCN" — this is what PCN model/controller queries
+      const pcn = await insertRecord("PCN", {
         ...d,
         icb:        { _id: icb.id, id: icb.id, name: icb.name, code: icb.code },
         federation: fed ? { _id: fed.id, id: fed.id, name: fed.name, type: fed.type } : null,
         federationName:       group.federationName,
         restrictedClinicians: clinicians.length ? [clinicians[0].id] : [],
+        isActive:             true,
         createdBy:            admin.id,
       });
-      clientMap[d.name] = client;
+      pcnMap[d.name] = pcn;
       log.ok(d.name);
     }
   }
 
-  // ── 5. Practices ──────────────────────────────────────────────
+  // ── 5. Practices ─
   log.info("\nSeeding Practices...");
   const practiceMap = {};
-  for (const [clientName, practices] of Object.entries(PRACTICE_DATA)) {
-    const client = clientMap[clientName];
-    if (!client) { log.warn(`Client not found: ${clientName}`); continue; }
+  for (const [pcnName, practices] of Object.entries(PRACTICE_DATA)) {
+    const pcn = pcnMap[pcnName];
+    if (!pcn) { log.warn(`PCN not found: ${pcnName}`); continue; }
     for (const d of practices) {
+      //  FIX: use "pcn" field (not "client") — this matches getPractices populate("pcn")
       const practice = await insertRecord("practice", {
         ...d,
-        client:           { _id: client.id, id: client.id, name: client.name },
+        // "pcn" is the reference field used by the controller
+        pcn:              pcn.id,
+        // Keep enriched object for display (some queries use this directly)
+        pcnData:          { _id: pcn.id, id: pcn.id, name: pcn.name },
         linkedClinicians: clinicians.map(c => c.id),
+        isActive:         true,
         createdBy:        admin.id,
       });
       practiceMap[d.name] = practice;
@@ -478,14 +485,14 @@ export async function runSeed() {
     }
   }
 
-  // ── 6. Contact History ────────────────────────────────────────
+  // ── 6. Contact History ─
   log.info("\nSeeding Contact History...");
-  for (const client of Object.values(clientMap)) {
+  for (const pcn of Object.values(pcnMap)) {
     for (let i = 0; i < 5; i++) {
       const t = rand(HISTORY_TEMPLATES);
       await insertRecord("contact_history", {
-        entityType:   "Client",
-        entityId:     client.id,
+        entityType:   "PCN",
+        entityId:     pcn.id,
         type:         t.type,
         subject:      t.subject,
         notes:        t.notes,
@@ -498,7 +505,7 @@ export async function runSeed() {
         followUpNote: t.followUpNote || "",
       });
     }
-    log.ok(`History seeded for ${client.name}`);
+    log.ok(`History seeded for ${pcn.name}`);
   }
   for (const practice of Object.values(practiceMap)) {
     for (let i = 0; i < 3; i++) {
@@ -514,7 +521,7 @@ export async function runSeed() {
   }
   log.ok("Practice history seeded");
 
-  // ── 7. Compliance Documents ───────────────────────────────────
+  // ── 7. Compliance Documents ──
   log.info("\nSeeding Compliance Documents...");
   const docMap = {};
   for (const d of COMPLIANCE_DOCS) {
@@ -523,7 +530,7 @@ export async function runSeed() {
     log.ok(d.name);
   }
 
-  // ── 8. Document Groups ────────────────────────────────────────
+  // ── 8. Document Groups ─
   log.info("\nSeeding Document Groups...");
   const groupMap = {};
   for (const g of DOCUMENT_GROUPS) {
@@ -540,15 +547,15 @@ export async function runSeed() {
     log.ok(`${g.name} (${docIds.length} docs)`);
   }
 
-  // ── 9. Assign Compliance Groups ───────────────────────────────
+  // ── 9. Assign Compliance Groups ─
   log.info("\nAssigning compliance groups...");
   const docsById             = Object.fromEntries(Object.values(docMap).map(d => [d.id, d]));
-  const clientPrimaryGroup   = groupMap["Clinical Staff Documents"];
-  const clientSecondaryGroup = groupMap["DBS and Update"];
-  const practicePrimaryGroup = groupMap["Non-Clinical Staff"] || clientPrimaryGroup || null;
+  const pcnPrimaryGroup      = groupMap["Clinical Staff Documents"];
+  const pcnSecondaryGroup    = groupMap["DBS and Update"];
+  const practicePrimaryGroup = groupMap["Non-Clinical Staff"] || pcnPrimaryGroup || null;
 
-  for (const client of Object.values(clientMap)) {
-    const selectedGroups   = [clientPrimaryGroup, clientSecondaryGroup].filter(Boolean);
+  for (const pcn of Object.values(pcnMap)) {
+    const selectedGroups   = [pcnPrimaryGroup, pcnSecondaryGroup].filter(Boolean);
     const selectedGroupIds = selectedGroups.map(g => g.id);
     const seededRecords    = [];
     for (const group of selectedGroups) {
@@ -562,12 +569,13 @@ export async function runSeed() {
         expirable: !!docDef?.expirable, uploadedBy: admin.id, daysBack: 7,
       }));
     }
-    await updateRecord("client", client.id, {
+    //  FIX: update "PCN" model record
+    await updateRecord("PCN", pcn.id, {
       complianceGroups: selectedGroupIds,
       complianceGroup:  selectedGroupIds[0] || null,
       groupDocuments:   seededRecords,
     });
-    log.ok(`Compliance groups assigned to ${client.name}`);
+    log.ok(`Compliance groups assigned to ${pcn.name}`);
   }
 
   for (const practice of Object.values(practiceMap)) {
@@ -591,18 +599,18 @@ export async function runSeed() {
     log.ok(`Compliance group assigned to ${practice.name}`);
   }
 
-  // ── Done ──────────────────────────────────────────────────────
+  // ── Done 
   await disconnectDB();
   log.ok("\nSeed complete!");
   log.info(
     `Users: ${USERS.length} | ICBs: ${ICBS.length} | ` +
-    `Federations: ${Object.keys(fedMap).length} | Clients: ${Object.keys(clientMap).length} | ` +
+    `Federations: ${Object.keys(fedMap).length} | PCNs/Clients: ${Object.keys(pcnMap).length} | ` +
     `Practices: ${Object.keys(practiceMap).length} | ` +
     `Compliance Docs: ${COMPLIANCE_DOCS.length} | Document Groups: ${DOCUMENT_GROUPS.length}`
   );
 }
 
-/* ── Entry point ─────────────────────────────────────────────────── */
+/* ── Entry point  */
 if (
   process.argv[1] &&
   import.meta.url === new URL(`file://${process.argv[1].replace(/\\/g, "/")}`).href
