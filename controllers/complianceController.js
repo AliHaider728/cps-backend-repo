@@ -3,24 +3,23 @@
  *
  * UPDATED (Apr 2026) — Spec: CPS_Controller_Update_Spec.docx
  *
- * getEntityDocumentContext   — populate select now includes clinicianCanUpload,
- *                              visibleToClinician, notes (spec §1)
- * normalizePopulatedDoc      — returns clinicianCanUpload, visibleToClinician,
- *                              notes in normalized output (spec §2)
- * buildEntityDocumentsPayload — each doc row now includes clinicianCanUpload +
- *                               visibleToClinician for frontend upload-button
- *                               visibility (spec §3)
- * getExpiringDocs            — also checks groupDocuments[].uploads[] for expiry,
- *                              uses doc.defaultReminderDays as threshold (spec §4)
- * runExpiryCheck             — second loop added for groupDocuments uploads
- *                              (spec §5)
- * getComplianceStatus        — groupDocumentsSummary added, combined overallPct
- *                              from both complianceDocs + groupDocuments (spec §6)
+ * ✅ ARCHITECTURE CHANGE: File uploads now use "frontend-to-Supabase" pattern.
+ *    - addEntityDocumentUploads: reads JSON body { uploads[], expiryDate, notes, reference }
+ *      instead of multer req.files. multer middleware removed from this route.
+ *    - uploadBufferToStorage (Supabase backend upload) is NO LONGER called here.
+ *      Files are already in Supabase; backend only persists metadata.
  *
- * All previous fixes kept:
- *   • buildSelectedGroups: group._id check only
- *   • normalizeEntityType() before getModel() throughout
- *   • getRecordUploads: record = record ?? {}
+ * Other updates kept from previous version:
+ *   getEntityDocumentContext   — populate select includes clinicianCanUpload,
+ *                                visibleToClinician, notes (spec §1)
+ *   normalizePopulatedDoc      — returns clinicianCanUpload, visibleToClinician,
+ *                                notes in normalized output (spec §2)
+ *   buildEntityDocumentsPayload — each doc row includes clinicianCanUpload +
+ *                                visibleToClinician (spec §3)
+ *   getExpiringDocs            — also checks groupDocuments[].uploads[] for expiry,
+ *                                uses doc.defaultReminderDays as threshold (spec §4)
+ *   runExpiryCheck             — second loop for groupDocuments uploads (spec §5)
+ *   getComplianceStatus        — groupDocumentsSummary added, combined overallPct (spec §6)
  */
 
 import PCN           from "../models/PCN.js";
@@ -30,6 +29,8 @@ import ComplianceDocument from "../models/ComplianceDocument.js";
 import nodemailer    from "nodemailer";
 import { logAudit }  from "../middleware/auditLogger.js";
 import { createId, isValidId } from "../lib/ids.js";
+// ✅ uploadBufferToStorage is no longer called in addEntityDocumentUploads
+//    (kept in import in case other functions like upsertComplianceDoc still use it)
 import { uploadBufferToStorage } from "../lib/supabase.js";
 
 const transporter = nodemailer.createTransport({
@@ -140,8 +141,7 @@ function normalizeEntityType(entityType = "") {
 }
 
 /* ─────────────────────────────────────────────────────────────────────
-   normalizePopulatedDoc
-   UPDATED (spec §2): +clinicianCanUpload, +visibleToClinician, +notes
+   normalizePopulatedDoc  (spec §2)
 ───────────────────────────────────────────────────────────────────── */
 function normalizePopulatedDoc(doc) {
   if (!doc || typeof doc !== "object") return null;
@@ -156,7 +156,6 @@ function normalizePopulatedDoc(doc) {
     active:             doc.active !== false,
     defaultExpiryDays:  doc.defaultExpiryDays ?? null,
     defaultReminderDays: doc.defaultReminderDays ?? null,
-    // ── NEW (spec §2) ─────────────────────────────
     clinicianCanUpload: !!doc.clinicianCanUpload,
     visibleToClinician: doc.visibleToClinician !== false,
     notes:              doc.notes || "",
@@ -233,9 +232,7 @@ function getRecordUploads(record, docDef) {
 }
 
 /* ─────────────────────────────────────────────────────────────────────
-   getEntityDocumentContext
-   UPDATED (spec §1): populate select now includes
-     clinicianCanUpload, visibleToClinician, notes
+   getEntityDocumentContext  (spec §1)
 ───────────────────────────────────────────────────────────────────── */
 async function getEntityDocumentContext(entityType, entityId) {
   const normalizedType = normalizeEntityType(entityType);
@@ -244,7 +241,6 @@ async function getEntityDocumentContext(entityType, entityId) {
   void ComplianceDocument;
   const Model = getModel(normalizedType);
 
-  // ── UPDATED select string (spec §1) ────────────────────────────────
   const DOC_SELECT = "name displayOrder mandatory expirable active defaultExpiryDays defaultReminderDays clinicianCanUpload visibleToClinician notes";
 
   let query = Model.findById(entityId).populate({
@@ -297,9 +293,7 @@ async function getEntityDocumentContext(entityType, entityId) {
 }
 
 /* ─────────────────────────────────────────────────────────────────────
-   buildEntityDocumentsPayload
-   UPDATED (spec §3): each doc row now includes clinicianCanUpload +
-     visibleToClinician so frontend can show/hide upload button
+   buildEntityDocumentsPayload  (spec §3)
 ───────────────────────────────────────────────────────────────────── */
 function buildEntityDocumentsPayload(entity, documents, options = {}) {
   const recordMap = new Map(
@@ -326,7 +320,6 @@ function buildEntityDocumentsPayload(entity, documents, options = {}) {
           expirable:          !!doc.expirable,
           defaultExpiryDays:  doc.defaultExpiryDays ?? null,
           defaultReminderDays:doc.defaultReminderDays ?? null,
-          // ── NEW (spec §3) ──────────────────────────
           clinicianCanUpload: !!doc.clinicianCanUpload,
           visibleToClinician: doc.visibleToClinician !== false,
           uploadCount:        uploads.length,
@@ -448,27 +441,35 @@ function makeUploadEntry(payload, userId, docDef) {
   return normalized;
 }
 
-async function getMultipartUploads(req) {
-  const files = Array.isArray(req.files) ? req.files : (req.file ? [req.file] : []);
-  return Promise.all(files.map(async (file) => {
-    const uploaded = await uploadBufferToStorage({
-      buffer:      file.buffer,
-      contentType: file.mimetype || "application/octet-stream",
-      fileName:    file.originalname || "upload.bin",
-    });
-    return {
-      fileName:    file.originalname || "upload.bin",
-      fileUrl:     uploaded.publicUrl,
-      mimeType:    file.mimetype || "application/octet-stream",
-      fileSize:    file.size || 0,
-      expiryDate:  req.body.expiryDate  || null,
-      renewalDate: req.body.renewalDate || null,
-      notes:       req.body.notes       || "",
-      reference:   req.body.reference   || "",
-    };
+/* ─────────────────────────────────────────────────────────────────────
+   ✅ NEW: getJsonUploads
+   Replaces getMultipartUploads.
+   Reads upload metadata from req.body.uploads[] (JSON array).
+   Files are already in Supabase — frontend sent { fileUrl, fileName, mimeType, fileSize }.
+   Shared expiryDate / notes / reference also come from req.body.
+───────────────────────────────────────────────────────────────────── */
+function getJsonUploads(req) {
+  const { uploads, expiryDate, renewalDate, notes, reference } = req.body;
+
+  if (!Array.isArray(uploads) || uploads.length === 0) return [];
+
+  return uploads.map((u) => ({
+    fileName:    u.fileName   || "",
+    fileUrl:     u.fileUrl    || "",
+    mimeType:    u.mimeType   || "",
+    fileSize:    u.fileSize   || 0,
+    expiryDate:  expiryDate   || null,
+    renewalDate: renewalDate  || null,
+    notes:       notes        || "",
+    reference:   reference    || "",
   }));
 }
 
+/* ─────────────────────────────────────────────────────────────────────
+   addEntityDocumentUploads
+   ✅ UPDATED: uses getJsonUploads instead of getMultipartUploads.
+              No multer middleware needed on this route.
+───────────────────────────────────────────────────────────────────── */
 export const addEntityDocumentUploads = async (req, res) => {
   try {
     const { normalizedType, entity } = await getEntityDocumentContext(req.params.entityType, req.params.entityId);
@@ -481,7 +482,8 @@ export const addEntityDocumentUploads = async (req, res) => {
     if (!targetGroup) return res.status(404).json({ message: "Document group is not assigned to this entity" });
     if (!targetDoc)   return res.status(404).json({ message: "Document is not part of the selected group" });
 
-    const uploadsPayload = await getMultipartUploads(req);
+    // ✅ Read JSON uploads (files already in Supabase)
+    const uploadsPayload = getJsonUploads(req);
     if (!uploadsPayload.length) return res.status(400).json({ message: "At least one upload is required" });
 
     const records     = [...(entity.groupDocuments || [])];
@@ -629,9 +631,9 @@ export const deleteEntityDocumentUpload = async (req, res) => {
     );
     if (recordIndex < 0) return res.status(404).json({ message: "Upload record not found" });
 
-    const record    = { ...records[recordIndex] };
+    const record     = { ...records[recordIndex] };
     const allUploads = getRecordUploads(record, targetDoc);
-    const filtered  = allUploads.filter((u) => String(u.uploadId) !== String(uploadId));
+    const filtered   = allUploads.filter((u) => String(u.uploadId) !== String(uploadId));
     if (filtered.length === allUploads.length) return res.status(404).json({ message: "Upload not found" });
 
     if (filtered.length === 0) {
@@ -679,7 +681,7 @@ export const upsertEntityDocument = async (req, res) => {
     const documentId = String(req.params.documentId);
     const { normalizedType, entity } = await getEntityDocumentContext(req.params.entityType, req.params.entityId);
     if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
-    const groupList  = buildSelectedGroups(entity);
+    const groupList   = buildSelectedGroups(entity);
     const targetGroup = groupList.find((g) => (g.documents || []).some((d) => String(d._id) === documentId));
     if (!targetGroup) return res.status(404).json({ message: "Document is not part of the selected compliance group" });
     req.params.groupId = String(targetGroup._id);
@@ -692,8 +694,7 @@ export const upsertEntityDocument = async (req, res) => {
 };
 
 /* ─────────────────────────────────────────────────────────────────────
-   getComplianceStatus
-   UPDATED (spec §6): +groupDocumentsSummary, combined overallPct
+   getComplianceStatus  (spec §6)
 ───────────────────────────────────────────────────────────────────── */
 export const getComplianceStatus = async (req, res) => {
   try {
@@ -708,12 +709,11 @@ export const getComplianceStatus = async (req, res) => {
     const complianceDocs = entity.complianceDocs || {};
     const legacyScore    = calcScore(complianceDocs, docTypes);
 
-    // ── NEW: groupDocuments summary (spec §6) ─────────────────────────
-    const groupDocs   = Array.isArray(entity.groupDocuments) ? entity.groupDocuments : [];
-    const gdTotal     = groupDocs.length;
-    const gdUploaded  = groupDocs.filter((r) => r.fileUrl || (Array.isArray(r.uploads) && r.uploads.some((u) => u.fileUrl))).length;
-    const gdExpired   = groupDocs.filter((r) => r.status === "expired").length;
-    const gdPending   = gdTotal - gdUploaded;
+    const groupDocs  = Array.isArray(entity.groupDocuments) ? entity.groupDocuments : [];
+    const gdTotal    = groupDocs.length;
+    const gdUploaded = groupDocs.filter((r) => r.fileUrl || (Array.isArray(r.uploads) && r.uploads.some((u) => u.fileUrl))).length;
+    const gdExpired  = groupDocs.filter((r) => r.status === "expired").length;
+    const gdPending  = gdTotal - gdUploaded;
 
     const groupDocumentsSummary = {
       total:    gdTotal,
@@ -722,12 +722,10 @@ export const getComplianceStatus = async (req, res) => {
       expired:  gdExpired,
     };
 
-    // Combined score: legacy docs + groupDocuments uploads
-    const combinedTotal    = legacyScore.total + gdTotal;
-    const combinedDone     = legacyScore.allDone + gdUploaded;
-    const overallPct       = combinedTotal > 0 ? Math.round((combinedDone / combinedTotal) * 100) : 100;
+    const combinedTotal = legacyScore.total + gdTotal;
+    const combinedDone  = legacyScore.allDone + gdUploaded;
+    const overallPct    = combinedTotal > 0 ? Math.round((combinedDone / combinedTotal) * 100) : 100;
 
-    // Per-doc status list (legacy keys)
     const docs = docTypes.map(d => {
       const meta = complianceDocs[d.key] || null;
       let trafficLight = "grey";
@@ -746,8 +744,8 @@ export const getComplianceStatus = async (req, res) => {
 
     res.json({
       ...legacyScore,
-      overallPct,           // combined overallPct replaces legacy-only value
-      groupDocumentsSummary,// NEW
+      overallPct,
+      groupDocumentsSummary,
       docs,
       entityName: entity.name,
     });
@@ -892,9 +890,7 @@ export const rejectComplianceDoc = async (req, res) => {
 };
 
 /* ─────────────────────────────────────────────────────────────────────
-   getExpiringDocs
-   UPDATED (spec §4): also checks groupDocuments[].uploads[] for expiry
-     uses doc.defaultReminderDays as threshold instead of hardcoded 30
+   getExpiringDocs  (spec §4)
 ───────────────────────────────────────────────────────────────────── */
 export const getExpiringDocs = async (req, res) => {
   try {
@@ -909,7 +905,6 @@ export const getExpiringDocs = async (req, res) => {
 
     const alerts = [];
 
-    // ── Loop 1: legacy complianceDocs (unchanged) ─────────────────────
     const processLegacy = (entities, type) => {
       const docTypes = getDocTypes(type);
       for (const e of entities) {
@@ -940,11 +935,7 @@ export const getExpiringDocs = async (req, res) => {
     processLegacy(pcns,       "PCN");
     processLegacy(practices,  "Practice");
 
-    // ── Loop 2: groupDocuments uploads (NEW — spec §4) ─────────────────
-    // Uses defaultReminderDays from the document definition when available,
-    // otherwise falls back to the requested ?days= param.
     const processGroupDocs = async (entities, type) => {
-      // Fetch all ComplianceDocument defs in one query for defaultReminderDays lookup
       const allDocDefs = await ComplianceDocument.find({ active: true })
         .select("_id name defaultReminderDays expirable")
         .lean();
@@ -953,10 +944,10 @@ export const getExpiringDocs = async (req, res) => {
       for (const e of entities) {
         const groupDocs = Array.isArray(e.groupDocuments) ? e.groupDocuments : [];
         for (const record of groupDocs) {
-          const docDef         = docDefMap.get(String(record.document)) || null;
-          const reminderDays   = docDef?.defaultReminderDays ?? days; // spec: use doc's own threshold
-          const docCutoff      = new Date(Date.now() + reminderDays * 24 * 60 * 60 * 1000);
-          const uploads        = getRecordUploads(record, docDef);
+          const docDef       = docDefMap.get(String(record.document)) || null;
+          const reminderDays = docDef?.defaultReminderDays ?? days;
+          const docCutoff    = new Date(Date.now() + reminderDays * 24 * 60 * 60 * 1000);
+          const uploads      = getRecordUploads(record, docDef);
 
           for (const upload of uploads) {
             if (!upload.expiryDate) continue;
@@ -967,15 +958,15 @@ export const getExpiringDocs = async (req, res) => {
                 entityType:   type,
                 entityId:     e._id,
                 entityName:   e.name,
-                groupId:      record.group   ? String(record.group)    : null, // spec §4
-                documentId:   record.document ? String(record.document) : null, // spec §4
-                documentName: docDef?.name   || "Unknown document",            // spec §4
+                groupId:      record.group    ? String(record.group)    : null,
+                documentId:   record.document ? String(record.document) : null,
+                documentName: docDef?.name    || "Unknown document",
                 uploadId:     upload.uploadId || null,
                 expiryDate:   upload.expiryDate,
                 daysLeft,
                 isExpired:    daysLeft < 0,
                 status:       upload.status,
-                source:       "groupDocuments", // NEW field to distinguish from legacy
+                source:       "groupDocuments",
               });
             }
           }
@@ -1003,8 +994,7 @@ export const getExpiringDocs = async (req, res) => {
 };
 
 /* ─────────────────────────────────────────────────────────────────────
-   runExpiryCheck  (nightly cron)
-   UPDATED (spec §5): second loop for groupDocuments uploads
+   runExpiryCheck  (spec §5)
 ───────────────────────────────────────────────────────────────────── */
 export const runExpiryCheck = async (req, res) => {
   try {
@@ -1017,18 +1007,16 @@ export const runExpiryCheck = async (req, res) => {
       Practice.find({ isActive: true }).lean(),
     ]);
 
-    // ── Fetch all ComplianceDocument defs once for reminder thresholds ─
     const allDocDefs = await ComplianceDocument.find({ active: true })
       .select("_id name defaultReminderDays expirable")
       .lean();
-    const docDefMap  = new Map(allDocDefs.map((d) => [String(d._id), d]));
+    const docDefMap = new Map(allDocDefs.map((d) => [String(d._id), d]));
 
     const processEntity = async (entity, Model, docTypes) => {
       const docs    = entity.complianceDocs || {};
       const updates = {};
       const emails  = [];
 
-      // ── Loop 1: legacy complianceDocs ──────────────────────────────
       for (const d of docTypes) {
         const meta = docs[d.key];
         if (!meta?.expiryDate) continue;
@@ -1044,35 +1032,29 @@ export const runExpiryCheck = async (req, res) => {
         }
       }
 
-      // ── Loop 2: groupDocuments uploads (NEW — spec §5) ─────────────
       const groupDocs = Array.isArray(entity.groupDocuments) ? entity.groupDocuments : [];
       const updatedGroupDocs = groupDocs.map((record) => {
         const docDef       = docDefMap.get(String(record.document)) || null;
         const reminderDays = docDef?.defaultReminderDays ?? 30;
-        const threshold    = new Date(Date.now() + reminderDays * 24 * 60 * 60 * 1000);
         const uploads      = getRecordUploads(record, docDef).map((upload) => {
           if (!upload.expiryDate) return upload;
           const expiry   = new Date(upload.expiryDate);
           const daysLeft = Math.ceil((expiry - now) / (1000 * 60 * 60 * 24));
 
-          // Mark upload status as expired if past expiry (spec §5)
           if (expiry < now && upload.status !== "expired") {
             emails.push({ label: docDef?.name || "Document", daysLeft, expired: true });
             return { ...upload, status: "expired" };
           }
-          // Reminder if within threshold
           if (daysLeft <= reminderDays && daysLeft > 0) {
             emails.push({ label: docDef?.name || "Document", daysLeft, expired: false });
           }
           return upload;
         });
 
-        // Sync record-level status with latest upload
         const latestUpload = uploads[0] || null;
         return { ...record, uploads, status: latestUpload?.status || record.status };
       });
 
-      // Persist groupDocuments updates if any upload statuses changed
       const groupDocsChanged = JSON.stringify(updatedGroupDocs) !== JSON.stringify(groupDocs);
       if (Object.keys(updates).length || groupDocsChanged) {
         const finalUpdate = { ...updates };
@@ -1080,7 +1062,6 @@ export const runExpiryCheck = async (req, res) => {
         await Model.findByIdAndUpdate(entity._id, { $set: finalUpdate });
       }
 
-      // Send reminder email (spec §5 — use entity.contacts or entity.financeContacts)
       if (emails.length) {
         const emailTarget =
           (entity.contacts || []).find(c => c.email)?.email ||
