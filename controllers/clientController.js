@@ -948,7 +948,9 @@ export const getPCNRollup = async (req, res) => {
    PRACTICE CRUD
    BUG FIX: getPractices — pcn populated with nested icb + federation
             client alias added for frontend compatibility
+            google ai studio Code updates Get practices or getPracticeById functioons 
 ══════════════════════════════════════════════════════════════════ */
+
 
 export const getPractices = async (req, res) => {
   try {
@@ -957,8 +959,9 @@ export const getPractices = async (req, res) => {
 
     const practices = await Practice.find(filter)
       .populate({
-        path:   "pcn",
+        path: "pcn",
         select: "name icb federation",
+        // Deep populate PCN's ICB and Federation
         populate: [
           { path: "icb",        select: "name region code" },
           { path: "federation", select: "name type" },
@@ -968,8 +971,11 @@ export const getPractices = async (req, res) => {
       .sort({ name: 1 })
       .lean();
 
-    // Alias pcn → client so PracticeListPage.jsx works without changes
-    const normalized = practices.map((p) => ({ ...p, client: p.pcn ?? null }));
+    // Alias pcn → client and ensure nested data is accessible
+    const normalized = practices.map((p) => ({ 
+      ...p, 
+      client: p.pcn ?? null,
+    }));
 
     res.json({ practices: normalized });
   } catch (err) {
@@ -982,8 +988,9 @@ export const getPracticeById = async (req, res) => {
   try {
     const practice = await Practice.findById(req.params.id)
       .populate({
-        path:   "pcn",
+        path: "pcn",
         select: "name icb federation",
+        // Deep populate PCN's ICB and Federation
         populate: [
           { path: "icb",        select: "name region code" },
           { path: "federation", select: "name type" },
@@ -992,11 +999,12 @@ export const getPracticeById = async (req, res) => {
       .populate({
         path:   "complianceGroup",
         select: "name active displayOrder documents",
-        populate: { path: "documents", select: "name mandatory expirable displayOrder defaultExpiryDays defaultReminderDays active" },
+        populate: { path: "documents", select: "name mandatory expirable active" },
       })
       .populate("linkedClinicians",    "name email role")
       .populate("restrictedClinicians","name email role")
       .lean();
+
     if (!practice) return res.status(404).json({ message: "Practice not found" });
 
     // Alias pcn → client for frontend compatibility
@@ -1018,7 +1026,6 @@ export const getPracticeById = async (req, res) => {
     res.status(500).json({ message: "Failed to fetch practice" });
   }
 };
-
 export const createPractice = async (req, res) => {
   try {
     const { name, pcn } = req.body;
@@ -1228,7 +1235,7 @@ export const addContactHistory = async (req, res) => {
 
 /**
  * PUT /history/:logId
- * +outcome, +followUpDate, +followUpNote
+ * + outcome, + followUpDate, + followUpNote
  */
 export const updateContactHistory = async (req, res) => {
   try {
