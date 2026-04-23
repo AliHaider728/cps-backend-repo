@@ -917,36 +917,16 @@ export const deletePCN = async (req, res) => {
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to delete PCN" });
   }
 };
+
 export const updateRestrictedClinicians = async (req, res) => {
   try {
     const { clinicianIds } = req.body;
-
-    if (!Array.isArray(clinicianIds)) {
-      return res.status(400).json({ message: "clinicianIds must be an array" });
-    }
-
-    // ✅ CLEAN + CONVERT IDS
-    const cleanIds = (clinicianIds || [])
-      .map(id => toObjectId(id))
-      .filter(Boolean);
-
-    const pcn = await PCN.findByIdAndUpdate(
-      req.params.id,
-      { restrictedClinicians: cleanIds },
-      { new: true }
-    ).populate("restrictedClinicians", "name email role");
-
-    if (!pcn) {
-      return res.status(404).json({ message: "PCN not found" });
-    }
-
-    res.json({
-      pcn,
-      message: "Restricted clinicians updated (cleaned)"
-    });
-
+    if (!Array.isArray(clinicianIds)) return res.status(400).json({ message: "clinicianIds must be an array" });
+    const pcn = await PCN.findByIdAndUpdate(req.params.id, { restrictedClinicians: clinicianIds }, { new: true })
+      .populate("restrictedClinicians", "name email role");
+    if (!pcn) return res.status(404).json({ message: "PCN not found" });
+    res.json({ pcn, message: "Restricted clinicians updated" });
   } catch (err) {
-    console.error("updateRestrictedClinicians ERROR:", err);
     res.status(500).json({ message: "Failed to update restricted clinicians" });
   }
 };
@@ -1032,14 +1012,9 @@ export const getPractices = async (req, res) => {
     // ✅ FIX: alias pcn → client so PracticeListPage.jsx works without changes
     // Frontend uses p.client.name, p.client.icb.name, p.client.federation.name
     const normalized = practices.map((p) => ({
-  ...p,
-  client: {
-    _id: p.pcn?._id,
-    name: p.pcn?.name || "",
-    icb: p.pcn?.icb || null,
-    federation: p.pcn?.federation || null,
-  },
-}));
+      ...p,
+      client: p.pcn ?? null,
+    }));
 
     res.json({ practices: normalized });
   } catch (err) {
@@ -1154,33 +1129,12 @@ export const deletePractice = async (req, res) => {
 export const updatePracticeRestricted = async (req, res) => {
   try {
     const { clinicianIds } = req.body;
-
-    if (!Array.isArray(clinicianIds)) {
-      return res.status(400).json({ message: "clinicianIds must be an array" });
-    }
-
-    // ✅ CLEAN + CONVERT IDS
-    const cleanIds = (clinicianIds || [])
-      .map(id => toObjectId(id))
-      .filter(Boolean);
-
-    const practice = await Practice.findByIdAndUpdate(
-      req.params.id,
-      { restrictedClinicians: cleanIds },
-      { new: true }
-    ).populate("restrictedClinicians", "name email role");
-
-    if (!practice) {
-      return res.status(404).json({ message: "Practice not found" });
-    }
-
-    res.json({
-      practice,
-      message: "Restricted clinicians updated (cleaned)"
-    });
-
+    if (!Array.isArray(clinicianIds)) return res.status(400).json({ message: "clinicianIds must be an array" });
+    const practice = await Practice.findByIdAndUpdate(req.params.id, { restrictedClinicians: clinicianIds }, { new: true })
+      .populate("restrictedClinicians", "name email role");
+    if (!practice) return res.status(404).json({ message: "Practice not found" });
+    res.json({ practice, message: "Restricted clinicians updated" });
   } catch (err) {
-    console.error("updatePracticeRestricted ERROR:", err);
     res.status(500).json({ message: "Failed to update restricted clinicians" });
   }
 };
@@ -1189,27 +1143,33 @@ export const updatePracticeRestricted = async (req, res) => {
    CONTACT HISTORY
    UPDATED: addContactHistory, updateContactHistory (spec §14, §15)
 ══════════════════════════════════════════════════════════════════ */
-export const updateContactHistory = async (req, res) => {
+export const getContactHistory = async (req, res) => {
   try {
-    const updateData = {
-      ...req.body,
-      ...(req.body.followUpDate && { followUpDate: new Date(req.body.followUpDate) }),
-    };
+    const entityType = normalizeEntityType(req.params.entityType);
+    const { entityId } = req.params;
+    const { type, starred, page = 1, limit = 100 } = req.query;
 
-    const log = await ContactHistory.findByIdAndUpdate(
-      req.params.logId,
-      updateData,
-      { new: true }
-    ).populate("createdBy", "name role");
+    const entityObjId = toObjectId(entityId);
+    if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
 
-    if (!log) {
-      return res.status(404).json({ message: "Log not found" });
-    }
+    const EntityModel  = getEntityModelByType(entityType);
+    const entityExists = await EntityModel.exists({ _id: entityObjId });
+    if (!entityExists) return res.status(404).json({ message: `${entityType} not found` });
 
-    res.json({ log });
+    const filter = { entityType, entityId: entityObjId };
+    if (type && type !== "all") filter.type  = type;
+    if (starred === "true")     filter.starred = true;
+
+    const skip = (Number(page) - 1) * Number(limit);
+    const [logs, total] = await Promise.all([
+      ContactHistory.find(filter).populate("createdBy", "name role")
+        .sort({ date: -1, createdAt: -1 }).skip(skip).limit(Number(limit)).lean(),
+      ContactHistory.countDocuments(filter),
+    ]);
+    res.json({ logs, total, page: Number(page), pages: Math.ceil(total / Number(limit)) });
   } catch (err) {
-    console.error("❌ updateContactHistory ERROR:", err);
-    res.status(500).json({ message: "Failed to update contact history" });
+    console.error("getContactHistory ERROR:", err.message);
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to fetch contact history" });
   }
 };
 
