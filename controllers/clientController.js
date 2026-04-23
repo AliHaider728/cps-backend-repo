@@ -756,8 +756,14 @@ export const deleteFederation = async (req, res) => {
 export const getPCNById = async (req, res) => {
   try {
     const pcn = await PCN.findById(req.params.id)
-      .populate("icb", "name region code")
-      .populate("federation", "name type")
+.populate({
+  path: "pcn",
+  select: "name icb federation",
+  populate: [
+    { path: "icb",        select: "name region code" },   
+    { path: "federation", select: "name type" },           
+  ],
+})      .populate("federation", "name type")
       .populate({
         path:   "complianceGroups",
         select: "name active displayOrder documents",
