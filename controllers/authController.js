@@ -2,17 +2,8 @@
  * authController.js
  *
  * UPDATED (Apr 2026) — Spec: CPS_Controller_Update_Spec.docx
- *
- * createUser    — +phone, +department, +jobTitle, +opsLead, +supervisor,
- *                  +startDate, +emergencyContact (spec §1)
- * updateUser    — +phone, +department, +jobTitle, +opsLead, +supervisor,
- *                  +startDate, +leaveDate, +emergencyContact (spec §2)
- * anonymiseUser — +phone, +emergencyContact wipe, +profilePhoto wipe,
- *                  +leaveDate set if missing (spec §3)
- * getUserById   — NEW: GET /api/auth/users/:id (spec §4)
- * getAllUsers /
- * getUsersByRole — +?role= +?isActive= +?department= filters,
- *                   comma-separated roles supported (spec §5)
+ * FIXED:  insertAuditRecord now saves userName + userRole
+ *         so LOGIN_FAILED logs show correctly in audit trail.
  */
 
 import jwt     from "jsonwebtoken";
@@ -131,20 +122,37 @@ async function deleteUserRecord(id) {
   return mapUserRow(result.rows[0]);
 }
 
+/* ── FIXED: insertAuditRecord ──────────────────────────────────────
+   Previously did NOT save userName/userRole, so LOGIN_FAILED logs
+   appeared with no user info. Now includes req.user context when
+   available (for LOGIN_BLOCKED) and falls back to "System" safely.
+─────────────────────────────────────────────────────────────────── */
 async function insertAuditRecord(req, data) {
-  await query(
-    `INSERT INTO app_records (model, id, data, created_at, updated_at)
-     VALUES ($1, $2, $3::jsonb, NOW(), NOW())`,
-    [
-      AUDIT_MODEL,
-      uuidv4(),
-      JSON.stringify({
-        ...data,
-        ip:        data.ip        || getRequestIp(req),
-        userAgent: data.userAgent || req.headers["user-agent"] || "",
-      }),
-    ]
-  );
+  try {
+    const user = req.user || null;
+    await query(
+      `INSERT INTO app_records (model, id, data, created_at, updated_at)
+       VALUES ($1, $2, $3::jsonb, NOW(), NOW())`,
+      [
+        AUDIT_MODEL,
+        uuidv4(),
+        JSON.stringify({
+          ...data,
+          // Who
+          userId:    user?._id    || user?.id    || null,
+          user:      user?._id    || user?.id    || null,
+          userName:  user?.name   || "System",
+          userRole:  user?.role   || "system",
+          // Request context
+          ip:        data.ip        || getRequestIp(req),
+          userAgent: data.userAgent || req.headers["user-agent"] || "",
+          createdAt: new Date().toISOString(),
+        }),
+      ]
+    );
+  } catch (err) {
+    console.error("[insertAuditRecord ERROR]", err.message);
+  }
 }
 
 const signToken = (id) =>
@@ -156,7 +164,7 @@ const signToken = (id) =>
 export const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max:      10,
-  keyGenerator:          ipKeyGenerator,
+  keyGenerator:           ipKeyGenerator,
   skipSuccessfulRequests: true,
   standardHeaders: "draft-7",
   legacyHeaders:   false,
@@ -180,8 +188,10 @@ export const login = async (req, res) => {
 
     if (!user || !passwordMatches) {
       await insertAuditRecord(req, {
-        action: "LOGIN_FAILED", resource: "User",
-        detail: `Failed login attempt for: ${normalizedEmail}`, status: "fail",
+        action:   "LOGIN_FAILED",
+        resource: "User",
+        detail:   `Failed login attempt for: ${normalizedEmail}`,
+        status:   "fail",
       });
       return res.status(401).json({ message: "Invalid email or password" });
     }
@@ -189,7 +199,9 @@ export const login = async (req, res) => {
     if (user.isActive === false) {
       req.user = user;
       await logAudit(req, "LOGIN_BLOCKED", "User", {
-        resourceId: user._id, detail: "Login attempt on deactivated account", status: "fail",
+        resourceId: user._id,
+        detail:     "Login attempt on deactivated account",
+        status:     "fail",
       });
       return res.status(403).json({ message: "Account is deactivated. Contact admin." });
     }
@@ -197,7 +209,8 @@ export const login = async (req, res) => {
     const updatedUser = await updateUserRecord(user._id, { lastLogin: new Date().toISOString() });
     req.user = updatedUser || user;
     await logAudit(req, "LOGIN", "User", {
-      resourceId: user._id, detail: `${user.name} logged in (${user.role})`,
+      resourceId: user._id,
+      detail:     `${user.name} logged in (${user.role})`,
     });
     return res.json({ success: true, token: signToken(user._id), user: buildAuthUser(req.user) });
   } catch (error) {
@@ -212,21 +225,17 @@ export const getMe = async (req, res) => {
 
 export const logout = async (req, res) => {
   await logAudit(req, "LOGOUT", "User", {
-    resourceId: req.user._id, detail: `${req.user.name} logged out`,
+    resourceId: req.user._id,
+    detail:     `${req.user.name} logged out`,
   });
   return res.json({ success: true, message: "Logged out successfully" });
 };
 
-/* ─────────────────────────────────────────────────────────────────────
-   getAllUsers / getUsersByRole
-   UPDATED (spec §5): supports ?role= ?isActive= ?department= filters
-     comma-separated roles: ?role=clinician,ops_manager
-───────────────────────────────────────────────────────────────────── */
+/* ── getAllUsers ───────────────────────────────────────────────────── */
 export const getAllUsers = async (req, res) => {
   try {
     const { role, isActive, department } = req.query;
 
-    // Build WHERE clauses dynamically
     const conditions = [
       `model = $1`,
       `COALESCE((data->>'isAnonymised')::boolean, false) = false`,
@@ -234,7 +243,6 @@ export const getAllUsers = async (req, res) => {
     const params = [USER_MODEL];
     let   idx    = 2;
 
-    // ── role filter (spec §5): supports comma-separated ───────────────
     if (role) {
       const roles = String(role).split(",").map(r => r.trim()).filter(Boolean);
       if (roles.length === 1) {
@@ -247,14 +255,12 @@ export const getAllUsers = async (req, res) => {
       }
     }
 
-    // ── isActive filter (spec §5) ─────────────────────────────────────
     if (isActive !== undefined) {
       const activeVal = isActive === "true" || isActive === true;
-      conditions.push(`COALESCE((data->>'isActive')::boolean, true) = ${idx++}`);
+      conditions.push(`COALESCE((data->>'isActive')::boolean, true) = $${idx++}`);
       params.push(activeVal);
     }
 
-    // ── department filter (spec §5) ───────────────────────────────────
     if (department) {
       conditions.push(`LOWER(COALESCE(data->>'department', '')) = LOWER($${idx++})`);
       params.push(department.trim());
@@ -276,11 +282,7 @@ export const getAllUsers = async (req, res) => {
   }
 };
 
-/* ─────────────────────────────────────────────────────────────────────
-   getUserById  (NEW — spec §4)
-   GET /api/auth/users/:id
-   Returns single user with all profile fields, password stripped
-───────────────────────────────────────────────────────────────────── */
+/* ── getUserById ───────────────────────────────────────────────────── */
 export const getUserById = async (req, res) => {
   try {
     const user = await findUserById(req.params.id);
@@ -292,16 +294,11 @@ export const getUserById = async (req, res) => {
   }
 };
 
-/* ─────────────────────────────────────────────────────────────────────
-   createUser
-   UPDATED (spec §1): +phone, +department, +jobTitle, +opsLead,
-     +supervisor, +startDate, +emergencyContact
-───────────────────────────────────────────────────────────────────── */
+/* ── createUser ───────────────────────────────────────────────────── */
 export const createUser = async (req, res) => {
   try {
     const {
       name, email, password, role,
-      // ── NEW FIELDS (spec §1) ────────────────────
       phone, department, jobTitle,
       opsLead, supervisor,
       startDate, emergencyContact,
@@ -318,23 +315,22 @@ export const createUser = async (req, res) => {
     const hashedPassword = await bcrypt.hash(String(password), PASSWORD_ROUNDS);
 
     const user = await insertUser({
-      name:             String(name).trim(),
-      email:            normalizedEmail,
-      password:         hashedPassword,
+      name:               String(name).trim(),
+      email:              normalizedEmail,
+      password:           hashedPassword,
       role,
-      isActive:         true,
+      isActive:           true,
       mustChangePassword: true,
-      isAnonymised:     false,
-      createdBy:        req.user?._id || null,
-      lastLogin:        null,
-      // ── NEW FIELDS ───────────────────────────────
-      phone:            phone?.trim()     || "",
-      department:       department?.trim() || "",
-      jobTitle:         jobTitle?.trim()   || "",
-      opsLead:          opsLead            || null,
-      supervisor:       supervisor         || null,
-      startDate:        startDate ? new Date(startDate).toISOString() : null,
-      emergencyContact: emergencyContact   || { name: "", relationship: "", phone: "", email: "" },
+      isAnonymised:       false,
+      createdBy:          req.user?._id || null,
+      lastLogin:          null,
+      phone:              phone?.trim()      || "",
+      department:         department?.trim() || "",
+      jobTitle:           jobTitle?.trim()   || "",
+      opsLead:            opsLead            || null,
+      supervisor:         supervisor         || null,
+      startDate:          startDate ? new Date(startDate).toISOString() : null,
+      emergencyContact:   emergencyContact   || { name: "", relationship: "", phone: "", email: "" },
     });
 
     try {
@@ -345,8 +341,8 @@ export const createUser = async (req, res) => {
 
     await logAudit(req, "CREATE_USER", "User", {
       resourceId: user._id,
-      detail: `Created user ${user.name} with role ${user.role}`,
-      after: { name: user.name, email: user.email, role: user.role, isActive: user.isActive },
+      detail:     `Created user ${user.name} with role ${user.role}`,
+      after:      { name: user.name, email: user.email, role: user.role, isActive: user.isActive },
     });
 
     return res.status(201).json({ success: true, user: sanitizeUser(user) });
@@ -356,18 +352,12 @@ export const createUser = async (req, res) => {
   }
 };
 
-/* ─────────────────────────────────────────────────────────────────────
-   updateUser
-   UPDATED (spec §2): +phone, +department, +jobTitle, +opsLead,
-     +supervisor, +startDate, +leaveDate, +emergencyContact
-     Validates opsLead/supervisor are valid user IDs if provided.
-───────────────────────────────────────────────────────────────────── */
+/* ── updateUser ───────────────────────────────────────────────────── */
 export const updateUser = async (req, res) => {
   try {
     const { id } = req.params;
     const {
       name, email, role, isActive, password,
-      // ── NEW FIELDS (spec §2) ────────────────────
       phone, department, jobTitle,
       opsLead, supervisor,
       startDate, leaveDate,
@@ -379,7 +369,7 @@ export const updateUser = async (req, res) => {
 
     const patch = {};
 
-    if (typeof name === "string" && name.trim())  patch.name = name.trim();
+    if (typeof name === "string" && name.trim()) patch.name = name.trim();
 
     if (typeof email === "string" && email.trim()) {
       const normalizedEmail = email.trim().toLowerCase();
@@ -389,25 +379,22 @@ export const updateUser = async (req, res) => {
       patch.email = normalizedEmail;
     }
 
-    if (typeof role     === "string" && role.trim())  patch.role     = role;
-    if (typeof isActive === "boolean")                patch.isActive = isActive;
+    if (typeof role     === "string" && role.trim()) patch.role     = role;
+    if (typeof isActive === "boolean")               patch.isActive = isActive;
 
     if (password) {
-      patch.password          = await bcrypt.hash(String(password), PASSWORD_ROUNDS);
+      patch.password           = await bcrypt.hash(String(password), PASSWORD_ROUNDS);
       patch.mustChangePassword = true;
     }
 
-    // ── NEW FIELDS (spec §2) ──────────────────────────────────────────
     if (typeof phone      === "string") patch.phone      = phone.trim();
     if (typeof department === "string") patch.department = department.trim();
     if (typeof jobTitle   === "string") patch.jobTitle   = jobTitle.trim();
 
-    // Validate opsLead/supervisor are valid user IDs if provided (spec §2)
     if (opsLead !== undefined) {
       if (opsLead) {
         const opLeadUser = await findUserById(opsLead);
-        if (!opLeadUser)
-          return res.status(400).json({ message: "opsLead user not found" });
+        if (!opLeadUser) return res.status(400).json({ message: "opsLead user not found" });
       }
       patch.opsLead = opsLead || null;
     }
@@ -415,18 +402,15 @@ export const updateUser = async (req, res) => {
     if (supervisor !== undefined) {
       if (supervisor) {
         const supervisorUser = await findUserById(supervisor);
-        if (!supervisorUser)
-          return res.status(400).json({ message: "supervisor user not found" });
+        if (!supervisorUser) return res.status(400).json({ message: "supervisor user not found" });
       }
       patch.supervisor = supervisor || null;
     }
 
     if (startDate !== undefined)
       patch.startDate = startDate ? new Date(startDate).toISOString() : null;
-
     if (leaveDate !== undefined)
       patch.leaveDate = leaveDate ? new Date(leaveDate).toISOString() : null;
-
     if (emergencyContact !== undefined)
       patch.emergencyContact = emergencyContact || { name: "", relationship: "", phone: "", email: "" };
 
@@ -435,7 +419,7 @@ export const updateUser = async (req, res) => {
 
     await logAudit(req, "UPDATE_USER", "User", {
       resourceId: updatedUser._id,
-      detail: `Updated user ${updatedUser.name}`,
+      detail:     `Updated user ${updatedUser.name}`,
       before: { name: existingUser.name, email: existingUser.email, role: existingUser.role, isActive: existingUser.isActive },
       after:  { name: updatedUser.name,  email: updatedUser.email,  role: updatedUser.role,  isActive: updatedUser.isActive  },
     });
@@ -447,6 +431,7 @@ export const updateUser = async (req, res) => {
   }
 };
 
+/* ── deleteUser ───────────────────────────────────────────────────── */
 export const deleteUser = async (req, res) => {
   try {
     const deletedUser = await deleteUserRecord(req.params.id);
@@ -454,8 +439,8 @@ export const deleteUser = async (req, res) => {
 
     await logAudit(req, "DELETE_USER", "User", {
       resourceId: deletedUser._id,
-      detail: `Deleted user ${deletedUser.name} (${deletedUser.email})`,
-      before: { name: deletedUser.name, email: deletedUser.email, role: deletedUser.role },
+      detail:     `Deleted user ${deletedUser.name} (${deletedUser.email})`,
+      before:     { name: deletedUser.name, email: deletedUser.email, role: deletedUser.role },
     });
 
     return res.json({ success: true, message: "User deleted" });
@@ -465,33 +450,27 @@ export const deleteUser = async (req, res) => {
   }
 };
 
-/* ─────────────────────────────────────────────────────────────────────
-   anonymiseUser
-   UPDATED (spec §3): also wipes phone, emergencyContact, profilePhoto
-     sets leaveDate if not already set
-───────────────────────────────────────────────────────────────────── */
+/* ── anonymiseUser ────────────────────────────────────────────────── */
 export const anonymiseUser = async (req, res) => {
   try {
     const existingUser = await findUserById(req.params.id);
     if (!existingUser) return res.status(404).json({ message: "User not found" });
 
     const updatedUser = await updateUserRecord(existingUser._id, {
-      name:         "Anonymised User",
-      email:        `anonymised-${existingUser._id}@example.local`,
-      password:     "",
-      isAnonymised: true,
-      isActive:     false,
-      // ── NEW FIELDS (spec §3) ─────────────────────
-      phone:        "",
-      profilePhoto: "",
+      name:             "Anonymised User",
+      email:            `anonymised-${existingUser._id}@example.local`,
+      password:         "",
+      isAnonymised:     true,
+      isActive:         false,
+      phone:            "",
+      profilePhoto:     "",
       emergencyContact: { name: "", relationship: "", phone: "", email: "" },
-      // Set leaveDate only if not already recorded (spec §3)
-      leaveDate: existingUser.leaveDate || new Date().toISOString(),
+      leaveDate:        existingUser.leaveDate || new Date().toISOString(),
     });
 
     await logAudit(req, "GDPR_ANONYMISE", "User", {
       resourceId: existingUser._id,
-      detail: "User anonymised for GDPR compliance",
+      detail:     "User anonymised for GDPR compliance",
       before: { name: existingUser.name, email: existingUser.email, role: existingUser.role },
       after:  { name: updatedUser?.name, email: updatedUser?.email, role: updatedUser?.role, isActive: updatedUser?.isActive },
     });
@@ -503,6 +482,7 @@ export const anonymiseUser = async (req, res) => {
   }
 };
 
+/* ── changePassword ───────────────────────────────────────────────── */
 export const changePassword = async (req, res) => {
   try {
     const { newPassword } = req.body;
@@ -510,14 +490,15 @@ export const changePassword = async (req, res) => {
       return res.status(400).json({ message: "Password must be at least 6 characters" });
 
     const updatedUser = await updateUserRecord(req.user._id, {
-      password:          await bcrypt.hash(String(newPassword), PASSWORD_ROUNDS),
+      password:           await bcrypt.hash(String(newPassword), PASSWORD_ROUNDS),
       mustChangePassword: false,
     });
     if (!updatedUser) return res.status(404).json({ message: "User not found" });
 
     req.user = updatedUser;
     await logAudit(req, "CHANGE_PASSWORD", "User", {
-      resourceId: req.user._id, detail: `${req.user.name} changed their password`,
+      resourceId: req.user._id,
+      detail:     `${req.user.name} changed their password`,
     });
 
     return res.json({ success: true, message: "Password changed successfully" });

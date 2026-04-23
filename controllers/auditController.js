@@ -1,83 +1,103 @@
 /**
- * auditController.js
- * CONVERTED TO POSTGRESQL (Apr 2026)
+ * controllers/auditController.js
  *
- * Data stored in app_records: model = "audit_log"
+ * FIXED:
+ *  - mapRow correctly pulls userName/userRole from stored data
+ *    (no async user-lookup needed — saved at write time now)
+ *  - $idx parameter bug fixed (duplicate index in LIMIT/OFFSET)
+ *  - Added dateFrom/dateTo filters
  */
 
 import { query } from "../config/db.js";
 
 const AUDIT_MODEL = "audit_log";
-const USER_MODEL  = "user";
 
 function mapRow(row) {
   if (!row) return null;
+  const d = row.data || {};
   return {
-    _id: row.id, id: row.id,
-    ...(row.data || {}),
-    createdAt: row.data?.createdAt || row.created_at?.toISOString?.() || null,
+    _id:        row.id,
+    id:         row.id,
+    action:     d.action      || "",
+    resource:   d.resource    || "",
+    resourceId: d.resourceId  || null,
+    detail:     d.detail      || "",
+    status:     d.status      || "success",
+    userName:   d.userName    || "System",
+    userRole:   d.userRole    || "system",
+    userId:     d.userId      || d.user || null,
+    ip:         d.ip          || "",
+    userAgent:  d.userAgent   || "",
+    before:     d.before      || null,
+    after:      d.after       || null,
+    createdAt:  d.createdAt   || row.created_at?.toISOString?.() || null,
   };
 }
-function mapRows(rows) { return (rows || []).map(mapRow).filter(Boolean); }
 
-async function findUserById(id) {
-  if (!id) return null;
-  const r = await query(
-    `SELECT id, data FROM app_records WHERE model = $1 AND id = $2 LIMIT 1`,
-    [USER_MODEL, id]
-  );
-  if (!r.rows[0]) return null;
-  const u = { _id: r.rows[0].id, ...r.rows[0].data };
-  return { _id: u._id, name: u.name, email: u.email, role: u.role };
-}
-
-// GET /api/audit — paginated audit trail for super_admin
+// GET /api/audit
 export const getAuditLogs = async (req, res) => {
   try {
-    const page   = parseInt(req.query.page)  || 1;
-    const limit  = parseInt(req.query.limit) || 50;
+    const page   = Math.max(1, parseInt(req.query.page,  10) || 1);
+    const limit  = Math.min(200, parseInt(req.query.limit, 10) || 50);
     const offset = (page - 1) * limit;
 
     const conditions = [`model = $1`];
     const params     = [AUDIT_MODEL];
     let   idx        = 2;
 
-    if (req.query.action)   { conditions.push(`data->>'action' = $${idx++}`);   params.push(req.query.action); }
-    if (req.query.resource) { conditions.push(`data->>'resource' = $${idx++}`); params.push(req.query.resource); }
-    if (req.query.status)   { conditions.push(`data->>'status' = $${idx++}`);   params.push(req.query.status); }
-    if (req.query.user)     { conditions.push(`data->>'userId' = $${idx++}`);   params.push(req.query.user); }
+    if (req.query.action) {
+      conditions.push(`data->>'action' = $${idx++}`);
+      params.push(req.query.action);
+    }
+    if (req.query.resource) {
+      conditions.push(`data->>'resource' = $${idx++}`);
+      params.push(req.query.resource);
+    }
+    if (req.query.status) {
+      conditions.push(`data->>'status' = $${idx++}`);
+      params.push(req.query.status);
+    }
+    if (req.query.user) {
+      conditions.push(
+        `(data->>'userId' = $${idx} OR data->>'user' = $${idx})`
+      );
+      params.push(req.query.user);
+      idx++;
+    }
+    if (req.query.dateFrom) {
+      conditions.push(`created_at >= $${idx++}`);
+      params.push(new Date(req.query.dateFrom));
+    }
+    if (req.query.dateTo) {
+      conditions.push(`created_at <= $${idx++}`);
+      params.push(new Date(req.query.dateTo));
+    }
 
-    const where = conditions.join(" AND ");
+    const where     = conditions.join(" AND ");
+    const limitIdx  = idx++;
+    const offsetIdx = idx++;
 
     const [logsResult, countResult] = await Promise.all([
       query(
-        `SELECT id, data, created_at FROM app_records WHERE ${where}
-         ORDER BY created_at DESC LIMIT $${idx++} OFFSET $${idx++}`,
+        `SELECT id, data, created_at FROM app_records
+         WHERE ${where}
+         ORDER BY created_at DESC
+         LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
         [...params, limit, offset]
       ),
       query(`SELECT COUNT(*) FROM app_records WHERE ${where}`, params),
     ]);
 
-    const logs  = mapRows(logsResult.rows);
+    const logs  = logsResult.rows.map(mapRow).filter(Boolean);
     const total = parseInt(countResult.rows[0].count, 10);
 
-    // Populate user field
-    const populated = await Promise.all(logs.map(async log => {
-      const userId = log.userId || log.user;
-      if (userId && typeof userId === "string") {
-        const u = await findUserById(userId);
-        return { ...log, user: u || { _id: userId } };
-      }
-      return log;
-    }));
-
-    res.json({
+    return res.json({
       success: true,
-      logs: populated,
-      pagination: { total, page, pages: Math.ceil(total / limit) },
+      logs,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) },
     });
   } catch (err) {
     console.error("getAuditLogs ERROR:", err.message);
-    res.status(500).json({ message: err.message });
+    return res.status(500).json({ message: err.message });
   }
 };
