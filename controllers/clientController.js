@@ -27,18 +27,17 @@
  *
  * BUG FIX (Apr 2026):
  *   getPCNs — federation resolution now falls back to embedded pcn.federation
- *             object when fedMap lookup returns undefined. Previously lookup
- *             failure silently returned null, wiping the already-embedded name.
+ *             object when fedMap lookup returns undefined.
  *
  * BUG FIX #2 (Apr 2026):
  *   getPractices — now populates pcn with icb + federation (nested), and maps
- *                  pcn → client so PracticeListPage.jsx can render PCN, ICB,
- *                  and Federation columns correctly.
+ *                  pcn → client so PracticeListPage.jsx can render correctly.
  *
- * All previous fixes kept:
- *   • normalizeEntityType(), toObjectId() casts throughout
- *   • getPCNs: icb populated with name/region/code
- *   • getICBById: returns federations + pcns with practices
+ * CONTACT HISTORY FIX (Apr 2026):
+ *   — resolveEntityId() helper: plain string, no toObjectId() cast
+ *   — getContactHistory: findById().lean() for entity check (not exists({_id}))
+ *   — All CH functions store/query entityId as plain String (UUID-safe)
+ *   — Response normalized: notes/detail alias, date/contactDate alias
  */
 
 import ICB            from "../models/ICB.js";
@@ -95,7 +94,6 @@ const getEntityModelByType = (entityType) => {
   throw error;
 };
 
-/** Resolves PCN or Practice model from entityType param */
 const getPCNOrPracticeModel = (entityType) => {
   if (entityType === "PCN")      return PCN;
   if (entityType === "Practice") return Practice;
@@ -138,14 +136,9 @@ const recordView = async (Model, id, userId) => {
 };
 
 /* ══════════════════════════════════════════════════════════════════
-   REPORTING ARCHIVE (NEW — spec §1, §2, §3)
+   REPORTING ARCHIVE
 ══════════════════════════════════════════════════════════════════ */
 
-/**
- * GET /:entityType/:entityId/reporting-archive
- * Returns paginated reporting archive for a PCN or Practice.
- * Query params: ?month= &year=
- */
 export const getReportingArchive = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
@@ -161,11 +154,9 @@ export const getReportingArchive = async (req, res) => {
 
     let archive = Array.isArray(entity.reportingArchive) ? entity.reportingArchive : [];
 
-    // Filter by month/year if provided
     if (month) archive = archive.filter((r) => String(r.month) === String(month));
     if (year)  archive = archive.filter((r) => String(r.year)  === String(year));
 
-    // Sort: newest first
     archive = [...archive].sort((a, b) => {
       if (b.year !== a.year) return (b.year || 0) - (a.year || 0);
       return (b.month || 0) - (a.month || 0);
@@ -178,11 +169,6 @@ export const getReportingArchive = async (req, res) => {
   }
 };
 
-/**
- * POST /:entityType/:entityId/reporting-archive
- * Upload a monthly report. Accepts multipart file via Supabase.
- * Pushes to reportingArchive, auto-adds starred contact history entry.
- */
 export const addToReportingArchive = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
@@ -196,7 +182,6 @@ export const addToReportingArchive = async (req, res) => {
     if (!month || !year)
       return res.status(400).json({ message: "month and year are required" });
 
-    // Upload file to Supabase (same as compliance uploads)
     if (!req.file)
       return res.status(400).json({ message: "A report file is required" });
 
@@ -223,7 +208,6 @@ export const addToReportingArchive = async (req, res) => {
       { new: true, runValidators: false }
     );
 
-    // Auto-add starred contact history entry (spec §2)
     await ContactHistory.create({
       entityType,
       entityId: entityId,
@@ -249,10 +233,6 @@ export const addToReportingArchive = async (req, res) => {
   }
 };
 
-/**
- * DELETE /:entityType/:entityId/reporting-archive/:reportId
- * Remove a report from the reportingArchive array by its _id.
- */
 export const deleteFromReportingArchive = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
@@ -287,13 +267,9 @@ export const deleteFromReportingArchive = async (req, res) => {
 };
 
 /* ══════════════════════════════════════════════════════════════════
-   DECISION MAKERS (NEW — spec §4, §5)
+   DECISION MAKERS
 ══════════════════════════════════════════════════════════════════ */
 
-/**
- * GET /:entityType/:entityId/decision-makers
- * Returns decisionMakers array for a PCN or Practice.
- */
 export const getDecisionMakers = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
@@ -305,20 +281,13 @@ export const getDecisionMakers = async (req, res) => {
       .lean();
     if (!entity) return res.status(404).json({ message: `${entityType} not found` });
 
-    res.json({
-      decisionMakers: entity.decisionMakers || [],
-      entityName:     entity.name,
-    });
+    res.json({ decisionMakers: entity.decisionMakers || [], entityName: entity.name });
   } catch (err) {
     console.error("getDecisionMakers ERROR:", err.message);
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to fetch decision makers" });
   }
 };
 
-/**
- * PUT /:entityType/:entityId/decision-makers
- * Replace the decisionMakers array. Each entry: { name, role, email, phone, isPrimary }
- */
 export const updateDecisionMakers = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
@@ -329,7 +298,6 @@ export const updateDecisionMakers = async (req, res) => {
     if (!Array.isArray(decisionMakers))
       return res.status(400).json({ message: "decisionMakers must be an array" });
 
-    // Validate minimum required fields (spec §5)
     for (const dm of decisionMakers) {
       if (!dm.name?.trim() || !dm.email?.trim())
         return res.status(400).json({ message: "Each decision maker requires at minimum name and email" });
@@ -356,13 +324,9 @@ export const updateDecisionMakers = async (req, res) => {
 };
 
 /* ══════════════════════════════════════════════════════════════════
-   FINANCE CONTACTS (NEW — spec §6, §7)
+   FINANCE CONTACTS
 ══════════════════════════════════════════════════════════════════ */
 
-/**
- * GET /:entityType/:entityId/finance-contacts
- * Returns financeContacts array for a PCN or Practice.
- */
 export const getFinanceContacts = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
@@ -381,10 +345,6 @@ export const getFinanceContacts = async (req, res) => {
   }
 };
 
-/**
- * PUT /:entityType/:entityId/finance-contacts
- * Replace financeContacts array. Each entry: { name, role, email, phone }
- */
 export const updateFinanceContacts = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
@@ -416,23 +376,17 @@ export const updateFinanceContacts = async (req, res) => {
 };
 
 /* ══════════════════════════════════════════════════════════════════
-   CLIENT FACING DATA (NEW — spec §8, §9)
+   CLIENT FACING DATA
 ══════════════════════════════════════════════════════════════════ */
 
-/**
- * GET /pcn/:id/client-facing
- * Returns client-facing data for a PCN: upcoming meetings, active clinicians,
- * public notes. Clinicians returned with name + role only (no sensitive data).
- */
 export const getClientFacingData = async (req, res) => {
   try {
     const pcn = await PCN.findById(req.params.id)
-      .populate("activeClinicians", "name role")   // name + role only (spec §8)
+      .populate("activeClinicians", "name role")
       .select("name clientFacingData monthlyMeetings activeClinicians")
       .lean();
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
 
-    // Return only upcoming meetings (spec §8)
     const now = new Date();
     const upcomingMeetings = (pcn.monthlyMeetings || [])
       .filter((m) => m.date && new Date(m.date) >= now)
@@ -450,10 +404,6 @@ export const getClientFacingData = async (req, res) => {
   }
 };
 
-/**
- * PUT /pcn/:id/client-facing
- * Update clientFacingData config: showMonthlyMeetings, showClinicianMeetings, publicNotes
- */
 export const updateClientFacingData = async (req, res) => {
   try {
     const { showMonthlyMeetings, showClinicianMeetings, publicNotes } = req.body;
@@ -465,7 +415,7 @@ export const updateClientFacingData = async (req, res) => {
           ...(showMonthlyMeetings   !== undefined && { showMonthlyMeetings }),
           ...(showClinicianMeetings !== undefined && { showClinicianMeetings }),
           ...(publicNotes           !== undefined && { publicNotes: publicNotes?.trim() || "" }),
-          lastUpdated: new Date(),   // spec §9
+          lastUpdated: new Date(),
         },
       },
       { new: true, runValidators: true }
@@ -503,8 +453,8 @@ export const getHierarchy = async (req, res) => {
     const fedMapById   = {};
     const fedMapByName = {};
     for (const f of federationsRaw) {
-      fedMapById[String(f._id)]                   = f;
-      fedMapByName[f.name.trim().toLowerCase()] = f;
+      fedMapById[String(f._id)]                     = f;
+      fedMapByName[f.name.trim().toLowerCase()]     = f;
     }
 
     const practicesByPCN = {};
@@ -545,10 +495,7 @@ export const getHierarchy = async (req, res) => {
 };
 
 /* ══════════════════════════════════════════════════════════════════
-   getPCNs
-   BUG FIX: federation fallback to embedded pcn.federation when
-            fedMap lookup returns undefined — prevents name being
-            silently wiped to null on the list view.
+   getPCNs — BUG FIX: federation fallback
 ══════════════════════════════════════════════════════════════════ */
 export const getPCNs = async (req, res) => {
   try {
@@ -566,7 +513,7 @@ export const getPCNs = async (req, res) => {
     const fedMapById  = {};
     const fedMapByName= {};
     for (const f of federations) {
-      fedMapById[String(f._id)] = f;
+      fedMapById[String(f._id)]                 = f;
       fedMapByName[f.name.trim().toLowerCase()] = f;
     }
 
@@ -585,8 +532,7 @@ export const getPCNs = async (req, res) => {
         }
       }
 
-      // ✅ FIX: if fedMap lookup returned nothing but we already have an
-      //         embedded federation object (with a name), use it as-is.
+      // FIX: fallback to embedded federation object if fedMap lookup returned nothing
       const federation = resolvedFederation || (
         fedField && typeof fedField === "object" && fedField.name ? fedField : null
       );
@@ -733,14 +679,8 @@ export const deleteFederation = async (req, res) => {
 
 /* ══════════════════════════════════════════════════════════════════
    PCN CRUD
-   UPDATED: getPCNById, createPCN, updatePCN
 ══════════════════════════════════════════════════════════════════ */
 
-/**
- * GET /pcn/:id
- * UPDATED (spec §10): +decisionMakers, +financeContacts,
- *   +reportingArchive (last 3 only), +clientFacingData, +tags, +priority
- */
 export const getPCNById = async (req, res) => {
   try {
     const pcn = await PCN.findById(req.params.id)
@@ -761,7 +701,6 @@ export const getPCNById = async (req, res) => {
       .lean();
     if (!pcn) return res.status(404).json({ message: "PCN not found" });
 
-    // ── NEW: reportingArchive — last 3 entries only (spec §10) ─────────
     if (Array.isArray(pcn.reportingArchive)) {
       pcn.reportingArchive = [...pcn.reportingArchive]
         .sort((a, b) => {
@@ -784,10 +723,6 @@ export const getPCNById = async (req, res) => {
   }
 };
 
-/**
- * POST /pcn
- * UPDATED (spec §11): +decisionMakers, +financeContacts, +tags, +priority, +clientFacingData
- */
 export const createPCN = async (req, res) => {
   try {
     const { name, icb, decisionMakers, financeContacts, tags, priority, clientFacingData } = req.body;
@@ -796,7 +731,6 @@ export const createPCN = async (req, res) => {
 
     const payload = normalizeComplianceGroup({
       ...req.body,
-      // ── NEW FIELDS (spec §11) ─────────────────────
       decisionMakers:  decisionMakers  || [],
       financeContacts: financeContacts || [],
       tags:            Array.isArray(tags) ? tags : [],
@@ -822,11 +756,6 @@ export const createPCN = async (req, res) => {
   }
 };
 
-/**
- * PUT /pcn/:id
- * UPDATED (spec §12): +decisionMakers, +financeContacts, +tags, +priority, +clientFacingData
- *   Selective merge — does NOT wipe these fields if absent from req.body
- */
 export const updatePCN = async (req, res) => {
   try {
     validateObjectIdOr400(req.params.id, "PCN id");
@@ -840,7 +769,6 @@ export const updatePCN = async (req, res) => {
 
     let payload = normalizeComplianceGroup(req.body);
 
-    // Clear groupDocuments if compliance groups changed
     if (
       Object.prototype.hasOwnProperty.call(payload, "complianceGroups") ||
       Object.prototype.hasOwnProperty.call(payload, "complianceGroup")
@@ -856,7 +784,6 @@ export const updatePCN = async (req, res) => {
       if (JSON.stringify(previousGroups) !== JSON.stringify(nextGroups)) payload.groupDocuments = [];
     }
 
-    // ── NEW: selective merge for new fields (spec §12) ─────────────────
     const selectiveMerge = {};
     if (Object.prototype.hasOwnProperty.call(req.body, "decisionMakers"))
       selectiveMerge.decisionMakers  = req.body.decisionMakers  || [];
@@ -979,18 +906,8 @@ export const getPCNRollup = async (req, res) => {
 
 /* ══════════════════════════════════════════════════════════════════
    PRACTICE CRUD
-   UPDATED: getPractices (BUG FIX #2), getPracticeById
 ══════════════════════════════════════════════════════════════════ */
 
-/**
- * GET /practice
- * BUG FIX #2 (Apr 2026):
- *   — pcn now populated with nested icb + federation so
- *     PracticeListPage columns (PCN, ICB / Federation) render correctly.
- *   — Each practice gets a `client` alias pointing to the populated pcn,
- *     matching the frontend's p.client.name / p.client.icb / p.client.federation
- *     references without touching the frontend code.
- */
 export const getPractices = async (req, res) => {
   try {
     const filter = { isActive: true };
@@ -1009,8 +926,7 @@ export const getPractices = async (req, res) => {
       .sort({ name: 1 })
       .lean();
 
-    // ✅ FIX: alias pcn → client so PracticeListPage.jsx works without changes
-    // Frontend uses p.client.name, p.client.icb.name, p.client.federation.name
+    // FIX: alias pcn → client so PracticeListPage.jsx works without changes
     const normalized = practices.map((p) => ({
       ...p,
       client: p.pcn ?? null,
@@ -1023,11 +939,6 @@ export const getPractices = async (req, res) => {
   }
 };
 
-/**
- * GET /practice/:id
- * UPDATED (spec §13): +localDecisionMakers, +siteSpecificDocs,
- *   +reportingArchive (last 3), +tags, +priority
- */
 export const getPracticeById = async (req, res) => {
   try {
     const practice = await Practice.findById(req.params.id)
@@ -1042,7 +953,6 @@ export const getPracticeById = async (req, res) => {
       .lean();
     if (!practice) return res.status(404).json({ message: "Practice not found" });
 
-    // ── NEW: reportingArchive — last 3 (spec §13) ──────────────────────
     if (Array.isArray(practice.reportingArchive)) {
       practice.reportingArchive = [...practice.reportingArchive]
         .sort((a, b) => {
@@ -1140,107 +1050,151 @@ export const updatePracticeRestricted = async (req, res) => {
 };
 
 /* ══════════════════════════════════════════════════════════════════
-   CONTACT HISTORY
-   UPDATED: addContactHistory, updateContactHistory (spec §14, §15)
+   CONTACT HISTORY — FIXED (Apr 2026)
+   ROOT CAUSE FIXES APPLIED:
+    1. resolveEntityId() — plain string, no toObjectId() cast (UUID-safe)
+    2. getContactHistory — findById().lean() for entity check (not exists({_id}))
+    3. All functions store/query entityId as plain String
+    4. Response normalized: notes/detail alias, date/contactDate alias
+    5. toggleStarred uses .lean() for read, then separate update
 ══════════════════════════════════════════════════════════════════ */
+
+/* ── Shared helper — validates & normalizes entityId as plain string */
+const resolveEntityId = (rawId) => {
+  if (!rawId || typeof rawId !== "string" || !rawId.trim()) return null;
+  return String(rawId).trim();
+};
+
+/* ── GET contact history ───────────────────────────────────────── */
 export const getContactHistory = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
-    const { entityId } = req.params;
+    const entityId   = resolveEntityId(req.params.entityId);
+
+    if (!entityId) return res.status(400).json({ message: "Invalid entityId" });
+
     const { type, starred, page = 1, limit = 100 } = req.query;
 
-    const entityObjId = toObjectId(entityId);
-    if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
-
-    const EntityModel  = getEntityModelByType(entityType);
-    const entityExists = await EntityModel.exists({ _id: entityObjId });
+    // Verify entity exists using findById (more reliable than exists({_id}))
+    const EntityModel = getEntityModelByType(entityType);
+    let entityExists = false;
+    try {
+      const entity = await EntityModel.findById(entityId).select("name").lean();
+      entityExists = !!entity;
+    } catch (lookupErr) {
+      // Don't block history fetch if entity lookup itself errors
+      console.warn(`getContactHistory entity check failed: ${lookupErr.message}`);
+      entityExists = true;
+    }
     if (!entityExists) return res.status(404).json({ message: `${entityType} not found` });
 
-    const filter = { entityType, entityId: entityObjId };
-    if (type && type !== "all") filter.type  = type;
+    // Build filter — entityId as plain string (no ObjectId cast)
+    const filter = { entityType, entityId };
+    if (type && type !== "all") filter.type    = type;
     if (starred === "true")     filter.starred = true;
 
-    const skip = (Number(page) - 1) * Number(limit);
+    const pageNum  = Math.max(1, Number(page)  || 1);
+    const limitNum = Math.min(200, Math.max(1, Number(limit) || 100));
+    const skip     = (pageNum - 1) * limitNum;
+
     const [logs, total] = await Promise.all([
-      ContactHistory.find(filter).populate("createdBy", "name role")
-        .sort({ date: -1, createdAt: -1 }).skip(skip).limit(Number(limit)).lean(),
+      ContactHistory.find(filter)
+        .populate("createdBy", "name role")
+        .sort({ date: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
       ContactHistory.countDocuments(filter),
     ]);
-    res.json({ logs, total, page: Number(page), pages: Math.ceil(total / Number(limit)) });
+
+    // Normalize response — alias legacy fields so frontend always gets consistent shape
+    const normalizedLogs = (logs || []).map((log) => ({
+      ...log,
+      notes:   log.notes  || log.detail       || "",
+      date:    log.date   || log.contactDate  || null,
+      time:    log.time   || "",
+      starred: !!log.starred,
+    }));
+
+    return res.json({
+      logs:  normalizedLogs,
+      total,
+      page:  pageNum,
+      pages: Math.ceil(total / limitNum),
+    });
   } catch (err) {
-    console.error("getContactHistory ERROR:", err.message);
-    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to fetch contact history" });
+    console.error("getContactHistory ERROR:", err.message, err.stack);
+    return res.status(err.statusCode || 500).json({
+      message: err.statusCode ? err.message : "Failed to fetch contact history",
+    });
   }
 };
 
-/**
- * POST /:entityType/:entityId/history
- * UPDATED (spec §14): +outcome, +followUpDate, +followUpNote
- */
+/* ── POST add contact history ──────────────────────────────────── */
 export const addContactHistory = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
-    const { entityId } = req.params;
+    const entityId   = resolveEntityId(req.params.entityId);
+
+    if (!entityId) return res.status(400).json({ message: "Invalid entityId" });
+
     const {
       type, subject, notes, date, time, attachments,
-      // ── NEW FIELDS (spec §14) ─────────────────────
       outcome, followUpDate, followUpNote,
     } = req.body;
 
     if (!subject?.trim()) return res.status(400).json({ message: "Subject is required" });
     if (!type)            return res.status(400).json({ message: "Type is required" });
 
-    const entityObjId  = toObjectId(entityId);
-    if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
-    const EntityModel  = getEntityModelByType(entityType);
-    const entityExists = await EntityModel.exists({ _id: entityObjId });
-    if (!entityExists) return res.status(404).json({ message: `${entityType} not found` });
+    // Verify entity exists
+    const EntityModel = getEntityModelByType(entityType);
+    const entity = await EntityModel.findById(entityId).select("name").lean();
+    if (!entity) return res.status(404).json({ message: `${entityType} not found` });
 
     const log = await ContactHistory.create({
       entityType,
-      entityId: entityObjId,
+      entityId,                           // plain string — no ObjectId cast
       type,
-      subject:     subject.trim(),
-      notes:       notes || "",
-      date:        date  ? new Date(date) : new Date(),
-      time:        time  || new Date().toTimeString().slice(0, 5),
-      attachments: attachments || [],
-      // ── NEW FIELDS (spec §14) ─────────────────────
-      outcome:      outcome?.trim()    || "",
+      subject:      subject.trim(),
+      notes:        notes || "",
+      date:         date  ? new Date(date) : new Date(),
+      time:         time  || new Date().toTimeString().slice(0, 5),
+      attachments:  attachments || [],
+      outcome:      outcome?.trim()      || "",
       followUpDate: followUpDate ? new Date(followUpDate) : null,
       followUpNote: followUpNote?.trim() || "",
-      createdBy: req.user._id,
+      createdBy:    req.user._id,
     });
 
-    const populated = await ContactHistory.findById(log._id).populate("createdBy", "name role").lean();
-    res.status(201).json({ log: populated, message: "Log added" });
+    const populated = await ContactHistory.findById(log._id)
+      .populate("createdBy", "name role")
+      .lean();
+
+    return res.status(201).json({ log: populated, message: "Log added" });
   } catch (err) {
     console.error("addContactHistory ERROR:", err.message);
-    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to add log" });
+    return res.status(err.statusCode || 500).json({
+      message: err.statusCode ? err.message : "Failed to add log",
+    });
   }
 };
 
-/**
- * PUT /history/:logId
- * UPDATED (spec §15): +outcome, +followUpDate, +followUpNote
- */
+/* ── PUT update contact history ────────────────────────────────── */
 export const updateContactHistory = async (req, res) => {
   try {
     const {
       subject, notes, type, date, time,
-      // ── NEW FIELDS (spec §15) ─────────────────────
       outcome, followUpDate, followUpNote,
     } = req.body;
 
     const log = await ContactHistory.findByIdAndUpdate(
       req.params.logId,
       {
-        ...(subject           && { subject }),
-        ...(notes !== undefined && { notes }),
-        ...(type              && { type }),
-        ...(date              && { date }),
-        ...(time              && { time }),
-        // ── NEW FIELDS (spec §15) ─────────────────
+        ...(subject      !== undefined && { subject }),
+        ...(notes        !== undefined && { notes }),
+        ...(type         !== undefined && { type }),
+        ...(date         !== undefined && { date }),
+        ...(time         !== undefined && { time }),
         ...(outcome      !== undefined && { outcome:      outcome?.trim()    || "" }),
         ...(followUpDate !== undefined && { followUpDate: followUpDate ? new Date(followUpDate) : null }),
         ...(followUpNote !== undefined && { followUpNote: followUpNote?.trim() || "" }),
@@ -1249,73 +1203,89 @@ export const updateContactHistory = async (req, res) => {
     ).populate("createdBy", "name role");
 
     if (!log) return res.status(404).json({ message: "Log not found" });
-    res.json({ log, message: "Log updated" });
+    return res.json({ log, message: "Log updated" });
   } catch (err) {
     console.error("updateContactHistory ERROR:", err.message);
-    res.status(500).json({ message: "Failed to update log" });
+    return res.status(500).json({ message: "Failed to update log" });
   }
 };
 
+/* ── PATCH toggle starred ──────────────────────────────────────── */
 export const toggleStarred = async (req, res) => {
   try {
-    const log = await ContactHistory.findById(req.params.logId);
-    if (!log) return res.status(404).json({ message: "Log not found" });
-    const starred    = !log.starred;
-    const updatedLog = await ContactHistory.findByIdAndUpdate(req.params.logId, { starred }, { new: true });
-    res.json({ log: updatedLog, starred, message: starred ? "Starred" : "Unstarred" });
+    const existing = await ContactHistory.findById(req.params.logId).lean();
+    if (!existing) return res.status(404).json({ message: "Log not found" });
+
+    const starred = !existing.starred;
+    const updated = await ContactHistory.findByIdAndUpdate(
+      req.params.logId,
+      { starred },
+      { new: true }
+    ).lean();
+
+    return res.json({ log: updated, starred, message: starred ? "Starred" : "Unstarred" });
   } catch (err) {
-    res.status(500).json({ message: "Failed to toggle star" });
+    return res.status(500).json({ message: "Failed to toggle star" });
   }
 };
 
+/* ── DELETE contact history ────────────────────────────────────── */
 export const deleteContactHistory = async (req, res) => {
   try {
     const log = await ContactHistory.findByIdAndDelete(req.params.logId);
     if (!log) return res.status(404).json({ message: "Log not found" });
-    res.json({ message: "Log deleted" });
+    return res.json({ message: "Log deleted" });
   } catch (err) {
-    res.status(500).json({ message: "Failed to delete log" });
+    return res.status(500).json({ message: "Failed to delete log" });
   }
 };
 
-/* ── System Access ────────────────────────────────────────────────── */
+/* ── POST system access request ────────────────────────────────── */
 export const requestSystemAccess = async (req, res) => {
   try {
-    const { entityType, entityId } = req.params;
+    const entityType = normalizeEntityType(req.params.entityType);
+    const entityId   = resolveEntityId(req.params.entityId);
+
+    if (!entityId) return res.status(400).json({ message: "Invalid entityId" });
+
     const { systems, clinicianDetails, notes } = req.body;
     if (!systems?.length)        return res.status(400).json({ message: "At least one system must be selected" });
     if (!clinicianDetails?.name) return res.status(400).json({ message: "Clinician name is required" });
-
-    const entityObjId = toObjectId(entityId);
-    if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
 
     const systemList = systems.join(", ");
     const emailBody  = `Dear Team,\n\nPlease arrange system access for:\n\nName: ${clinicianDetails.name}\nType: ${clinicianDetails.clinicianType || "N/A"}\nGPhC: ${clinicianDetails.gphcNumber || "N/A"}\nSmart Card: ${clinicianDetails.smartCardNumber || "N/A"}\nEmail: ${clinicianDetails.email || "N/A"}\nPhone: ${clinicianDetails.phone || "N/A"}\n\nSystems: ${systemList}\nNotes: ${notes || "None"}\n\nKind regards,\nCore Prescribing Solutions`.trim();
 
     const log = await ContactHistory.create({
-      entityType, entityId: entityObjId, type: "system_access",
-      subject:  `System Access Request — ${clinicianDetails.name} — ${systemList}`,
-      notes:    emailBody, date: new Date(), time: new Date().toTimeString().slice(0, 5),
+      entityType,
+      entityId,                           // plain string
+      type:      "system_access",
+      subject:   `System Access Request — ${clinicianDetails.name} — ${systemList}`,
+      notes:     emailBody,
+      date:      new Date(),
+      time:      new Date().toTimeString().slice(0, 5),
       createdBy: req.user._id,
     });
-    res.json({ message: "System access request logged successfully", log });
+
+    return res.json({ message: "System access request logged successfully", log });
   } catch (err) {
-    res.status(500).json({ message: "Failed to process system access request" });
+    return res.status(500).json({ message: "Failed to process system access request" });
   }
 };
 
-/* ── Mass Email ───────────────────────────────────────────────────── */
+/* ── POST mass email ───────────────────────────────────────────── */
 export const sendMassEmail = async (req, res) => {
   try {
-    const { entityType, entityId } = req.params;
+    const entityType = normalizeEntityType(req.params.entityType);
+    const entityId   = resolveEntityId(req.params.entityId);
+
+    if (!entityId) return res.status(400).json({ message: "Invalid entityId" });
+
     const { subject, body, recipients } = req.body;
     if (!subject?.trim()) return res.status(400).json({ message: "Subject is required" });
     if (!body?.trim())    return res.status(400).json({ message: "Body is required" });
-    const valid = (recipients || []).filter(r => r.email?.includes("@"));
-    if (!valid.length)    return res.status(400).json({ message: "At least one valid recipient email is required" });
 
-    const entityObjId = toObjectId(entityId);
-    if (!entityObjId) return res.status(400).json({ message: "Invalid entityId" });
+    const valid = (recipients || []).filter(r => r.email?.includes("@"));
+    if (!valid.length) return res.status(400).json({ message: "At least one valid recipient email is required" });
 
     const trackingId = crypto.randomUUID();
     const apiBase    = `${req.protocol}://${req.get("host")}`;
@@ -1324,24 +1294,35 @@ export const sendMassEmail = async (req, res) => {
     const recipientResults = [];
     for (const r of valid) {
       try {
-        await transporter.sendMail({ from: process.env.EMAIL_FROM, to: r.name ? `"${r.name}" <${r.email}>` : r.email, subject, html: body + pixel });
+        await transporter.sendMail({
+          from:    process.env.EMAIL_FROM,
+          to:      r.name ? `"${r.name}" <${r.email}>` : r.email,
+          subject,
+          html:    body + pixel,
+        });
         recipientResults.push({ email: r.email, name: r.name || "", opened: false });
-      } catch (mailErr) {
+      } catch (_) {
         recipientResults.push({ email: r.email, name: r.name || "", opened: false });
       }
     }
 
     await ContactHistory.create({
-      entityType, entityId: entityObjId, type: "email",
-      subject: `[Mass Email] ${subject}`, notes: body.replace(/<[^>]+>/g, "").slice(0, 500),
-      date: new Date(), time: new Date().toTimeString().slice(0, 5),
-      isMassEmail: true, recipients: recipientResults,
+      entityType,
+      entityId,                           // plain string
+      type:         "email",
+      subject:      `[Mass Email] ${subject}`,
+      notes:        body.replace(/<[^>]+>/g, "").slice(0, 500),
+      date:         new Date(),
+      time:         new Date().toTimeString().slice(0, 5),
+      isMassEmail:  true,
+      recipients:   recipientResults,
       emailTracking: { sent: true, sentAt: new Date(), trackingId },
-      createdBy: req.user._id,
+      createdBy:    req.user._id,
     });
-    res.json({ message: `Email sent to ${recipientResults.length} recipient(s)` });
+
+    return res.json({ message: `Email sent to ${recipientResults.length} recipient(s)` });
   } catch (err) {
-    res.status(500).json({ message: "Failed to send email" });
+    return res.status(500).json({ message: "Failed to send email" });
   }
 };
 
