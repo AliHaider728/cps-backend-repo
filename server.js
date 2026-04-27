@@ -14,6 +14,7 @@ dotenv.config();
 
 const app = express();
 
+/* ===================== LOGGER ===================== */
 const log = {
   info: (msg, ...args) => console.log(`[INFO] ${msg}`, ...args),
   warn: (msg, ...args) => console.warn(`[WARN] ${msg}`, ...args),
@@ -21,6 +22,7 @@ const log = {
   ok: (msg, ...args) => console.log(`[OK] ${msg}`, ...args),
 };
 
+/* ===================== CUSTOM ERROR ===================== */
 class AppError extends Error {
   constructor(message, statusCode = 500, code = "INTERNAL_ERROR") {
     super(message);
@@ -30,13 +32,16 @@ class AppError extends Error {
   }
 }
 
+/* ===================== ASYNC HANDLER ===================== */
 const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
 };
 
+/* ===================== CONFIG ===================== */
 app.set("trust proxy", 1);
 log.info("NODE_ENV:", process.env.NODE_ENV);
 
+/* ===================== CORS ===================== */
 const exactOrigins = new Set(
   [
     "http://localhost:5173",
@@ -44,7 +49,7 @@ const exactOrigins = new Set(
     "https://cps-tau-five.vercel.app",
     ...(process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",") : []),
   ]
-    .map((value) => String(value || "").trim())
+    .map((v) => String(v || "").trim())
     .filter(Boolean)
 );
 
@@ -54,7 +59,10 @@ function isAllowedOrigin(origin) {
 
   try {
     const parsed = new URL(origin);
-    return parsed.protocol === "https:" && parsed.hostname.endsWith(".vercel.app");
+    return (
+      parsed.protocol === "https:" &&
+      parsed.hostname.endsWith(".vercel.app")
+    );
   } catch {
     return false;
   }
@@ -65,7 +73,7 @@ const corsOptionsDelegate = (req, callback) => {
   const allowed = isAllowedOrigin(requestOrigin);
 
   if (requestOrigin && !allowed) {
-    log.warn("CORS blocked origin:", requestOrigin);
+    log.warn("CORS blocked:", requestOrigin);
   }
 
   callback(null, {
@@ -74,28 +82,29 @@ const corsOptionsDelegate = (req, callback) => {
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     optionsSuccessStatus: 204,
-    preflightContinue: false,
-    maxAge: 86400,
   });
 };
 
 app.use(cors(corsOptionsDelegate));
 app.options("*", cors(corsOptionsDelegate));
 
-app.use(express.json({ limit: "10mb", strict: true }));
+/* ===================== BODY PARSER ===================== */
+app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
+/* ===================== INVALID JSON HANDLER ===================== */
 app.use((err, req, res, next) => {
   if (err.type === "entity.parse.failed") {
     return res.status(400).json({
       status: "error",
       code: "INVALID_JSON",
-      message: "Request body contains invalid JSON",
+      message: "Invalid JSON format",
     });
   }
-  return next(err);
+  next(err);
 });
 
+/* ===================== RATE LIMIT ===================== */
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -103,21 +112,23 @@ app.use(
     standardHeaders: true,
     legacyHeaders: false,
     handler: (req, res) => {
-      log.warn("Rate limit exceeded:", req.ip);
+      log.warn("Rate limit hit:", req.ip);
       res.status(429).json({
         status: "error",
         code: "RATE_LIMIT_EXCEEDED",
-        message: "Too many requests. Please try again later.",
+        message: "Too many requests",
       });
     },
   })
 );
 
+/* ===================== ROUTES ===================== */
 app.use("/api/auth", authRoutes);
 app.use("/api/audit", auditRoutes);
 app.use("/api/clients", clientRoutes);
 app.use("/api/compliance", complianceDocRoutes);
 
+/* ===================== HEALTH CHECK ===================== */
 app.get(
   "/api/db-test",
   asyncHandler(async (req, res) => {
@@ -127,9 +138,10 @@ app.get(
 );
 
 app.get("/", (req, res) => {
-  res.json({ status: "ok", message: "CPS API is running" });
+  res.json({ status: "ok", message: "CPS API is running 🚀" });
 });
 
+/* ===================== 404 ===================== */
 app.use((req, res) => {
   log.warn("Route not found:", req.method, req.originalUrl);
   res.status(404).json({
@@ -139,52 +151,46 @@ app.use((req, res) => {
   });
 });
 
+/* ===================== GLOBAL ERROR HANDLER ===================== */
 app.use((err, req, res, next) => {
   const statusCode = err.statusCode || 500;
-  const isOperational = err.isOperational || false;
   const isDev = process.env.NODE_ENV !== "production";
 
-  log.error(`[${err.code || "UNHANDLED"}] ${err.message}`, {
+  log.error(err.message, {
     path: req.originalUrl,
     method: req.method,
-    ip: req.ip,
     ...(isDev && { stack: err.stack }),
   });
-
-  const clientMessage = isOperational || isDev
-    ? err.message
-    : "An unexpected error occurred";
 
   res.status(statusCode).json({
     status: "error",
     code: err.code || "INTERNAL_ERROR",
-    message: clientMessage,
-    ...(isDev && !isOperational && { stack: err.stack }),
+    message: isDev ? err.message : "Something went wrong",
+    ...(isDev && { stack: err.stack }),
   });
 });
 
-initDB()
-  .then(() => log.ok("DB initialised"))
-  .catch((err) => log.error("DB init failed:", err.message));
+/* ===================== SERVER START ===================== */
+const PORT = process.env.PORT || 5000;
+
+async function startServer() {
+  try {
+    await initDB();
+    log.ok("DB connected");
+
+    app.listen(PORT, () => {
+      log.ok(`Server running on http://localhost:${PORT}`);
+    });
+  } catch (err) {
+    log.error("Startup failed:", err.message);
+    process.exit(1);
+  }
+}
 
 if (process.env.NODE_ENV !== "production") {
-  const PORT = process.env.PORT || 5000;
-
-  async function startServer() {
-    try {
-      await initDB();
-      app.listen(PORT, () => {
-        log.ok(`Server running on port ${PORT}`);
-        log.info("Allowed origins:", Array.from(exactOrigins));
-      });
-    } catch (err) {
-      log.error("Server failed to start:", err.message);
-      process.exit(1);
-    }
-  }
-
   startServer();
 }
 
+/* ===================== EXPORTS ===================== */
 export { AppError, asyncHandler };
 export default app;

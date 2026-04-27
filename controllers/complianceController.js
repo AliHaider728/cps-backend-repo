@@ -403,10 +403,17 @@ export const getEntityDocuments = async (req, res) => {
 };
 
 function buildSelectedGroups(entity) {
-  const rawGroups = (entity.complianceGroups && entity.complianceGroups.length > 0)
+  const fromArray = (entity?.complianceGroups && entity.complianceGroups.length > 0)
     ? entity.complianceGroups
-    : (entity.complianceGroup ? [entity.complianceGroup] : []);
-  return rawGroups.map(normalizePopulatedGroup).filter(Boolean);
+    : [];
+
+  const normalizedFromArray = fromArray.map(normalizePopulatedGroup).filter(Boolean);
+  if (normalizedFromArray.length > 0) return normalizedFromArray;
+
+  const normalizedSingle = entity?.complianceGroup
+    ? normalizePopulatedGroup(entity.complianceGroup)
+    : null;
+  return normalizedSingle ? [normalizedSingle] : [];
 }
 
 function findGroupAndDocument(entity, groupId, documentId) {

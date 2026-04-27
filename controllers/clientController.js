@@ -22,6 +22,7 @@
  *                         (selective merge — does not wipe if absent)
  *   getPracticeById    — +localDecisionMakers, +siteSpecificDocs,
  *                         +reportingArchive (last 3), +tags, +priority
+ *                         +nested pcn.icb + pcn.federation populate (Apr 2026 fix)
  *   addContactHistory  — +outcome, +followUpDate, +followUpNote
  *   updateContactHistory — +outcome, +followUpDate, +followUpNote
  *
@@ -32,6 +33,10 @@
  * BUG FIX #2 (Apr 2026):
  *   getPractices — now populates pcn with icb + federation (nested), and maps
  *                  pcn → client so PracticeListPage.jsx can render correctly.
+ *
+ * BUG FIX #3 (Apr 2026):
+ *   getPracticeById — nested populate pcn.icb + pcn.federation so frontend
+ *                     breadcrumb + header rendering works correctly.
  *
  * CONTACT HISTORY FIX (Apr 2026):
  *   — resolveEntityId() helper: plain string, no toObjectId() cast
@@ -942,17 +947,30 @@ export const getPractices = async (req, res) => {
 export const getPracticeById = async (req, res) => {
   try {
     const practice = await Practice.findById(req.params.id)
-      .populate("pcn", "name icb")
+      // ✅ FIX: nested populate so pcn.icb and pcn.federation are
+      // available on the frontend for breadcrumb + header rendering
+      .populate({
+        path:   "pcn",
+        select: "name icb federation",
+        populate: [
+          { path: "icb",        select: "name region code" },
+          { path: "federation", select: "name type"        },
+        ],
+      })
       .populate({
         path:   "complianceGroup",
         select: "name active displayOrder documents",
-        populate: { path: "documents", select: "name mandatory expirable displayOrder defaultExpiryDays defaultReminderDays active" },
+        populate: {
+          path:   "documents",
+          select: "name mandatory expirable displayOrder defaultExpiryDays defaultReminderDays active",
+        },
       })
-      .populate("linkedClinicians",    "name email role")
-      .populate("restrictedClinicians","name email role")
+      .populate("linkedClinicians",     "name email role")
+      .populate("restrictedClinicians", "name email role")
       .lean();
     if (!practice) return res.status(404).json({ message: "Practice not found" });
 
+    // Sort reportingArchive newest-first, return last 3 only
     if (Array.isArray(practice.reportingArchive)) {
       practice.reportingArchive = [...practice.reportingArchive]
         .sort((a, b) => {

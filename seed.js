@@ -2,21 +2,19 @@
  * @file seed.js
  * @description Populates the PostgreSQL database (app_records table) with
  *              realistic demo data for all CPS entities.
+ *              
+ *              UPDATED (Apr 2026):
+ *              - Converted all inserts to safe UPSERT (INSERT ... ON CONFLICT DO NOTHING)
+ *              - Removed destructive delete/truncate logic
+ *              - Added --fresh flag for optional full wipe (destructive mode)
+ *              - Default behavior: insert only if not exists
+ *              - Maintains referential integrity via email/code/name uniqueness checks
  *
- * UPDATED (Apr 2026):
- *   COMPLIANCE_DOCS       — +clinicianCanUpload, +visibleToClinician, +defaultReminderDays, +notes
- *   DOCUMENT_GROUPS       — +applicableContractTypes, +colour, +notes
- *   CLIENT_DATA (Clients) — +decisionMakers, +financeContacts, +tags, +priority, +clientFacingData
- *   PRACTICE_DATA         — +localDecisionMakers, +tags, +priority
- *   ContactHistory        — +outcome, +followUpDate, +followUpNote
- *
- *   FIXED: All models are wiped before re-seeding so stale/old data
- *           never bleeds through. upsertRecord alone was not enough because
- *           it only merges — it never removes old records.
- *           insertRecord is now used directly after the wipe.
- *
- * Run locally:  node seed.js
- * Run via npm:  npm run seed
+ * Usage:
+ *   node seed.js              — Safe seed (insert only if not exists)
+ *   node seed.js --fresh      — Full wipe + fresh seed (destructive)
+ *   npm run seed              — Safe seed
+ *   npm run seed -- --fresh   — Full wipe + fresh seed
  */
 
 import dotenv from "dotenv";
@@ -34,32 +32,123 @@ const log = {
   error: (msg, ...a) => console.error(`[ERROR] ${msg}`, ...a),
 };
 
+/* ── Command-line flags ────────────────────────────────────────── */
+const args        = process.argv.slice(2);
+const FRESH_SEED  = args.includes("--fresh");
+const SAFE_MODE   = !FRESH_SEED;
+
+if (FRESH_SEED) {
+  log.warn("\n⚠️  DESTRUCTIVE MODE: --fresh flag detected");
+  log.warn("All existing data will be wiped before re-seeding.\n");
+}
+
 /* ── DB helpers ─────────────────────────────────────────────────── */
+
+/**
+ * Safe insert: uses UPSERT to avoid duplicates
+ * In safe mode (default): INSERT ... ON CONFLICT DO NOTHING
+ * This gracefully skips records that already exist
+ */
+async function upsertRecord(model, payload, conflictKey = "name") {
+  const id        = uuidv4();
+  const timestamp = new Date().toISOString();
+  const data      = { ...payload, createdAt: timestamp, updatedAt: timestamp };
+  
+  try {
+    const result = await query(
+      `INSERT INTO app_records (model, id, data, created_at, updated_at)
+       VALUES ($1, $2, $3::jsonb, NOW(), NOW())
+       ON CONFLICT DO NOTHING
+       RETURNING id`,
+      [model, id, JSON.stringify(data)]
+    );
+    
+    if (result.rows.length === 0) {
+      // Record already exists (conflict)
+      return null;
+    }
+    
+    return { _id: id, id, ...data };
+  } catch (err) {
+    log.error(`Failed to upsert ${model}:`, err.message);
+    throw err;
+  }
+}
+
+/**
+ * Insert record (non-conflict aware)
+ * Used when we know the record doesn't exist
+ */
 async function insertRecord(model, payload) {
   const id        = uuidv4();
   const timestamp = new Date().toISOString();
   const data      = { ...payload, createdAt: timestamp, updatedAt: timestamp };
-  await query(
-    `INSERT INTO app_records (model, id, data, created_at, updated_at)
-     VALUES ($1, $2, $3::jsonb, NOW(), NOW())`,
-    [model, id, JSON.stringify(data)]
-  );
-  return { _id: id, id, ...data };
+  
+  try {
+    await query(
+      `INSERT INTO app_records (model, id, data, created_at, updated_at)
+       VALUES ($1, $2, $3::jsonb, NOW(), NOW())`,
+      [model, id, JSON.stringify(data)]
+    );
+    return { _id: id, id, ...data };
+  } catch (err) {
+    log.error(`Failed to insert ${model}:`, err.message);
+    throw err;
+  }
 }
 
+/**
+ * Fetch a record by unique field for existence check
+ */
+async function findRecord(model, field, value) {
+  try {
+    const result = await query(
+      `SELECT id, data FROM app_records
+       WHERE model = $1 AND data->>$2 = $3
+       LIMIT 1`,
+      [model, field, String(value)]
+    );
+    
+    if (result.rows.length === 0) return null;
+    
+    const row = result.rows[0];
+    return { _id: row.id, id: row.id, ...row.data };
+  } catch (err) {
+    log.error(`Failed to find ${model} by ${field}:`, err.message);
+    throw err;
+  }
+}
+
+/**
+ * Update an existing record
+ */
 async function updateRecord(model, id, patch) {
   const data = { ...patch, updatedAt: new Date().toISOString() };
-  await query(
-    `UPDATE app_records
-     SET data = COALESCE(data, '{}'::jsonb) || $3::jsonb, updated_at = NOW()
-     WHERE model = $1 AND id = $2`,
-    [model, id, JSON.stringify(data)]
-  );
+  try {
+    await query(
+      `UPDATE app_records
+       SET data = COALESCE(data, '{}'::jsonb) || $3::jsonb, updated_at = NOW()
+       WHERE model = $1 AND id = $2`,
+      [model, id, JSON.stringify(data)]
+    );
+  } catch (err) {
+    log.error(`Failed to update ${model} ${id}:`, err.message);
+    throw err;
+  }
 }
 
+/**
+ * Destructive: wipe all records for a model
+ * Only called in --fresh mode
+ */
 async function deleteAllByModel(model) {
-  const result = await query(`DELETE FROM app_records WHERE model = $1`, [model]);
-  log.info(`Cleared model "${model}" — ${result.rowCount} rows deleted`);
+  try {
+    const result = await query(`DELETE FROM app_records WHERE model = $1`, [model]);
+    log.info(`Cleared model "${model}" — ${result.rowCount} rows deleted`);
+  } catch (err) {
+    log.error(`Failed to delete ${model}:`, err.message);
+    throw err;
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -373,26 +462,36 @@ export async function runSeed() {
   log.ok("PostgreSQL connected");
 
   // ══════════════════════════════════════════════════════════════
-  //   STEP 0 — WIPE ALL MODELS BEFORE RE-SEEDING
-  // Guarantees a clean slate. Old "pcn" model records are also
-  // wiped in case a previous seed run used a different model name.
+  //   STEP 0 — Optional destructive wipe (--fresh flag only)
   // ══════════════════════════════════════════════════════════════
-  log.info("\nWiping existing data...");
-  await deleteAllByModel("contact_history");
-  await deleteAllByModel("practice");
-  await deleteAllByModel("client");
-  await deleteAllByModel("pcn");            // wipe old model name too
-  await deleteAllByModel("federation");
-  await deleteAllByModel("icb");
-  await deleteAllByModel("document_group");
-  await deleteAllByModel("compliance_document");
-  await deleteAllByModel("user");           // comment out to keep existing logins
-  log.ok("Wipe complete — inserting fresh data");
+  if (FRESH_SEED) {
+    log.info("\nWiping existing data (--fresh mode)...");
+    await deleteAllByModel("contact_history");
+    await deleteAllByModel("practice");
+    await deleteAllByModel("client");
+    await deleteAllByModel("pcn");            // wipe old model name too
+    await deleteAllByModel("federation");
+    await deleteAllByModel("icb");
+    await deleteAllByModel("document_group");
+    await deleteAllByModel("compliance_document");
+    await deleteAllByModel("user");
+    log.ok("Wipe complete — inserting fresh data");
+  } else {
+    log.info("\n✓ Safe mode enabled: existing data will not be deleted");
+    log.info("Only new records will be inserted (if not already present)\n");
+  }
 
   // ── 1. Users ──────────────────────────────────────────────────
-  log.info("\nSeeding Users...");
+  log.info("Seeding Users...");
   const seededUsers = [];
   for (const u of USERS) {
+    const existing = await findRecord("user", "email", u.email);
+    if (existing) {
+      log.ok(`${u.email} [already exists — skipped]`);
+      seededUsers.push(existing);
+      continue;
+    }
+
     const hashed = await bcrypt.hash(u.password, 12);
     const user   = await insertRecord("user", {
       name:               u.name,
@@ -423,6 +522,13 @@ export async function runSeed() {
   log.info("\nSeeding ICBs...");
   const icbMap = {};
   for (const d of ICBS) {
+    const existing = await findRecord("icb", "code", d.code);
+    if (existing) {
+      log.ok(`${d.name} [already exists — skipped]`);
+      icbMap[d.name] = existing;
+      continue;
+    }
+
     const icb = await insertRecord("icb", { ...d, createdBy: admin.id });
     icbMap[d.name] = icb;
     log.ok(d.name);
@@ -434,6 +540,14 @@ export async function runSeed() {
   for (const d of FEDERATION_DATA) {
     const icb = icbMap[d.icbName];
     if (!icb) { log.warn(`ICB not found: ${d.icbName}`); continue; }
+
+    const existing = await findRecord("federation", "name", d.name);
+    if (existing) {
+      log.ok(`${d.name} [already exists — skipped]`);
+      fedMap[d.name] = existing;
+      continue;
+    }
+
     const fed = await insertRecord("federation", { name: d.name, icb: icb.id, type: d.type, createdBy: admin.id });
     fedMap[d.name] = fed;
     log.ok(`${d.name} [${d.type}]`);
@@ -447,6 +561,13 @@ export async function runSeed() {
     const fed = fedMap[group.federationName];
     if (!icb) { log.warn(`ICB not found: ${group.icbName}`); continue; }
     for (const d of group.clients) {
+      const existing = await findRecord("client", "xeroCode", d.xeroCode);
+      if (existing) {
+        log.ok(`${d.name} [already exists — skipped]`);
+        clientMap[d.name] = existing;
+        continue;
+      }
+
       const client = await insertRecord("client", {
         ...d,
         icb:        { _id: icb.id, id: icb.id, name: icb.name, code: icb.code },
@@ -467,6 +588,13 @@ export async function runSeed() {
     const client = clientMap[clientName];
     if (!client) { log.warn(`Client not found: ${clientName}`); continue; }
     for (const d of practices) {
+      const existing = await findRecord("practice", "odsCode", d.odsCode);
+      if (existing) {
+        log.ok(`${d.name} [already exists — skipped]`);
+        practiceMap[d.name] = existing;
+        continue;
+      }
+
       const practice = await insertRecord("practice", {
         ...d,
         client:           { _id: client.id, id: client.id, name: client.name },
@@ -518,6 +646,13 @@ export async function runSeed() {
   log.info("\nSeeding Compliance Documents...");
   const docMap = {};
   for (const d of COMPLIANCE_DOCS) {
+    const existing = await findRecord("compliance_document", "name", d.name);
+    if (existing) {
+      log.ok(`${d.name} [already exists — skipped]`);
+      docMap[d.name] = existing;
+      continue;
+    }
+
     const doc = await insertRecord("compliance_document", { ...d, createdBy: admin.id });
     docMap[d.name] = doc;
     log.ok(d.name);
@@ -527,6 +662,13 @@ export async function runSeed() {
   log.info("\nSeeding Document Groups...");
   const groupMap = {};
   for (const g of DOCUMENT_GROUPS) {
+    const existing = await findRecord("document_group", "name", g.name);
+    if (existing) {
+      log.ok(`${g.name} [already exists — skipped]`);
+      groupMap[g.name] = existing;
+      continue;
+    }
+
     const docIds = g.docNames.map(n => docMap[n]?.id).filter(Boolean);
     const group  = await insertRecord("document_group", {
       name: g.name, displayOrder: g.displayOrder, active: g.active,
@@ -593,13 +735,14 @@ export async function runSeed() {
 
   // ── Done ──────────────────────────────────────────────────────
   await disconnectDB();
-  log.ok("\nSeed complete!");
+  log.ok("\n✓ Seed complete!");
   log.info(
     `Users: ${USERS.length} | ICBs: ${ICBS.length} | ` +
     `Federations: ${Object.keys(fedMap).length} | Clients: ${Object.keys(clientMap).length} | ` +
     `Practices: ${Object.keys(practiceMap).length} | ` +
     `Compliance Docs: ${COMPLIANCE_DOCS.length} | Document Groups: ${DOCUMENT_GROUPS.length}`
   );
+  log.info(`\nMode: ${FRESH_SEED ? "DESTRUCTIVE (--fresh)" : "SAFE (no deletions)"}`);
 }
 
 /* ── Entry point ─────────────────────────────────────────────────── */

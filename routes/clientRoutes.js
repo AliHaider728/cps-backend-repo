@@ -4,6 +4,12 @@ import { allowRoles  } from "../middleware/roleCheck.js";
 import { upload }     from "../middleware/upload.js"; // KEEP for legacy compliance only
 
 import {
+  getReportingArchive as getReportingArchiveV2,
+  addToReportingArchive as addToReportingArchiveV2,
+  deleteFromReportingArchive as deleteFromReportingArchiveV2,
+} from "../controllers/reportingArchiveController.js";
+
+import {
   getHierarchy, searchClients,
   getICBs, getICBById, createICB, updateICB, deleteICB,
   getFederations, createFederation, updateFederation, deleteFederation,
@@ -16,9 +22,6 @@ import {
   sendMassEmail, trackEmailOpen,
 
   // NEW
-  getReportingArchive,
-  addToReportingArchive,
-  deleteFromReportingArchive,
   getDecisionMakers,
   updateDecisionMakers,
   getFinanceContacts,
@@ -116,17 +119,18 @@ router.post("/compliance/run-expiry",  ...admin,    runExpiryCheck);
 router.get(
   "/:entityType/:entityId/reporting-archive",
   ...adminFin,
-  getReportingArchive
+  getReportingArchiveV2
 );
+
 router.post(
   "/:entityType/:entityId/reporting-archive",
   ...admin,
-  addToReportingArchive   // JSON only — no multer
+  addToReportingArchiveV2   // JSON only — no multer
 );
 router.delete(
   "/:entityType/:entityId/reporting-archive/:reportId",
   ...admin,
-  deleteFromReportingArchive
+  deleteFromReportingArchiveV2
 );
 
 /* 
