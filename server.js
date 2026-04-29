@@ -4,17 +4,20 @@ import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
 
 import { initDB, query } from "./config/db.js";
+import { asyncHandler } from "./lib/asyncHandler.js";
 
 import authRoutes from "./routes/authRoutes.js";
 import auditRoutes from "./routes/auditRoutes.js";
 import clientRoutes from "./routes/clientRoutes.js";
 import complianceDocRoutes from "./routes/complianceDocRoutes.js";
+import clinicianRoutes from "./routes/clinicianRoutes.js";
+import restrictedClinicianRoutes from "./routes/restrictedClinicianRoutes.js";    
 
 dotenv.config();
 
 const app = express();
 
-/* ===================== LOGGER ===================== */
+/*   LOGGER   */
 const log = {
   info: (msg, ...args) => console.log(`[INFO] ${msg}`, ...args),
   warn: (msg, ...args) => console.warn(`[WARN] ${msg}`, ...args),
@@ -22,7 +25,7 @@ const log = {
   ok: (msg, ...args) => console.log(`[OK] ${msg}`, ...args),
 };
 
-/* ===================== CUSTOM ERROR ===================== */
+/*   CUSTOM ERROR   */
 class AppError extends Error {
   constructor(message, statusCode = 500, code = "INTERNAL_ERROR") {
     super(message);
@@ -32,16 +35,11 @@ class AppError extends Error {
   }
 }
 
-/* ===================== ASYNC HANDLER ===================== */
-const asyncHandler = (fn) => (req, res, next) => {
-  Promise.resolve(fn(req, res, next)).catch(next);
-};
-
-/* ===================== CONFIG ===================== */
+/*   CONFIG   */
 app.set("trust proxy", 1);
 log.info("NODE_ENV:", process.env.NODE_ENV);
 
-/* ===================== CORS ===================== */
+/*   CORS   */
 const exactOrigins = new Set(
   [
     "http://localhost:5173",
@@ -88,11 +86,11 @@ const corsOptionsDelegate = (req, callback) => {
 app.use(cors(corsOptionsDelegate));
 app.options("*", cors(corsOptionsDelegate));
 
-/* ===================== BODY PARSER ===================== */
+/*   BODY PARSER   */
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-/* ===================== INVALID JSON HANDLER ===================== */
+/*   INVALID JSON HANDLER   */
 app.use((err, req, res, next) => {
   if (err.type === "entity.parse.failed") {
     return res.status(400).json({
@@ -104,7 +102,7 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
-/* ===================== RATE LIMIT ===================== */
+/*   RATE LIMIT   */
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -122,13 +120,15 @@ app.use(
   })
 );
 
-/* ===================== ROUTES ===================== */
+/*   ROUTES   */
 app.use("/api/auth", authRoutes);
 app.use("/api/audit", auditRoutes);
 app.use("/api/clients", clientRoutes);
 app.use("/api/compliance", complianceDocRoutes);
+app.use("/api/clinicians", clinicianRoutes);
+app.use("/api/restricted-clinicians", restrictedClinicianRoutes);
 
-/* ===================== HEALTH CHECK ===================== */
+/*   HEALTH CHECK   */
 app.get(
   "/api/db-test",
   asyncHandler(async (req, res) => {
@@ -141,7 +141,7 @@ app.get("/", (req, res) => {
   res.json({ status: "ok", message: "CPS API is running 🚀" });
 });
 
-/* ===================== 404 ===================== */
+/*   404   */
 app.use((req, res) => {
   log.warn("Route not found:", req.method, req.originalUrl);
   res.status(404).json({
@@ -151,7 +151,7 @@ app.use((req, res) => {
   });
 });
 
-/* ===================== GLOBAL ERROR HANDLER ===================== */
+/*   GLOBAL ERROR HANDLER   */
 app.use((err, req, res, next) => {
   const statusCode = err.statusCode || 500;
   const isDev = process.env.NODE_ENV !== "production";
@@ -170,7 +170,7 @@ app.use((err, req, res, next) => {
   });
 });
 
-/* ===================== SERVER START ===================== */
+/*   SERVER START   */
 const PORT = process.env.PORT || 5000;
 
 async function startServer() {
@@ -191,6 +191,7 @@ if (process.env.NODE_ENV !== "production") {
   startServer();
 }
 
-/* ===================== EXPORTS ===================== */
-export { AppError, asyncHandler };
+/*   EXPORTS   */
+export { AppError };
+export { asyncHandler };
 export default app;
