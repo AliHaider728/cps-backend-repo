@@ -1,0 +1,89 @@
+[
+  {
+    "name": "Archive/Expired",
+    "displayOrder": 0,
+    "active": false,
+    "docNames": ["Right to Work", "Indemnity Insurance Certificate"],
+    "applicableContractTypes": [],
+    "colour": "#9ca3af",
+    "notes": "Archived group - do not assign to new clinicians."
+  },
+  {
+    "name": "Clinical Staff Documents",
+    "displayOrder": 1,
+    "active": true,
+    "docNames": [
+      "CV",
+      "DBS Check/Update Service",
+      "Declaration of Interests Form",
+      "Enhanced Access - Key Contacts (Mon-Fri 6:30pm-8pm - Sat 8am-6:30pm)",
+      "East Lancashire Alliance - Enhanced Access - Key Contacts",
+      "Fitness to Practise Form",
+      "Health Screening Form",
+      "Reference 1",
+      "Reference 2",
+      "Reference Contact Details",
+      "Signed Confidentiality Statement",
+      "Signed Data Protection Statement",
+      "Signed Non-Disclosure Agreement"
+    ],
+    "applicableContractTypes": ["ARRS", "EA", "Direct"],
+    "colour": "#3b82f6",
+    "notes": "Standard compliance group for all clinical staff."
+  },
+  {
+    "name": "DBS and Update",
+    "displayOrder": 0,
+    "active": true,
+    "docNames": ["DBS Check/Update Service", "Enhanced DBS Certificate (cert only)"],
+    "applicableContractTypes": ["ARRS", "EA", "Direct"],
+    "colour": "#f59e0b",
+    "notes": "For clinicians using DBS Update Service."
+  },
+  {
+    "name": "DBS cert - no update",
+    "displayOrder": 0,
+    "active": true,
+    "docNames": ["Enhanced DBS Certificate (cert only)"],
+    "applicableContractTypes": ["ARRS", "EA", "Direct"],
+    "colour": "#f97316",
+    "notes": "For clinicians with standalone DBS certificate only."
+  },
+  {
+    "name": "Enhanced Access",
+    "displayOrder": 0,
+    "active": true,
+    "docNames": [
+      "Enhanced Access - Key Contacts (Mon-Fri 6:30pm-8pm - Sat 8am-6:30pm)",
+      "East Lancashire Alliance - Enhanced Access - Key Contacts"
+    ],
+    "applicableContractTypes": ["EA"],
+    "colour": "#8b5cf6",
+    "notes": "Enhanced Access contract clinicians only."
+  },
+  {
+    "name": "Non-Clinical Staff",
+    "displayOrder": 0,
+    "active": true,
+    "docNames": [
+      "CV",
+      "Signed Confidentiality Statement",
+      "Signed Data Protection Statement",
+      "Reference 1",
+      "Reference 2",
+      "Proof of Address"
+    ],
+    "applicableContractTypes": [],
+    "colour": "#10b981",
+    "notes": "For admin, VA, and non-clinical roles."
+  },
+  {
+    "name": "Right to Work Check (Expired)",
+    "displayOrder": 0,
+    "active": true,
+    "docNames": ["Right to Work Check (expired)"],
+    "applicableContractTypes": ["ARRS", "EA", "Direct"],
+    "colour": "#ef4444",
+    "notes": "Assign when right to work needs re-verification."
+  }
+]

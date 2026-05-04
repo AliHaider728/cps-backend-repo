@@ -1,0 +1,6 @@
+[
+  { "name": "NHS Greater Manchester ICB",         "region": "North West",         "code": "QOP" },
+  { "name": "NHS Lancashire & South Cumbria ICB", "region": "North West",         "code": "QE1" },
+  { "name": "NHS Cheshire & Merseyside ICB",      "region": "North West",         "code": "QYG" },
+  { "name": "NHS South Yorkshire ICB",            "region": "Yorkshire & Humber", "code": "QF7" }
+]

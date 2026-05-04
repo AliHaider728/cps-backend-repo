@@ -1,0 +1,136 @@
+[
+  {
+    "icbName": "NHS Greater Manchester ICB",
+    "federationName": "Salford Together Federation",
+    "clients": [
+      {
+        "name": "Salford Central Client",
+        "annualSpend": 280000,
+        "contractType": "ARRS",
+        "xeroCode": "SAL1",
+        "xeroCategory": "Client",
+        "contractRenewalDate": "2025-04-01",
+        "contractExpiryDate": "2026-03-31",
+        "ndaSigned": true,
+        "dsaSigned": true,
+        "mouReceived": true,
+        "welcomePackSent": true,
+        "notes": "Key Client - 6 practices, high footfall area.",
+        "contacts": [
+          { "name": "Dr. Priya Sharma", "role": "Clinical Director", "email": "priya.sharma@salfordclient.nhs.uk", "phone": "0161 234 5678", "type": "decision_maker" },
+          { "name": "Kevin Walsh",      "role": "Client Manager",    "email": "k.walsh@salfordclient.nhs.uk",     "phone": "0161 234 5679", "type": "general"        },
+          { "name": "Rachel Green",     "role": "Finance Lead",      "email": "r.green@salfordclient.nhs.uk",     "phone": "0161 234 5680", "type": "finance"        }
+        ],
+        "requiredSystems": { "emis": true, "ice": true, "accurx": true, "docman": true, "vpn": true },
+        "tags": ["arrs", "high-priority"],
+        "priority": "high",
+        "decisionMakers": [
+          { "name": "Dr. Priya Sharma", "role": "Clinical Director", "email": "priya.sharma@salfordclient.nhs.uk", "phone": "0161 234 5678", "isPrimary": true }
+        ],
+        "financeContacts": [
+          { "name": "Rachel Green", "role": "Finance Lead", "email": "r.green@salfordclient.nhs.uk", "phone": "0161 234 5680" }
+        ],
+        "clientFacingData": { "showMonthlyMeetings": true, "showClinicianMeetings": true, "publicNotes": "Monthly review every first Tuesday.", "lastUpdated": null },
+        "reportingArchive": []
+      },
+      {
+        "name": "Wythenshawe & Benchill Client",
+        "annualSpend": 195000,
+        "contractType": "EA",
+        "xeroCode": "WYT1",
+        "xeroCategory": "Client",
+        "contractRenewalDate": "2025-06-01",
+        "contractExpiryDate": "2026-05-31",
+        "ndaSigned": true,
+        "dsaSigned": true,
+        "mouReceived": false,
+        "welcomePackSent": true,
+        "notes": "Growing Client, recently added 2 new practices.",
+        "contacts": [
+          { "name": "Dr. Mohammed Iqbal", "role": "Clinical Director", "email": "m.iqbal@wythclient.nhs.uk", "phone": "0161 945 1234", "type": "decision_maker" },
+          { "name": "Sandra Lee",         "role": "Ops Manager",       "email": "s.lee@wythclient.nhs.uk",   "phone": "0161 945 1235", "type": "operations"     }
+        ],
+        "requiredSystems": { "emis": true, "accurx": true },
+        "tags": ["ea"],
+        "priority": "normal",
+        "decisionMakers": [
+          { "name": "Dr. Mohammed Iqbal", "role": "Clinical Director", "email": "m.iqbal@wythclient.nhs.uk", "phone": "0161 945 1234", "isPrimary": true }
+        ],
+        "financeContacts": [],
+        "clientFacingData": { "showMonthlyMeetings": true, "showClinicianMeetings": false, "publicNotes": "", "lastUpdated": null },
+        "reportingArchive": []
+      }
+    ]
+  },
+  {
+    "icbName": "NHS Lancashire & South Cumbria ICB",
+    "federationName": "Lancashire & South Cumbria NHS Foundation Trust",
+    "clients": [
+      {
+        "name": "Preston City Client",
+        "annualSpend": 142000,
+        "contractType": "Direct",
+        "xeroCode": "PRE1",
+        "xeroCategory": "Client",
+        "contractRenewalDate": "2025-10-01",
+        "contractExpiryDate": "2026-09-30",
+        "ndaSigned": true,
+        "dsaSigned": true,
+        "mouReceived": true,
+        "welcomePackSent": true,
+        "notes": "Urban Client - strong pharmacist engagement.",
+        "contacts": [
+          { "name": "Dr. Tom Brennan", "role": "Clinical Director", "email": "t.brennan@prestoncity.nhs.uk", "phone": "01772 555 100", "type": "decision_maker" },
+          { "name": "Lucy Parker",     "role": "Finance Contact",   "email": "l.parker@prestoncity.nhs.uk",  "phone": "01772 555 101", "type": "finance"        }
+        ],
+        "requiredSystems": { "systmOne": true, "ice": true, "accurx": true },
+        "tags": ["direct"],
+        "priority": "normal",
+        "decisionMakers": [
+          { "name": "Dr. Tom Brennan", "role": "Clinical Director", "email": "t.brennan@prestoncity.nhs.uk", "phone": "01772 555 100", "isPrimary": true }
+        ],
+        "financeContacts": [
+          { "name": "Lucy Parker", "role": "Finance Contact", "email": "l.parker@prestoncity.nhs.uk", "phone": "01772 555 101" }
+        ],
+        "clientFacingData": { "showMonthlyMeetings": true, "showClinicianMeetings": true, "publicNotes": "", "lastUpdated": null },
+        "reportingArchive": []
+      }
+    ]
+  },
+  {
+    "icbName": "NHS Cheshire & Merseyside ICB",
+    "federationName": "Cheshire & Wirral Foundation Trust",
+    "clients": [
+      {
+        "name": "Liverpool South Client",
+        "annualSpend": 220000,
+        "contractType": "ARRS",
+        "xeroCode": "LIV1",
+        "xeroCategory": "Client",
+        "contractRenewalDate": "2026-01-01",
+        "contractExpiryDate": "2026-12-31",
+        "ndaSigned": true,
+        "dsaSigned": true,
+        "mouReceived": true,
+        "welcomePackSent": true,
+        "notes": "High-demand urban Client.",
+        "contacts": [
+          { "name": "Dr. Aarav Patel", "role": "Clinical Director", "email": "a.patel@livsouth.nhs.uk", "phone": "0151 233 4000", "type": "decision_maker" },
+          { "name": "Diane Morris",    "role": "Client Manager",    "email": "d.morris@livsouth.nhs.uk", "phone": "0151 233 4001", "type": "general"        },
+          { "name": "James Wong",      "role": "Finance Lead",      "email": "j.wong@livsouth.nhs.uk",   "phone": "0151 233 4002", "type": "finance"        }
+        ],
+        "requiredSystems": { "systmOne": true, "accurx": true, "docman": true },
+        "tags": ["arrs", "urban"],
+        "priority": "normal",
+        "decisionMakers": [
+          { "name": "Dr. Aarav Patel", "role": "Clinical Director", "email": "a.patel@livsouth.nhs.uk", "phone": "0151 233 4000", "isPrimary": true }
+        ],
+        "financeContacts": [
+          { "name": "James Wong", "role": "Finance Lead", "email": "j.wong@livsouth.nhs.uk", "phone": "0151 233 4002" }
+        ],
+        "clientFacingData": { "showMonthlyMeetings": true, "showClinicianMeetings": true, "publicNotes": "", "lastUpdated": null },
+        "reportingArchive": []
+      }
+    ]
+  }
+]

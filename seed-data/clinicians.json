@@ -1,0 +1,151 @@
+[
+  {
+    "fullName": "Dr. Ali Haider",
+    "clinicianType": "Pharmacist",
+    "gphcNumber": "2087654",
+    "smartCard": "SC-AH-001",
+    "phone": "07712 345678",
+    "email": "clinician@coreprescribing.co.uk",
+    "addressLine1": "12 Oak Avenue",
+    "city": "Salford",
+    "postcode": "M6 7AB",
+    "contractType": "ARRS",
+    "noticePeriod": "1 month",
+    "workingHours": 20,
+    "specialisms": ["Diabetes", "Hypertension"],
+    "futurePotential": "Strong candidate for PCN lead role",
+    "scopeWorkstreams": ["SMR", "EHCH"],
+    "shadowingAvailable": true,
+    "systemsInUse": ["EMIS", "AccuRx", "ICE"],
+    "emergencyContacts": [
+      { "name": "Fatima Haider", "relationship": "Spouse", "phone": "07712 999888", "email": "fatima@example.com" }
+    ],
+    "onboarding": {
+      "welcomePackSent": true,
+      "mobilisationPlan": true,
+      "systemsRequested": true,
+      "smartcardOrdered": true,
+      "contractSigned": true,
+      "indemnityVerified": true,
+      "inductionBooked": true,
+      "notes": ""
+    },
+    "cppeStatus": {
+      "enrolled": true,
+      "exempt": false,
+      "completed": false,
+      "progressPct": 65,
+      "modules": [
+        { "name": "Clinical Assessment",    "status": "completed",   "completedAt": null },
+        { "name": "Medicines Optimisation", "status": "completed",   "completedAt": null },
+        { "name": "Prescribing Practice",   "status": "in_progress", "completedAt": null }
+      ],
+      "notes": "On track for completion"
+    },
+    "isRestricted": false,
+    "restrictReason": "",
+    "isActive": true,
+    "notes": "Key ARRS pharmacist, high performer.",
+    "_userEmail": "clinician@coreprescribing.co.uk",
+    "_opsLeadRole": "ops_manager",
+    "_supervisorRole": "super_admin"
+  },
+  {
+    "fullName": "Sarah Thompson",
+    "clinicianType": "Technician",
+    "gphcNumber": "3091234",
+    "smartCard": "SC-ST-002",
+    "phone": "07823 456789",
+    "email": "clinician2@coreprescribing.co.uk",
+    "addressLine1": "45 Church Street",
+    "city": "Preston",
+    "postcode": "PR1 3EF",
+    "contractType": "EA",
+    "noticePeriod": "2 weeks",
+    "workingHours": 16,
+    "specialisms": ["COPD/Asthma", "QOF"],
+    "futurePotential": "Potential for enhanced access lead",
+    "scopeWorkstreams": ["Enhanced Access", "QOF Reviews"],
+    "shadowingAvailable": false,
+    "systemsInUse": ["SystmOne", "AccuRx"],
+    "emergencyContacts": [
+      { "name": "John Thompson", "relationship": "Partner", "phone": "07823 111222", "email": "john@example.com" }
+    ],
+    "onboarding": {
+      "welcomePackSent": true,
+      "mobilisationPlan": true,
+      "systemsRequested": true,
+      "smartcardOrdered": true,
+      "contractSigned": true,
+      "indemnityVerified": true,
+      "inductionBooked": false,
+      "notes": "Induction pending"
+    },
+    "cppeStatus": {
+      "enrolled": true,
+      "exempt": false,
+      "completed": false,
+      "progressPct": 30,
+      "modules": [
+        { "name": "Clinical Assessment",    "status": "completed",   "completedAt": null },
+        { "name": "Medicines Optimisation", "status": "not_started", "completedAt": null },
+        { "name": "Prescribing Practice",   "status": "not_started", "completedAt": null }
+      ],
+      "notes": "Needs support with module 2"
+    },
+    "isRestricted": false,
+    "restrictReason": "",
+    "isActive": true,
+    "notes": "EA technician, punctual and reliable.",
+    "_userEmail": "clinician2@coreprescribing.co.uk",
+    "_opsLeadRole": "ops_manager",
+    "_supervisorRole": "super_admin"
+  },
+  {
+    "fullName": "Dr. Rania Aziz",
+    "clinicianType": "IP",
+    "gphcNumber": "4056789",
+    "smartCard": "SC-RA-003",
+    "phone": "07934 567890",
+    "email": "rania.aziz@coreprescribing.co.uk",
+    "addressLine1": "8 Maple Road",
+    "city": "Liverpool",
+    "postcode": "L24 8QR",
+    "contractType": "Direct",
+    "noticePeriod": "1 month",
+    "workingHours": 30,
+    "specialisms": ["Hypertension", "Diabetes", "QOF"],
+    "futurePotential": "Senior IP, suitable for clinical lead",
+    "scopeWorkstreams": ["SMR", "EHCH", "Care Homes"],
+    "shadowingAvailable": true,
+    "systemsInUse": ["SystmOne", "ICE", "AccuRx", "Docman"],
+    "emergencyContacts": [
+      { "name": "Tariq Aziz", "relationship": "Brother", "phone": "07934 000111", "email": "tariq@example.com" }
+    ],
+    "onboarding": {
+      "welcomePackSent": true,
+      "mobilisationPlan": true,
+      "systemsRequested": true,
+      "smartcardOrdered": true,
+      "contractSigned": true,
+      "indemnityVerified": true,
+      "inductionBooked": true,
+      "notes": ""
+    },
+    "cppeStatus": {
+      "enrolled": false,
+      "exempt": true,
+      "completed": false,
+      "progressPct": 0,
+      "modules": [],
+      "notes": "Exempt — already holds independent prescriber qualification"
+    },
+    "isRestricted": false,
+    "restrictReason": "",
+    "isActive": true,
+    "notes": "Highly experienced IP. Direct contract.",
+    "_userEmail": null,
+    "_opsLeadRole": "ops_manager",
+    "_supervisorRole": "training"
+  }
+]

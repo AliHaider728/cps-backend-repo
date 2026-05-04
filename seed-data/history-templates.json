@@ -1,0 +1,51 @@
+[
+  {
+    "type": "meeting",
+    "subject": "Monthly performance review",
+    "notes": "Discussed Q1 KPIs. All targets met. Follow-up scheduled.",
+    "outcome": "KPIs reviewed - all green. No action required.",
+    "followUpNote": "Send Q2 report by end of month."
+  },
+  {
+    "type": "call",
+    "subject": "Clinician placement query",
+    "notes": "Client manager called regarding locum cover in March.",
+    "outcome": "Cover arranged - confirmed Dr. Ali Haider for week 2.",
+    "followUpNote": ""
+  },
+  {
+    "type": "email",
+    "subject": "Contract renewal discussion",
+    "notes": "Sent updated terms. Awaiting sign-off from Clinical Director.",
+    "outcome": "Terms sent. Awaiting response.",
+    "followUpNote": "Chase if no reply within 5 working days."
+  },
+  {
+    "type": "complaint",
+    "subject": "Complaint: delayed rota",
+    "notes": "Client reported delay in March rota. Resolved same day.",
+    "outcome": "Resolved - apology sent, rota corrected.",
+    "followUpNote": ""
+  },
+  {
+    "type": "note",
+    "subject": "Internal note - billing query",
+    "notes": "Finance contact queried invoice. Confirmed correct.",
+    "outcome": "Invoice confirmed correct. No changes needed.",
+    "followUpNote": ""
+  },
+  {
+    "type": "document",
+    "subject": "MOU signed and received",
+    "notes": "MOU received and filed. Contract now complete.",
+    "outcome": "MOU filed. Contract complete.",
+    "followUpNote": ""
+  },
+  {
+    "type": "system_access",
+    "subject": "System access request sent",
+    "notes": "EMIS access requested for new clinical pharmacist.",
+    "outcome": "Request sent - awaiting confirmation from practice.",
+    "followUpNote": "Chase access confirmation after 3 working days."
+  }
+]

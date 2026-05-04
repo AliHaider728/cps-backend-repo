@@ -2,16 +2,17 @@
  * controllers/clinicianController.js — Module 3
  *
  * Endpoints (mounted at /api/clinicians by routes/clinicianRoutes.js):
- *   GET    /                      → list with filters
- *   POST   /                      → create
- *   GET    /:id                   → detail
- *   PUT    /:id                   → update
- *   DELETE /:id                   → delete (admin)
- *   GET    /:id/client-history    → past/current PCN+practice assignments
- *   PATCH  /:id/restrict          → set isRestricted=true (+reason)
- *   PATCH  /:id/unrestrict        → set isRestricted=false
- *
- * All mutations call logAudit(...).
+ *   GET    /                             → list with filters
+ *   POST   /                             → create
+ *   GET    /:id                          → detail
+ *   PUT    /:id                          → update
+ *   DELETE /:id                          → delete (admin)
+ *   GET    /:id/client-history           → past/current PCN+practice assignments
+ *   POST   /:id/client-history           → add client history entry
+ *   PUT    /:id/client-history/:recordId → update client history entry
+ *   PATCH  /:id/client-history/:recordId/system-access → update system access
+ *   PATCH  /:id/restrict                 → set isRestricted=true (+reason)
+ *   PATCH  /:id/unrestrict               → set isRestricted=false
  */
 
 import Clinician               from "../models/Clinician.js";
@@ -63,10 +64,10 @@ export const getClinicians = async (req, res, next) => {
 
     let docs = await Clinician.find({}).lean();
 
-    if (type)        docs = docs.filter((d) => d.clinicianType === type);
-    if (contract)    docs = docs.filter((d) => d.contractType === contract);
-    if (opsLead)     docs = docs.filter((d) => String(d.opsLead) === String(opsLead));
-    if (supervisor)  docs = docs.filter((d) => String(d.supervisor) === String(supervisor));
+    if (type)       docs = docs.filter((d) => d.clinicianType === type);
+    if (contract)   docs = docs.filter((d) => d.contractType === contract);
+    if (opsLead)    docs = docs.filter((d) => String(d.opsLead) === String(opsLead));
+    if (supervisor) docs = docs.filter((d) => String(d.supervisor) === String(supervisor));
 
     if (typeof restricted !== "undefined" && restricted !== "")
       docs = docs.filter((d) => Boolean(d.isRestricted) === (restricted === "true"));
@@ -76,16 +77,14 @@ export const getClinicians = async (req, res, next) => {
 
     docs = docs.filter((d) => matchesSearch(d, search));
 
-    // Enrich with leave balance + ops/supervisor names (cheap aggregation)
+    // Enrich with leave balance + ops/supervisor names
     const userIds = new Set();
     docs.forEach((d) => {
       if (d.opsLead)    userIds.add(String(d.opsLead));
       if (d.supervisor) userIds.add(String(d.supervisor));
     });
 
-    const users = userIds.size
-      ? await User.find({}).lean()
-      : [];
+    const users = userIds.size ? await User.find({}).lean() : [];
     const userMap = new Map(users.map((u) => [String(u._id), u]));
 
     const allLeave = await ClinicianLeaveEntry.find({}).lean();
@@ -140,15 +139,15 @@ export const getClinicianById = async (req, res, next) => {
   try {
     const id = validateId(req.params.id);
     const clinician = await Clinician.findById(id)
-      .populate("opsLead", "fullName email role")
+      .populate("opsLead",    "fullName email role")
       .populate("supervisor", "fullName email role")
-      .populate("user", "fullName email role")
+      .populate("user",       "fullName email role")
       .lean();
 
     if (!clinician)
       return res.status(404).json({ message: "Clinician not found" });
 
-    const leaveEntries = await ClinicianLeaveEntry.find({ clinician: id }).lean();
+    const leaveEntries  = await ClinicianLeaveEntry.find({ clinician: id }).lean();
     const leaveBalances = calcAllBalances(leaveEntries);
 
     res.json({ clinician: { ...clinician, leaveBalances } });
@@ -164,7 +163,6 @@ export const updateClinician = async (req, res, next) => {
     const before = await Clinician.findById(id).lean();
     if (!before) return res.status(404).json({ message: "Clinician not found" });
 
-    // Selective merge — never wipe nested objects when client omits them
     const body = { ...req.body };
     delete body._id;
     delete body.createdAt;
@@ -205,22 +203,118 @@ export const deleteClinician = async (req, res, next) => {
   }
 };
 
-/* ─── CLIENT HISTORY (read only) ─────────────────────────── */
+/* ─── CLIENT HISTORY — GET ───────────────────────────────── */
 export const getClientHistory = async (req, res, next) => {
   try {
     const id = validateId(req.params.id);
     const rows = await ClinicianClientHistory.find({ clinician: id })
-      .populate("pcn", "name")
+      .populate("pcn",      "name")
       .populate("practice", "name")
       .lean();
 
-    rows.sort((a, b) => {
-      const aDate = new Date(a.startDate || 0).getTime();
-      const bDate = new Date(b.startDate || 0).getTime();
-      return bDate - aDate;
-    });
+    rows.sort((a, b) => new Date(b.startDate || 0) - new Date(a.startDate || 0));
 
     res.json({ history: rows });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/* ─── CLIENT HISTORY — ADD ───────────────────────────────── */
+export const addClientHistory = async (req, res, next) => {
+  try {
+    const id = validateId(req.params.id);
+
+    const clinician = await Clinician.findById(id).lean();
+    if (!clinician) return res.status(404).json({ message: "Clinician not found" });
+
+    const body = req.body || {};
+
+    const record = await ClinicianClientHistory.create({
+      clinician:      id,
+      pcn:            body.pcn            || null,
+      practice:       body.practice       || null,
+      contract:       body.contract       || clinician.contractType || "ARRS",
+      startDate:      body.startDate      || null,
+      endDate:        body.endDate        || null,
+      status:         body.status         || "active",
+      systemAccess:   Array.isArray(body.systemAccess) ? body.systemAccess : [],
+      isRestricted:   body.isRestricted   === true || body.isRestricted === "true",
+      restrictReason: body.restrictReason || "",
+      createdBy:      req.user?._id       || null,
+    });
+
+    await logAudit(req, "ADD_CLIENT_HISTORY", "ClinicianClientHistory", {
+      resourceId: record._id,
+      detail: `Added client history record for clinician "${clinician.fullName || id}"`,
+      after:  safeJson(record),
+    });
+
+    res.status(201).json({ record });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/* ─── CLIENT HISTORY — UPDATE ────────────────────────────── */
+export const updateClientHistory = async (req, res, next) => {
+  try {
+    const id       = validateId(req.params.id);
+    const recordId = validateId(req.params.recordId, "recordId");
+
+    const before = await ClinicianClientHistory.findById(recordId).lean();
+    if (!before) return res.status(404).json({ message: "Record not found" });
+    if (String(before.clinician) !== String(id))
+      return res.status(403).json({ message: "Record does not belong to this clinician" });
+
+    const body = { ...req.body };
+    delete body._id;
+    delete body.clinician;
+
+    const updated = await ClinicianClientHistory.findByIdAndUpdate(recordId, body, { new: true });
+
+    await logAudit(req, "UPDATE_CLIENT_HISTORY", "ClinicianClientHistory", {
+      resourceId: recordId,
+      detail: `Updated client history record for clinician ${id}`,
+      before: safeJson(before),
+      after:  safeJson(updated),
+    });
+
+    res.json({ record: updated });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/* ─── CLIENT HISTORY — UPDATE SYSTEM ACCESS ─────────────── */
+export const updateSystemAccess = async (req, res, next) => {
+  try {
+    const id       = validateId(req.params.id);
+    const recordId = validateId(req.params.recordId, "recordId");
+
+    const before = await ClinicianClientHistory.findById(recordId).lean();
+    if (!before) return res.status(404).json({ message: "Record not found" });
+    if (String(before.clinician) !== String(id))
+      return res.status(403).json({ message: "Record does not belong to this clinician" });
+
+    const systemAccess = Array.isArray(req.body?.systemAccess)
+      ? req.body.systemAccess
+      : [];
+
+    const updated = await ClinicianClientHistory.findByIdAndUpdate(
+      recordId,
+      { systemAccess },
+      { new: true }
+    );
+
+    await logAudit(req, "UPDATE_SYSTEM_ACCESS", "ClinicianClientHistory", {
+      resourceId: recordId,
+      detail: `Updated system access for clinician ${id} at record ${recordId}`,
+      before: safeJson(before.systemAccess),
+      after:  safeJson(systemAccess),
+    });
+
+    res.json({ record: updated });
   } catch (err) {
     next(err);
   }

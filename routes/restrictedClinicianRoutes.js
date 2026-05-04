@@ -1,17 +1,20 @@
 /**
  * routes/restrictedClinicianRoutes.js — Module 3
  *
- * Endpoints for managing per-client clinician restrictions.
+ * Mounted at /api/restricted-clinicians by server.js.
  *
  * Routes:
- *   GET    /                                → list all active restrictions (with filters)
- *   GET    /clinician/:id/restricted-clients  → list clients this clinician is restricted FROM
- *   POST   /clinician/:id/restricted-clients  → add a per-client restriction
- *   DELETE /clinician/:id/restricted-clients/:recordId → soft-remove a restriction
- *   GET    /:entityType/:entityId/restricted-clinicians → list clinicians restricted at a client
+ *   GET    /                                            → list all active restrictions
+ *   GET    /clinician/:id/restricted-clients            → clients this clinician is blocked from
+ *   POST   /clinician/:id/restricted-clients            → add a per-client restriction
+ *   DELETE /clinician/:id/restricted-clients/:recordId  → soft-remove a restriction
+ *   GET    /:entityType/:entityId/restricted-clinicians → clinicians blocked at a client
  */
 
-import express from "express";
+import { Router }       from "express";
+import { verifyToken }  from "../middleware/auth.js";
+import { allowRoles }   from "../middleware/roleCheck.js";
+
 import {
   listAllRestricted,
   getRestrictedClientsForClinician,
@@ -19,35 +22,22 @@ import {
   removeRestrictedClient,
   getRestrictedAtClient,
 } from "../controllers/restrictedClinicianController.js";
-import { asyncHandler } from "../lib/asyncHandler.js";
 
-const router = express.Router();
+const router = Router();
 
-// GET all restricted records (with optional filters)
-router.get("/", asyncHandler(listAllRestricted));
+const reader = [verifyToken, allowRoles("super_admin", "director", "ops_manager", "finance", "training_manager", "workforce_manager")];
+const writer = [verifyToken, allowRoles("super_admin", "director", "ops_manager")];
+const admin  = [verifyToken, allowRoles("super_admin", "ops_manager")];
 
-// GET restricted clients for a specific clinician
-router.get(
-  "/clinician/:id/restricted-clients",
-  asyncHandler(getRestrictedClientsForClinician)
-);
+/* ── List all active restrictions ──────────────────────────── */
+router.get("/", ...reader, listAllRestricted);
 
-// POST add a per-client restriction for a clinician
-router.post(
-  "/clinician/:id/restricted-clients",
-  asyncHandler(addRestrictedClient)
-);
+/* ── Per-clinician restricted clients ──────────────────────── */
+router.get(   "/clinician/:id/restricted-clients",              ...reader, getRestrictedClientsForClinician);
+router.post(  "/clinician/:id/restricted-clients",              ...writer, addRestrictedClient);
+router.delete("/clinician/:id/restricted-clients/:recordId",    ...admin,  removeRestrictedClient);
 
-// DELETE (soft) remove a per-client restriction
-router.delete(
-  "/clinician/:id/restricted-clients/:recordId",
-  asyncHandler(removeRestrictedClient)
-);
-
-// GET restricted clinicians at a specific client (entityType/entityId)
-router.get(
-  "/:entityType/:entityId/restricted-clinicians",
-  asyncHandler(getRestrictedAtClient)
-);
+/* ── Restricted clinicians at a client ─────────────────────── */
+router.get("/:entityType/:entityId/restricted-clinicians", ...reader, getRestrictedAtClient);
 
 export default router;

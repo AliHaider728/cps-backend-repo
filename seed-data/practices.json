@@ -1,0 +1,158 @@
+{
+  "Salford Central Client": [
+    {
+      "name": "Pendleton Medical Centre",
+      "odsCode": "P84001",
+      "address": "15 Broad Street",
+      "city": "Salford",
+      "postcode": "M6 5BN",
+      "fte": "0.5 FTE (20HRS/WEEK)",
+      "contractType": "ARRS",
+      "xeroCode": "PEN1",
+      "xeroCategory": "GPX",
+      "ndaSigned": true,
+      "dsaSigned": true,
+      "mouReceived": true,
+      "welcomePackSent": true,
+      "mobilisationPlanSent": true,
+      "templateInstalled": true,
+      "reportsImported": true,
+      "confidentialityFormSigned": true,
+      "prescribingPoliciesShared": true,
+      "remoteAccessSetup": true,
+      "systemAccessNotes": "EMIS Web - full access granted. ICE, AccuRx, Docman active.",
+      "systemAccess": [
+        { "system": "EMIS",   "code": "EMIS/1485566", "status": "granted"  },
+        { "system": "ICE",                             "status": "granted"  },
+        { "system": "AccuRx",                          "status": "granted"  },
+        { "system": "Docman",                          "status": "granted"  }
+      ],
+      "tags": ["arrs"],
+      "priority": "normal",
+      "localDecisionMakers": [
+        { "name": "Dr. James Pendleton", "role": "GP Partner", "email": "j.pendleton@pendletonmc.nhs.uk", "phone": "0161 111 2222", "isPrimary": true }
+      ],
+      "siteSpecificDocs": [],
+      "reportingArchive": []
+    },
+    {
+      "name": "Weaste & Seedley Surgery",
+      "odsCode": "P84002",
+      "address": "42 Liverpool Street",
+      "city": "Salford",
+      "postcode": "M5 4LT",
+      "fte": "0.4 FTE",
+      "contractType": "ARRS",
+      "xeroCode": "WEA1",
+      "xeroCategory": "GPX",
+      "ndaSigned": true,
+      "dsaSigned": true,
+      "mouReceived": true,
+      "welcomePackSent": true,
+      "mobilisationPlanSent": true,
+      "templateInstalled": false,
+      "reportsImported": false,
+      "systemAccessNotes": "EMIS Web - view only. ICE access requested.",
+      "systemAccess": [
+        { "system": "EMIS", "code": "EMIS/1485567", "status": "view_only" },
+        { "system": "ICE",                           "status": "requested" }
+      ],
+      "tags": [],
+      "priority": "normal",
+      "localDecisionMakers": [],
+      "siteSpecificDocs": [],
+      "reportingArchive": []
+    }
+  ],
+  "Preston City Client": [
+    {
+      "name": "Fishergate Hill Surgery",
+      "odsCode": "P82001",
+      "address": "Fishergate Hill",
+      "city": "Preston",
+      "postcode": "PR1 8JD",
+      "fte": "0.6 FTE",
+      "contractType": "Direct",
+      "xeroCode": "FIS1",
+      "xeroCategory": "GPX",
+      "ndaSigned": true,
+      "dsaSigned": true,
+      "mouReceived": true,
+      "welcomePackSent": true,
+      "mobilisationPlanSent": true,
+      "templateInstalled": true,
+      "reportsImported": true,
+      "systemAccessNotes": "SystmOne - full access. ICE and AccuRx granted.",
+      "systemAccess": [
+        { "system": "SystmOne", "status": "granted" },
+        { "system": "ICE",      "status": "granted" },
+        { "system": "AccuRx",   "status": "granted" }
+      ],
+      "tags": ["direct"],
+      "priority": "normal",
+      "localDecisionMakers": [
+        { "name": "Dr. Helen Fisher", "role": "Practice Manager", "email": "h.fisher@fishergate.nhs.uk", "phone": "01772 100 200", "isPrimary": true }
+      ],
+      "siteSpecificDocs": [],
+      "reportingArchive": []
+    },
+    {
+      "name": "Larches Surgery",
+      "odsCode": "P82002",
+      "address": "Blackpool Road",
+      "city": "Preston",
+      "postcode": "PR2 6AA",
+      "fte": "0.4 FTE",
+      "contractType": "Direct",
+      "xeroCode": "LAR1",
+      "xeroCategory": "GPX",
+      "ndaSigned": true,
+      "dsaSigned": false,
+      "mouReceived": true,
+      "welcomePackSent": true,
+      "mobilisationPlanSent": false,
+      "templateInstalled": false,
+      "reportsImported": false,
+      "systemAccessNotes": "SystmOne - access pending setup.",
+      "systemAccess": [
+        { "system": "SystmOne", "status": "pending" }
+      ],
+      "tags": [],
+      "priority": "normal",
+      "localDecisionMakers": [],
+      "siteSpecificDocs": [],
+      "reportingArchive": []
+    }
+  ],
+  "Liverpool South Client": [
+    {
+      "name": "Speke Medical Centre",
+      "odsCode": "P83001",
+      "address": "Speke Road",
+      "city": "Liverpool",
+      "postcode": "L24 2SQ",
+      "fte": "0.5 FTE",
+      "contractType": "ARRS",
+      "xeroCode": "SPE1",
+      "xeroCategory": "GPX",
+      "ndaSigned": true,
+      "dsaSigned": true,
+      "mouReceived": true,
+      "welcomePackSent": true,
+      "mobilisationPlanSent": true,
+      "templateInstalled": true,
+      "reportsImported": true,
+      "systemAccessNotes": "SystmOne full access. AccuRx active. Docman installed.",
+      "systemAccess": [
+        { "system": "SystmOne", "status": "granted" },
+        { "system": "AccuRx",   "status": "granted" },
+        { "system": "Docman",   "status": "granted" }
+      ],
+      "tags": ["arrs"],
+      "priority": "normal",
+      "localDecisionMakers": [],
+      "siteSpecificDocs": [],
+      "reportingArchive": []
+    }
+  ]
+}

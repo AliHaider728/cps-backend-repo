@@ -1,0 +1,8 @@
+[
+  { "icbName": "NHS Greater Manchester ICB",         "name": "Salford Together Federation",                     "type": "federation" },
+  { "icbName": "NHS Greater Manchester ICB",         "name": "Manchester Health & Care Commissioning",          "type": "federation" },
+  { "icbName": "NHS Greater Manchester ICB",         "name": "Stockport Together",                              "type": "INT"        },
+  { "icbName": "NHS Lancashire & South Cumbria ICB", "name": "Lancashire & South Cumbria NHS Foundation Trust", "type": "federation" },
+  { "icbName": "NHS Lancashire & South Cumbria ICB", "name": "Fylde Coast Medical Services",                    "type": "federation" },
+  { "icbName": "NHS Cheshire & Merseyside ICB",      "name": "Cheshire & Wirral Foundation Trust",              "type": "federation" }
+]

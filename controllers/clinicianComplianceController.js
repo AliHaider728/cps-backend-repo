@@ -7,18 +7,15 @@
  *   PATCH  /:id/compliance/:docId                → upsert (with optional file upload)
  *   POST   /:id/compliance/:docId/approve        → admin approves
  *   POST   /:id/compliance/:docId/reject         → admin rejects with reason
- *
- * NOTE: Renamed from "complianceController" because the existing project
- *       already has a `complianceController.js` for entity-level compliance.
  */
 
-import ClinicianComplianceDoc  from "../models/ClinicianComplianceDoc.js";
-import Clinician               from "../models/Clinician.js";
-import { logAudit }            from "../middleware/auditLogger.js";
-import { normalizeId }         from "../lib/ids.js";
+import ClinicianComplianceDoc    from "../models/ClinicianComplianceDoc.js";
+import Clinician                 from "../models/Clinician.js";
+import { logAudit }              from "../middleware/auditLogger.js";
+import { normalizeId }           from "../lib/ids.js";
 import { uploadBufferToStorage } from "../lib/supabase.js";
 
-/* ─── helpers ────────────────────────────────────────────── */
+/* ─── helpers */
 const safeJson = (v) => JSON.parse(JSON.stringify(v ?? null));
 const toId = (v) => normalizeId(v);
 
@@ -42,7 +39,7 @@ const calcProgress = (docs) => {
   return Math.round((ok / mandatory.length) * 100);
 };
 
-/* ─── LIST ───────────────────────────────────────────────── */
+/* ─── LIST */
 export const getCompliance = async (req, res, next) => {
   try {
     const id = toId(req.params.id);
@@ -63,7 +60,7 @@ export const getCompliance = async (req, res, next) => {
       expiringSoon: docs.filter((d) => {
         if (!d.expiryDate) return false;
         const ms = new Date(d.expiryDate).getTime() - Date.now();
-        return ms > 0 && ms < 30 * 24 * 60 * 60 * 1000;   // < 30 days
+        return ms > 0 && ms < 30 * 24 * 60 * 60 * 1000;
       }).length,
     });
   } catch (err) {
@@ -71,7 +68,7 @@ export const getCompliance = async (req, res, next) => {
   }
 };
 
-/* ─── UPSERT (with optional file upload) ─────────────────── */
+/* ─── UPSERT (with optional file upload) */
 export const upsertDoc = async (req, res, next) => {
   try {
     const id    = toId(req.params.id);
@@ -108,7 +105,8 @@ export const upsertDoc = async (req, res, next) => {
 
     const body = { ...req.body };
 
-    const next = {
+    // FIX: renamed from "next" to "docData" to avoid shadowing Express next()
+    const docData = {
       clinician: id,
       docName:    body.docName    ?? existing?.docName    ?? "",
       docKey:     body.docKey     ?? existing?.docKey     ?? "",
@@ -121,28 +119,28 @@ export const upsertDoc = async (req, res, next) => {
     };
 
     if (fileMeta) {
-      next.fileUrl     = fileMeta.publicUrl;
-      next.fileName    = req.file.originalname;
-      next.storagePath = fileMeta.path;
-      next.bucket      = fileMeta.bucket;
-      next.uploadedAt  = new Date().toISOString();
-      next.status      = "uploaded";  // pending admin approval
+      docData.fileUrl     = fileMeta.publicUrl;
+      docData.fileName    = req.file.originalname;
+      docData.storagePath = fileMeta.path;
+      docData.bucket      = fileMeta.bucket;
+      docData.uploadedAt  = new Date().toISOString();
+      docData.status      = "uploaded";
     } else if (existing) {
-      next.fileUrl     = existing.fileUrl;
-      next.fileName    = existing.fileName;
-      next.storagePath = existing.storagePath;
-      next.bucket      = existing.bucket;
-      next.uploadedAt  = existing.uploadedAt;
-      next.status      = body.status || existing.status || "missing";
+      docData.fileUrl     = existing.fileUrl;
+      docData.fileName    = existing.fileName;
+      docData.storagePath = existing.storagePath;
+      docData.bucket      = existing.bucket;
+      docData.uploadedAt  = existing.uploadedAt;
+      docData.status      = body.status || existing.status || "missing";
     } else {
-      next.status = body.status || "missing";
+      docData.status = body.status || "missing";
     }
 
     let saved;
     if (existing) {
-      saved = await ClinicianComplianceDoc.findByIdAndUpdate(existing._id, next, { new: true });
+      saved = await ClinicianComplianceDoc.findByIdAndUpdate(existing._id, docData, { new: true });
     } else {
-      saved = await ClinicianComplianceDoc.create(next);
+      saved = await ClinicianComplianceDoc.create(docData);
     }
 
     await logAudit(req, existing ? "UPDATE_CLINICIAN_COMPLIANCE_DOC" : "CREATE_CLINICIAN_COMPLIANCE_DOC", "ClinicianComplianceDoc", {
@@ -158,7 +156,7 @@ export const upsertDoc = async (req, res, next) => {
   }
 };
 
-/* ─── APPROVE ────────────────────────────────────────────── */
+/* ─── APPROVE */
 export const approveDoc = async (req, res, next) => {
   try {
     const id    = toId(req.params.id);
@@ -196,7 +194,7 @@ export const approveDoc = async (req, res, next) => {
   }
 };
 
-/* ─── REJECT ─────────────────────────────────────────────── */
+/* ─── REJECT   */
 export const rejectDoc = async (req, res, next) => {
   try {
     const id    = toId(req.params.id);
