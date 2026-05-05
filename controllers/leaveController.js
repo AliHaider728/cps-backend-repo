@@ -13,9 +13,48 @@ import Clinician           from "../models/Clinician.js";
 import { logAudit }        from "../middleware/auditLogger.js";
 import { normalizeId }     from "../lib/ids.js";
 import { calcAllBalances, calcOtherLeave, dayCount } from "../lib/leaveCalc.js";
+import { query } from "../config/db.js";
+import ClinicianSupervisionLog from "../models/ClinicianSupervisionLog.js";
 
 const safeJson = (v) => JSON.parse(JSON.stringify(v ?? null));
 const toId = (v) => normalizeId(v);
+
+const eachDateISO = (startDate, endDate) => {
+  const out = [];
+  const d = new Date(`${String(startDate).slice(0, 10)}T00:00:00Z`);
+  const end = new Date(`${String(endDate).slice(0, 10)}T00:00:00Z`);
+  while (d <= end) {
+    out.push(d.toISOString().slice(0, 10));
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return out;
+};
+
+const syncLeaveToRota = async ({ clinicianId, leaveType, startDate, endDate, actorId, sourceLeaveId }) => {
+  const rotaStatus = leaveType === "annual" ? "annual_leave" : leaveType === "sick" ? "sick" : leaveType === "cppe" ? "cppe" : null;
+  if (!rotaStatus) return;
+  const dates = eachDateISO(startDate, endDate);
+  for (const date of dates) {
+    await query(
+      `UPDATE shifts
+       SET status = $1, source = $2, source_leave_id = $3, updated_at = NOW()
+       WHERE clinician_id = $4 AND date = $5`,
+      [rotaStatus, `${leaveType}_log`, sourceLeaveId || null, clinicianId, date]
+    );
+  }
+  if (leaveType === "annual") {
+    const supervision = await ClinicianSupervisionLog.find({ clinician: clinicianId }).lean();
+    const supervisionDates = new Set((supervision || []).map((s) => String(s.sessionDate || "").slice(0, 10)));
+    const clashes = dates.filter((d) => supervisionDates.has(d));
+    if (clashes.length > 0) {
+      // Trainer alert + audit log marker
+      await logAudit({ user: { _id: actorId, role: "system" } }, "LEAVE_SUPERVISION_CLASH_ALERT", "ClinicianLeaveEntry", {
+        detail: `Annual leave clashes with supervision on ${clashes.join(", ")}`,
+        after: { clinicianId, clashes, notifyTo: ["Stacey", "Sonia"] },
+      });
+    }
+  }
+};
 
 /* ─── LIST ───────────────────────────────────────────────── */
 export const getLeave = async (req, res, next) => {
@@ -79,6 +118,17 @@ export const addLeave = async (req, res, next) => {
       after:  safeJson(entry),
     });
 
+    if (entry.approved) {
+      await syncLeaveToRota({
+        clinicianId: id,
+        leaveType: entry.leaveType,
+        startDate: entry.startDate,
+        endDate: entry.endDate,
+        actorId: req.user?._id || null,
+        sourceLeaveId: entry._id,
+      });
+    }
+
     const all = await ClinicianLeaveEntry.find({ clinician: id }).lean();
 
     res.status(201).json({
@@ -126,6 +176,17 @@ export const updateLeave = async (req, res, next) => {
       before: safeJson(before),
       after:  safeJson(updated),
     });
+
+    if ((updated?.approved === true || updated?.approved === "true") && ["annual", "sick", "cppe"].includes(String(updated?.leaveType || ""))) {
+      await syncLeaveToRota({
+        clinicianId: id,
+        leaveType: updated.leaveType,
+        startDate: updated.startDate,
+        endDate: updated.endDate,
+        actorId: req.user?._id || null,
+        sourceLeaveId: updated._id,
+      });
+    }
 
     const all = await ClinicianLeaveEntry.find({ clinician: id }).lean();
     res.json({

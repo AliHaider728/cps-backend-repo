@@ -3,12 +3,13 @@
  * @description Populates the PostgreSQL database (app_records table) with
  *              realistic demo data for all CPS entities.
  *
- * Updated (Apr 2026):
+ * Updated (May 2026):
  *   - Default mode preserves existing data and inserts only missing records
  *   - Optional `--fresh` flag wipes seed models before re-seeding
  *   - Duplicate prevention uses existence checks against natural keys
  *   - Relationship records remain intact across ICB -> Federation -> Client -> Practice
  *   - Module 3: Clinician Management seed data added
+ *   - Module 5: Rota & Shifts seed data added (native SQL table via Supabase)
  *   - Refactored: all static data moved to seed-data/ JSON files
  *
  * Usage:
@@ -26,6 +27,7 @@ import { v4 as uuidv4 } from "uuid";
 import { createRequire } from "module";
 import { initDB, query, disconnectDB } from "./config/db.js";
 import { createId } from "./lib/ids.js";
+import { getSupabaseClient } from "./lib/supabase.js";
 
 const require = createRequire(import.meta.url);
 
@@ -39,6 +41,7 @@ const HISTORY_TEMPLATES  = require("./seed-data/history-templates.json");
 const COMPLIANCE_DOCS    = require("./seed-data/compliance-docs.json");
 const DOCUMENT_GROUPS    = require("./seed-data/document-groups.json");
 const CLINICIAN_SEED_RAW = require("./seed-data/clinicians.json");
+const SHIFTS_SEED_RAW    = require("./seed-data/shifts.json");      // ← Module 5
 
 const log = {
   info:  (msg, ...args) => console.log(`[INFO]  ${msg}`, ...args),
@@ -155,6 +158,7 @@ async function ensureRecord(model, payload, field, value, label) {
   return created;
 }
 
+
 async function patchRecordIfNeeded(model, currentRecord, patch, label) {
   const hasChanges = Object.entries(patch).some(([key, value]) => !sameJson(currentRecord?.[key], value));
   if (!hasChanges) { log.info(`${label} already up to date`); return currentRecord; }
@@ -240,6 +244,15 @@ export async function runSeed() {
       await deleteAllByModel("ClinicianLeaveEntry");
       await deleteAllByModel("ClinicianComplianceDoc");
       await deleteAllByModel("Clinician");
+
+      // ── Also wipe native shifts tables (--fresh mode) ──────────────────
+      log.info('Clearing shifts tables (--fresh)...');
+      const supabaseFresh = getSupabaseClient();
+      await supabaseFresh.from("rota_distributions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+      await supabaseFresh.from("cover_requests").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+      await supabaseFresh.from("shifts").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+      log.ok("Shifts tables cleared");
+
       log.ok("Fresh wipe complete");
     } else {
       log.info("\nSafe mode enabled - existing data will not be deleted");
@@ -427,10 +440,6 @@ export async function runSeed() {
     const opsUser      = seededUsers.find((u) => u.role === "ops_manager");
     const trainingUser = seededUsers.find((u) => u.role === "training");
 
-    /*
-     * Resolve dynamic user IDs from the helper fields stored in clinicians.json
-     * (_userEmail, _opsLeadRole, _supervisorRole) then strip them before inserting.
-     */
     const CLINICIAN_SEED = CLINICIAN_SEED_RAW.map((raw) => {
       const { _userEmail, _opsLeadRole, _supervisorRole, ...data } = raw;
       const userRecord       = _userEmail ? seededUsers.find((u) => u.email === _userEmail) : null;
@@ -578,7 +587,108 @@ export async function runSeed() {
     }
 
     /* ═══════════════════════════════════════════════════════
-       END MODULE 3
+       MODULE 5 — ROTA & SHIFTS (native Supabase SQL table)
+       shifts table is NOT in app_records — uses Supabase client
+    ═══════════════════════════════════════════════════════ */
+
+    log.info("\nSeeding Shifts (Module 5)...");
+
+    const supabase = getSupabaseClient();
+
+    // Build email → clinician UUID map from app_records clinicians
+    const clinicianEmailMap = new Map(
+      Object.values(clinicianMap)
+        .filter((c) => c?.email)
+        .map((c) => [c.email.toLowerCase(), c.id])
+    );
+
+    // Also add seeded users with clinician role (fallback lookup)
+    for (const u of seededUsers.filter((u) => u.role === "clinician")) {
+      if (u.email && !clinicianEmailMap.has(u.email.toLowerCase())) {
+        clinicianEmailMap.set(u.email.toLowerCase(), u.id);
+      }
+    }
+
+    // Build ODS code → practice UUID map from app_records practices
+    const practiceOdsMap = new Map(
+      Object.values(practiceMap)
+        .filter((p) => p?.odsCode)
+        .map((p) => [p.odsCode, p.id])
+    );
+
+    let shiftsInserted = 0;
+    let shiftsSkipped  = 0;
+    let shiftsFailed   = 0;
+
+    for (const raw of SHIFTS_SEED_RAW) {
+      // Skip entries that are comment-only
+      const realKeys = Object.keys(raw).filter((k) => k !== "_comment");
+      if (!realKeys.length) continue;
+
+      // Resolve IDs from ref fields
+      const clinician_id = raw._clinicianEmail
+        ? (clinicianEmailMap.get(raw._clinicianEmail.toLowerCase()) ?? null)
+        : null;
+
+      const practice_id = raw._practiceOdsCode
+        ? (practiceOdsMap.get(raw._practiceOdsCode) ?? null)
+        : null;
+
+      if (!practice_id) {
+        log.warn(`Shifts: skipping ${raw.date} — practice ODS "${raw._practiceOdsCode}" not found`);
+        shiftsSkipped++;
+        continue;
+      }
+
+      // Duplicate check: same date + practice + status + start_time
+      const { data: existing, error: checkErr } = await supabase
+        .from("shifts")
+        .select("id")
+        .eq("date", raw.date)
+        .eq("practice_id", practice_id)
+        .eq("status", raw.status)
+        .eq("start_time", raw.start_time)
+        .maybeSingle();
+
+      if (checkErr) {
+        log.warn(`Shifts: duplicate check failed for ${raw.date} — ${checkErr.message}`);
+      }
+
+      if (existing) {
+        log.info(`Shift already exists: ${raw.date} | ${raw.status} | ${raw._practiceOdsCode} — skipped`);
+        shiftsSkipped++;
+        continue;
+      }
+
+      // Strip ref-only fields, keep only DB columns
+      const { _clinicianEmail, _practiceOdsCode, _comment, ...shiftFields } = raw;
+
+      const shiftRecord = {
+        id: uuidv4(),
+        ...shiftFields,
+        clinician_id,
+        practice_id,
+        created_by: admin.id,
+      };
+
+      const { error: insertErr } = await supabase.from("shifts").insert(shiftRecord);
+
+      if (insertErr) {
+        log.error(`Shift insert failed: ${raw.date} | ${raw.status} | ${raw._practiceOdsCode} — ${insertErr.message}`);
+        shiftsFailed++;
+      } else {
+        const who = raw._clinicianEmail
+          ? raw._clinicianEmail.split("@")[0]
+          : "GAP (unassigned)";
+        log.ok(`Shift: ${raw.date} | ${(raw.day_of_week || "").padEnd(3)} | ${raw.status.padEnd(14)} | ${raw._practiceOdsCode} | ${who}`);
+        shiftsInserted++;
+      }
+    }
+
+    log.ok(`Shifts seeded: ${shiftsInserted} inserted, ${shiftsSkipped} skipped, ${shiftsFailed} failed`);
+
+    /* ═══════════════════════════════════════════════════════
+       END MODULE 5
     ═══════════════════════════════════════════════════════ */
 
     log.ok("\nSeed complete!");
@@ -591,7 +701,8 @@ export async function runSeed() {
       `Clinician Compliance Docs: ${CLINICIAN_COMPLIANCE_SEED.length} | ` +
       `Leave Entries: ${LEAVE_SEED.length} | ` +
       `Supervision Logs: ${SUPERVISION_SEED.length} | ` +
-      `Client History: ${CLIENT_HISTORY_SEED.length}`
+      `Client History: ${CLIENT_HISTORY_SEED.length} | ` +
+      `Shifts: ${shiftsInserted} inserted`
     );
     log.info(`Mode: ${FRESH_SEED ? "DESTRUCTIVE (--fresh)" : "SAFE (no deletions)"}`);
   } finally {

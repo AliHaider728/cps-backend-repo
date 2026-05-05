@@ -12,6 +12,7 @@ import clientRoutes from "./routes/clientRoutes.js";
 import complianceDocRoutes from "./routes/complianceDocRoutes.js";
 import clinicianRoutes from "./routes/clinicianRoutes.js";
 import restrictedClinicianRoutes from "./routes/restrictedClinicianRoutes.js";    
+import rotaRoutes from "./routes/rotaRoutes.js";
 
 dotenv.config();
 
@@ -127,6 +128,7 @@ app.use("/api/clients", clientRoutes);
 app.use("/api/compliance", complianceDocRoutes);
 app.use("/api/clinicians", clinicianRoutes);
 app.use("/api/restricted-clinicians", restrictedClinicianRoutes);
+app.use("/api/rota", rotaRoutes);
 
 /*   HEALTH CHECK   */
 app.get(
