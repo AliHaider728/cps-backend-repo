@@ -20,8 +20,8 @@
     "_practiceOdsCode": "P84001",
     "client_xero_code": "PEN1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "date": "2026-05-05",
@@ -42,8 +42,8 @@
     "_practiceOdsCode": "P82001",
     "client_xero_code": "FIS1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 120
+    "hourly_rate": 30,
+    "total_value": 120
   },
   {
     "date": "2026-05-05",
@@ -64,8 +64,8 @@
     "_practiceOdsCode": "P83001",
     "client_xero_code": "SPE1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "date": "2026-05-06",
@@ -86,8 +86,8 @@
     "_practiceOdsCode": "P84001",
     "client_xero_code": "PEN1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "date": "2026-05-06",
@@ -108,8 +108,8 @@
     "_practiceOdsCode": "P82001",
     "client_xero_code": "FIS1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 120
+    "hourly_rate": 30,
+    "total_value": 120
   },
   {
     "date": "2026-05-06",
@@ -125,8 +125,27 @@
     "_practiceOdsCode": "P83001",
     "client_xero_code": "SPE1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 0
+    "hourly_rate": 30,
+    "total_value": 0
+  },
+  {
+    "_comment": "--- URGENT GAP (within 48hrs of today for testing) ---",
+    "date": "2026-05-06",
+    "day_of_week": "Tue",
+    "start_time": "18:30",
+    "end_time": "20:30",
+    "hours": 2,
+    "status": "gap",
+    "clinical_system": "EMIS",
+    "is_cover": false,
+    "hours_to_cover": 2,
+    "hours_covered": 0,
+    "client_informed": false,
+    "source": "auto_generated",
+    "_clinicianEmail": null,
+    "_practiceOdsCode": "P84001",
+    "client_xero_code": "PEN1",
+    "service_code": "EAX"
   },
   {
     "date": "2026-05-07",
@@ -147,8 +166,8 @@
     "_practiceOdsCode": "P84002",
     "client_xero_code": "WEA1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "date": "2026-05-07",
@@ -164,8 +183,8 @@
     "_practiceOdsCode": "P82001",
     "client_xero_code": "FIS1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 0
+    "hourly_rate": 30,
+    "total_value": 0
   },
   {
     "date": "2026-05-07",
@@ -181,10 +200,11 @@
     "_practiceOdsCode": "P83001",
     "client_xero_code": "SPE1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 0
+    "hourly_rate": 30,
+    "total_value": 0
   },
   {
+    "_comment": "--- COVER: Filling sick leave gap ---",
     "date": "2026-05-07",
     "day_of_week": "Wed",
     "start_time": "18:30",
@@ -207,8 +227,8 @@
     "_clinicianEmail": "clinician@coreprescribing.co.uk",
     "_practiceOdsCode": "P82001",
     "client_xero_code": "FIS1",
-    "rate": 30,
-    "total": 60
+    "hourly_rate": 30,
+    "total_value": 60
   },
   {
     "date": "2026-05-08",
@@ -227,8 +247,8 @@
     "_practiceOdsCode": "P84001",
     "client_xero_code": "PEN1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "date": "2026-05-08",
@@ -244,8 +264,8 @@
     "_practiceOdsCode": "P82001",
     "client_xero_code": "FIS1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 0
+    "hourly_rate": 30,
+    "total_value": 0
   },
   {
     "date": "2026-05-08",
@@ -264,8 +284,8 @@
     "_practiceOdsCode": "P83001",
     "client_xero_code": "SPE1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "date": "2026-05-09",
@@ -284,8 +304,8 @@
     "_practiceOdsCode": "P84002",
     "client_xero_code": "WEA1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "date": "2026-05-09",
@@ -304,8 +324,8 @@
     "_practiceOdsCode": "P82002",
     "client_xero_code": "LAR1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 120
+    "hourly_rate": 30,
+    "total_value": 120
   },
   {
     "date": "2026-05-09",
@@ -324,8 +344,8 @@
     "_practiceOdsCode": "P83001",
     "client_xero_code": "SPE1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "_comment": "--- SATURDAY ENHANCED ACCESS ---",
@@ -351,8 +371,8 @@
     "_clinicianEmail": "clinician@coreprescribing.co.uk",
     "_practiceOdsCode": "P82001",
     "client_xero_code": "FIS1",
-    "rate": 30,
-    "total": 150
+    "hourly_rate": 30,
+    "total_value": 150
   },
   {
     "_comment": "--- WEEK 2: May 12-16, 2026 ---",
@@ -373,8 +393,8 @@
     "_practiceOdsCode": "P84001",
     "client_xero_code": "PEN1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "date": "2026-05-12",
@@ -393,8 +413,8 @@
     "_practiceOdsCode": "P82001",
     "client_xero_code": "FIS1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 120
+    "hourly_rate": 30,
+    "total_value": 120
   },
   {
     "date": "2026-05-12",
@@ -413,11 +433,11 @@
     "_practiceOdsCode": "P83001",
     "client_xero_code": "SPE1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
-    "_comment": "--- GAP: No clinician assigned ---",
+    "_comment": "--- GAP: No clinician assigned (Weaste surgery) ---",
     "date": "2026-05-13",
     "day_of_week": "Tue",
     "start_time": "09:00",
@@ -452,8 +472,8 @@
     "_practiceOdsCode": "P82001",
     "client_xero_code": "FIS1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 120
+    "hourly_rate": 30,
+    "total_value": 120
   },
   {
     "date": "2026-05-13",
@@ -472,8 +492,8 @@
     "_practiceOdsCode": "P83001",
     "client_xero_code": "SPE1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "date": "2026-05-14",
@@ -492,8 +512,8 @@
     "_practiceOdsCode": "P84001",
     "client_xero_code": "PEN1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "date": "2026-05-14",
@@ -509,8 +529,8 @@
     "_practiceOdsCode": "P83001",
     "client_xero_code": "SPE1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 0
+    "hourly_rate": 30,
+    "total_value": 0
   },
   {
     "date": "2026-05-15",
@@ -529,8 +549,8 @@
     "_practiceOdsCode": "P84002",
     "client_xero_code": "WEA1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "date": "2026-05-15",
@@ -549,8 +569,8 @@
     "_practiceOdsCode": "P82002",
     "client_xero_code": "LAR1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 120
+    "hourly_rate": 30,
+    "total_value": 120
   },
   {
     "date": "2026-05-15",
@@ -569,8 +589,8 @@
     "_practiceOdsCode": "P83001",
     "client_xero_code": "SPE1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "date": "2026-05-16",
@@ -589,8 +609,8 @@
     "_practiceOdsCode": "P84001",
     "client_xero_code": "PEN1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "date": "2026-05-16",
@@ -609,8 +629,8 @@
     "_practiceOdsCode": "P82001",
     "client_xero_code": "FIS1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 120
+    "hourly_rate": 30,
+    "total_value": 120
   },
   {
     "date": "2026-05-16",
@@ -626,8 +646,8 @@
     "_practiceOdsCode": "P83001",
     "client_xero_code": "SPE1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 0
+    "hourly_rate": 30,
+    "total_value": 0
   },
   {
     "_comment": "--- WEEK 3: May 19-23 ---",
@@ -648,8 +668,8 @@
     "_practiceOdsCode": "P84001",
     "client_xero_code": "PEN1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "date": "2026-05-19",
@@ -668,8 +688,8 @@
     "_practiceOdsCode": "P82001",
     "client_xero_code": "FIS1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 120
+    "hourly_rate": 30,
+    "total_value": 120
   },
   {
     "date": "2026-05-19",
@@ -688,30 +708,11 @@
     "_practiceOdsCode": "P83001",
     "client_xero_code": "SPE1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
-    "_comment": "--- URGENT GAP (within 48hrs of today for testing) ---",
-    "date": "2026-05-06",
-    "day_of_week": "Tue",
-    "start_time": "18:30",
-    "end_time": "20:30",
-    "hours": 2,
-    "status": "gap",
-    "clinical_system": "EMIS",
-    "is_cover": false,
-    "hours_to_cover": 2,
-    "hours_covered": 0,
-    "client_informed": false,
-    "source": "auto_generated",
-    "_clinicianEmail": null,
-    "_practiceOdsCode": "P84001",
-    "client_xero_code": "PEN1",
-    "service_code": "EAX"
-  },
-  {
-    "_comment": "--- COVER FILLING ABOVE GAP ---",
+    "_comment": "--- COVER FILLING A GAP (May 20 - gap then cover) ---",
     "date": "2026-05-20",
     "day_of_week": "Tue",
     "start_time": "09:00",
@@ -735,8 +736,8 @@
     "_clinicianEmail": "rania.aziz@coreprescribing.co.uk",
     "_practiceOdsCode": "P84001",
     "client_xero_code": "PEN1",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "date": "2026-05-21",
@@ -755,8 +756,8 @@
     "_practiceOdsCode": "P84002",
     "client_xero_code": "WEA1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
   },
   {
     "date": "2026-05-21",
@@ -775,8 +776,8 @@
     "_practiceOdsCode": "P82002",
     "client_xero_code": "LAR1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 120
+    "hourly_rate": 30,
+    "total_value": 120
   },
   {
     "date": "2026-05-21",
@@ -795,7 +796,74 @@
     "_practiceOdsCode": "P83001",
     "client_xero_code": "SPE1",
     "service_code": "GPX",
-    "rate": 30,
-    "total": 240
+    "hourly_rate": 30,
+    "total_value": 240
+  },
+
+  {
+    "_comment": "--- NEW: Cancelled shift — shows cancelled state in UI ---",
+    "date": "2026-05-22",
+    "day_of_week": "Thu",
+    "start_time": "09:00",
+    "end_time": "17:00",
+    "hours": 8,
+    "status": "cancelled",
+    "clinical_system": "EMIS",
+    "is_cover": false,
+    "confirmation_received": false,
+    "clinician_notified": true,
+    "compliance_checked": true,
+    "workstreams_notes": "Practice cancelled session - bank holiday conflict",
+    "source": "manual",
+    "_clinicianEmail": "clinician@coreprescribing.co.uk",
+    "_practiceOdsCode": "P84001",
+    "client_xero_code": "PEN1",
+    "service_code": "GPX",
+    "hourly_rate": 30,
+    "total_value": 0
+  },
+
+  {
+    "_comment": "--- NEW: GAP (future, >48hrs away) — shows YELLOW flag on dashboard ---",
+    "date": "2026-05-26",
+    "day_of_week": "Tue",
+    "start_time": "09:00",
+    "end_time": "17:00",
+    "hours": 8,
+    "status": "gap",
+    "clinical_system": "SystmOne",
+    "is_cover": false,
+    "hours_to_cover": 8,
+    "hours_covered": 0,
+    "client_informed": false,
+    "source": "auto_generated",
+    "_clinicianEmail": null,
+    "_practiceOdsCode": "P82001",
+    "client_xero_code": "FIS1",
+    "service_code": "GPX"
+  },
+
+  {
+    "_comment": "--- NEW: Compliance-override shift — shows override badge in UI ---",
+    "date": "2026-05-23",
+    "day_of_week": "Fri",
+    "start_time": "09:00",
+    "end_time": "13:00",
+    "hours": 4,
+    "status": "working",
+    "clinical_system": "SystmOne",
+    "is_cover": false,
+    "confirmation_received": true,
+    "clinician_notified": true,
+    "compliance_checked": true,
+    "compliance_override_reason": "Temporary override approved by Ops — DBS renewal in progress",
+    "workstreams_notes": "Clinician has submitted DBS renewal — overriding for 2 weeks",
+    "source": "manual",
+    "_clinicianEmail": "clinician2@coreprescribing.co.uk",
+    "_practiceOdsCode": "P83001",
+    "client_xero_code": "SPE1",
+    "service_code": "GPX",
+    "hourly_rate": 30,
+    "total_value": 120
   }
 ]

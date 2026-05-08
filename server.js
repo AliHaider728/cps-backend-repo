@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
+import { fileURLToPath } from "url";
 
 import { initDB, query } from "./config/db.js";
 import { asyncHandler } from "./lib/asyncHandler.js";
@@ -13,6 +14,7 @@ import complianceDocRoutes from "./routes/complianceDocRoutes.js";
 import clinicianRoutes from "./routes/clinicianRoutes.js";
 import restrictedClinicianRoutes from "./routes/restrictedClinicianRoutes.js";    
 import rotaRoutes from "./routes/rotaRoutes.js";
+import { startGapDetectionScheduler } from "./services/rotaGapService.js";
 
 dotenv.config();
 
@@ -44,7 +46,9 @@ log.info("NODE_ENV:", process.env.NODE_ENV);
 const exactOrigins = new Set(
   [
     "http://localhost:5173",
+    "http://127.0.0.1:5173",
     "http://localhost:3000",
+    "http://127.0.0.1:3000",
     "https://cps-tau-five.vercel.app",
     ...(process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",") : []),
   ]
@@ -180,6 +184,11 @@ async function startServer() {
     await initDB();
     log.ok("DB connected");
 
+    if (process.env.NODE_ENV !== "test") {
+      startGapDetectionScheduler();
+      log.ok("Rota gap detection scheduler started");
+    }
+
     app.listen(PORT, () => {
       log.ok(`Server running on http://localhost:${PORT}`);
     });
@@ -189,7 +198,9 @@ async function startServer() {
   }
 }
 
-if (process.env.NODE_ENV !== "production") {
+const isMain = fileURLToPath(import.meta.url) === process.argv[1];
+
+if (isMain && process.env.NODE_ENV !== "test") {
   startServer();
 }
 
