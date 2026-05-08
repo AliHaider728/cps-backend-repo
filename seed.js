@@ -11,6 +11,7 @@
  *   - Module 3: Clinician Management seed data added
  *   - Module 5: Rota & Shifts seed data added (native SQL table via Supabase)
  *   - Refactored: all static data moved to seed-data/ JSON files
+ *   - FIX: Strip client_xero_code + all non-schema fields before shifts insert
  *
  * Usage:
  *   node seed.js
@@ -57,6 +58,41 @@ if (FRESH_SEED) {
   log.warn("\n[--fresh] Destructive mode enabled");
   log.warn("Existing seed data will be deleted before re-seeding.\n");
 }
+
+// ─────────────────────────────────────────────────────────────
+// SHIFTS: Columns that actually exist in the Supabase `shifts`
+// table. Any field NOT in this list will be silently dropped
+// before the insert, preventing "column not found" errors.
+// ─────────────────────────────────────────────────────────────
+const SHIFTS_ALLOWED_COLUMNS = new Set([
+  "id",
+  "date",
+  "day_of_week",
+  "start_time",
+  "end_time",
+  "hours",
+  "status",
+  "clinical_system",
+  "is_cover",
+  "project_code",
+  "service_code",
+  "cover_reason",
+  "hours_to_cover",
+  "hours_covered",
+  "confirmation_received",
+  "access_request_needed",
+  "client_informed",
+  "clinician_notified",
+  "compliance_checked",
+  "compliance_override_reason",
+  "workstreams_notes",
+  "source",
+  "hourly_rate",
+  "total_value",
+  "clinician_id",
+  "practice_id",
+  "created_by",
+]);
 
 /*   DB HELPERS   */
 function mapRecordRow(row) {
@@ -595,18 +631,26 @@ export async function runSeed() {
 
     const supabase = getSupabaseClient();
 
-    // Build email → clinician UUID map from app_records clinicians
-    const clinicianEmailMap = new Map(
-      Object.values(clinicianMap)
-        .filter((c) => c?.email)
-        .map((c) => [c.email.toLowerCase(), c.id])
-    );
+    // ── Build email → clinician UUID map ──────────────────────────────────
+    // Priority: Clinician model records (have real emails from clinicians.json)
+    // Fallback: seeded users with clinician role
+    const clinicianEmailMap = new Map();
 
-    // Also add seeded users with clinician role (fallback lookup)
+    // First pass: Clinician model records (Dr. Ali Haider, Sarah Thompson, Dr. Rania Aziz)
+    for (const c of Object.values(clinicianMap)) {
+      if (c?.email) clinicianEmailMap.set(c.email.toLowerCase(), c.id);
+    }
+
+    // Second pass: seeded user accounts (clinician@, clinician2@)
     for (const u of seededUsers.filter((u) => u.role === "clinician")) {
       if (u.email && !clinicianEmailMap.has(u.email.toLowerCase())) {
         clinicianEmailMap.set(u.email.toLowerCase(), u.id);
       }
+    }
+
+    log.info(`Clinician email map built: ${clinicianEmailMap.size} entries`);
+    for (const [email, id] of clinicianEmailMap.entries()) {
+      log.info(`  ${email} → ${id}`);
     }
 
     // Build ODS code → practice UUID map from app_records practices
@@ -616,19 +660,29 @@ export async function runSeed() {
         .map((p) => [p.odsCode, p.id])
     );
 
+    log.info(`Practice ODS map built: ${practiceOdsMap.size} entries`);
+    for (const [ods, id] of practiceOdsMap.entries()) {
+      log.info(`  ${ods} → ${id}`);
+    }
+
     let shiftsInserted = 0;
     let shiftsSkipped  = 0;
     let shiftsFailed   = 0;
 
     for (const raw of SHIFTS_SEED_RAW) {
-      // Skip entries that are comment-only
-      const realKeys = Object.keys(raw).filter((k) => k !== "_comment");
+      // Skip entries that are comment-only (only have _comment key)
+      const realKeys = Object.keys(raw).filter((k) => !k.startsWith("_"));
       if (!realKeys.length) continue;
 
       // Resolve IDs from ref fields
       const clinician_id = raw._clinicianEmail
         ? (clinicianEmailMap.get(raw._clinicianEmail.toLowerCase()) ?? null)
         : null;
+
+      // Warn if email was provided but not resolved
+      if (raw._clinicianEmail && !clinician_id) {
+        log.warn(`Shifts: clinician email "${raw._clinicianEmail}" not found in map — shift will be inserted with null clinician_id`);
+      }
 
       const practice_id = raw._practiceOdsCode
         ? (practiceOdsMap.get(raw._practiceOdsCode) ?? null)
@@ -660,16 +714,19 @@ export async function runSeed() {
         continue;
       }
 
-      // Strip ref-only fields, keep only DB columns
-      const { _clinicianEmail, _practiceOdsCode, _comment, ...shiftFields } = raw;
+      // ── Strip ALL non-DB fields before insert ─────────────────────────
+      // Remove underscore ref fields (_clinicianEmail, _practiceOdsCode, _comment)
+      // AND any field not in SHIFTS_ALLOWED_COLUMNS (e.g. client_xero_code)
+      const shiftRecord = { id: uuidv4(), clinician_id, practice_id, created_by: admin.id };
 
-      const shiftRecord = {
-        id: uuidv4(),
-        ...shiftFields,
-        clinician_id,
-        practice_id,
-        created_by: admin.id,
-      };
+      for (const [key, value] of Object.entries(raw)) {
+        if (key.startsWith("_")) continue;           // ref-only field
+        if (!SHIFTS_ALLOWED_COLUMNS.has(key)) {      // not in schema
+          log.info(`  Dropping non-schema field: ${key}`);
+          continue;
+        }
+        shiftRecord[key] = value;
+      }
 
       const { error: insertErr } = await supabase.from("shifts").insert(shiftRecord);
 

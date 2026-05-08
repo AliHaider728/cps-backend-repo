@@ -5,21 +5,7 @@
  * ✅ Business Rules enforced
  * ✅ Proper model imports
  * ✅ Complete error handling
- *
- * Endpoints:
- *   GET    /api/rota                      → getRotaGrid (month/year calendar)
- *   GET    /api/rota/:id/diary            → getClinicianRota (personal diary)
- *   GET    /api/rota/:id                  → getRotaById (single shift)
- *   POST   /api/rota/generate             → generateMonthlyRota
- *   POST   /api/rota/shift                → createShift
- *   PATCH  /api/rota/shift/:id            → updateShift
- *   DELETE /api/rota/shift/:id            → deleteShift
- *   GET    /api/rota/gaps                 → getGapReport
- *   POST   /api/rota/cover                → assignCover
- *   GET    /api/rota/cover-requests       → getCoverRequests
- *   POST   /api/rota/send/:clientId       → sendRotaToClient
- *   GET    /api/rota/checks/restricted    → checkRestrictedClinicianEntry
- *   GET    /api/rota/checks/compliance    → checkMandatoryComplianceEntry
+ * ✅ FIX: getRotaGrid now resolves clinician + practice names from UUIDs
  */
 
 import nodemailer from "nodemailer";
@@ -94,16 +80,6 @@ const REQUIRED_COMPLIANCE = [
   { label: "Mandatory Training", match: /mandatory\s*training/i },
 ];
 
-/**
- * ─── BUSINESS RULE BR-R1 ───────────────────────────────────────────────
- * Leave balance exceeded → HARD BLOCK
- * Enforced at leave submission time, not rota creation.
- */
-
-/**
- * ─── BUSINESS RULE BR-R2 ───────────────────────────────────────────────
- * Restricted clinician → cannot book at flagged client
- */
 export async function checkRestrictedClinician(clinicianId, practiceId) {
   const clinician = toMongoId(clinicianId);
   const practice = toPracticeId(practiceId);
@@ -127,10 +103,6 @@ export async function checkRestrictedClinician(clinicianId, practiceId) {
   return { blocked: false, reason: "" };
 }
 
-/**
- * ─── BUSINESS RULE BR-R3 ───────────────────────────────────────────────
- * Compliance checklist incomplete → cannot book
- */
 export async function checkMandatoryCompliance(clinicianId) {
   const id = toMongoId(clinicianId);
   if (!id) {
@@ -155,11 +127,6 @@ export async function checkMandatoryCompliance(clinicianId) {
   return { passed: missing.length === 0, missing };
 }
 
-/**
- * ─── BUSINESS RULE BR-R4 ───────────────────────────────────────────────
- * Cover entry data format validation
- * project_code = COV1, service_code = PCN|EA|GPX|EAX
- */
 export function validateCoverEntry(entry = {}) {
   const isCover = entry.is_cover === true || entry.is_cover === "true";
 
@@ -232,8 +199,8 @@ function buildRotaEmailHTML(rotaData, month, year) {
       <td style="padding:8px;border:1px solid #e5e7eb;">${String(s.date || "").slice(0, 10)}</td>
       <td style="padding:8px;border:1px solid #e5e7eb;">${s.start_time || ""} - ${s.end_time || ""}</td>
       <td style="padding:8px;border:1px solid #e5e7eb;">${s.status || ""}</td>
-      <td style="padding:8px;border:1px solid #e5e7eb;">${s.practice_id || ""}</td>
-      <td style="padding:8px;border:1px solid #e5e7eb;">${s.clinician_id || ""}</td>
+      <td style="padding:8px;border:1px solid #e5e7eb;">${s.practice_name || s.practice_id || ""}</td>
+      <td style="padding:8px;border:1px solid #e5e7eb;">${s.clinician_name || s.clinician_id || ""}</td>
     </tr>
   `)
     .join("\n");
@@ -280,43 +247,162 @@ const normalizeTime = (t) => {
   return s.length === 5 ? `${s}:00` : s;
 };
 
+/* ─────────────────────────────────────────────────────────────────────────────
+   HELPER: Load all clinicians + practices from app_records (PostgreSQL)
+   so we can resolve UUID → name for shifts display
+   ───────────────────────────────────────────────────────────────────────────── */
+async function buildLookupMaps() {
+  // Clinicians: id (UUID from app_records) → { fullName, email, clinicianType, contractType }
+  const clinicianRows = await query(
+    `SELECT id, data FROM app_records WHERE model = 'Clinician'`
+  );
+  const clinicianMap = new Map();
+  for (const row of clinicianRows.rows) {
+    const d = row.data || {};
+    clinicianMap.set(String(row.id), {
+      _id:           String(row.id),
+      id:            String(row.id),
+      fullName:      d.fullName || d.name || "Unknown Clinician",
+      email:         d.email || "",
+      clinicianType: d.clinicianType || "",
+      contractType:  d.contractType || "",
+    });
+  }
+
+  // Also load user accounts with clinician role → same UUID resolution
+  const userRows = await query(
+    `SELECT id, data FROM app_records WHERE model = 'user' AND data->>'role' = 'clinician'`
+  );
+  for (const row of userRows.rows) {
+    if (!clinicianMap.has(String(row.id))) {
+      const d = row.data || {};
+      clinicianMap.set(String(row.id), {
+        _id:      String(row.id),
+        id:       String(row.id),
+        fullName: d.name || d.fullName || d.email || "Clinician",
+        email:    d.email || "",
+      });
+    }
+  }
+
+  // Practices: id (UUID from app_records) → { name, odsCode }
+  const practiceRows = await query(
+    `SELECT id, data FROM app_records WHERE model = 'practice'`
+  );
+  const practiceMap = new Map();
+  for (const row of practiceRows.rows) {
+    const d = row.data || {};
+    practiceMap.set(String(row.id), {
+      _id:     String(row.id),
+      id:      String(row.id),
+      name:    d.name || "Unknown Practice",
+      odsCode: d.odsCode || "",
+    });
+  }
+
+  return { clinicianMap, practiceMap };
+}
+
 /* ─── GET /api/rota?month=&year= ────────────────────────────────────────── */
 export const getRotaGrid = async (req, res, next) => {
   try {
     const range = monthRange(req.query.month, req.query.year);
     if (!range) return fail(res, 400, "month and year are required");
 
-    const clinicians = await Clinician.find({ isActive: true }).lean();
-    clinicians.sort((a, b) =>
-      String(a.fullName || "").localeCompare(String(b.fullName || ""))
-    );
+    // ── Load lookup maps for name resolution ──────────────────────────────
+    const { clinicianMap, practiceMap } = await buildLookupMaps();
 
+    // ── Fetch all shifts for the month from Supabase ──────────────────────
     const shifts = await Shift.find({
       dateRange: { start: range.startDate, end: range.endDate },
     });
 
+    // ── Enrich each shift with resolved names ─────────────────────────────
+    const enrichedShifts = shifts.map((s) => {
+      const raw = typeof s.toObject === "function" ? s.toObject() : { ...s };
+
+      // Resolve clinician
+      const cId = raw.clinician_id ? String(raw.clinician_id) : null;
+      const clinicianRecord = cId ? (clinicianMap.get(cId) ?? null) : null;
+      raw.clinician_name = clinicianRecord?.fullName || null;
+
+      // Resolve practice
+      const pId = raw.practice_id ? String(raw.practice_id) : null;
+      const practiceRecord = pId ? (practiceMap.get(pId) ?? null) : null;
+      raw.practice_name = practiceRecord?.name || null;
+
+      return raw;
+    });
+
+    // ── Build per-clinician grid ───────────────────────────────────────────
+    // All known clinicians from app_records (active ones)
+    const allClinicians = Array.from(clinicianMap.values()).sort((a, b) =>
+      String(a.fullName).localeCompare(String(b.fullName))
+    );
+
+    // byClinician: clinicianId → { clinician, shifts: { dateISO: shiftObj } }
     const byClinician = new Map();
-    for (const c of clinicians) {
-      byClinician.set(String(c._id || c.id), { clinician: c, shifts: {} });
+
+    // Pre-populate with all known clinicians
+    for (const c of allClinicians) {
+      byClinician.set(c._id, { clinician: c, shifts: {} });
     }
 
-    for (const s of shifts) {
-      const clinicianId = s.clinician_id ? String(s.clinician_id) : null;
-      if (!clinicianId) continue;
-      if (!byClinician.has(clinicianId)) {
-        byClinician.set(clinicianId, { clinician: { _id: clinicianId }, shifts: {} });
-      }
+    // Also add a special "gap" row for unassigned shifts
+    // We'll collect gap shifts separately and add them under each clinician row
+    // that has a gap on that day, or create a virtual "Unassigned" row
+
+    for (const s of enrichedShifts) {
+      const cId = s.clinician_id ? String(s.clinician_id) : null;
       const dayKey = String(s.date).slice(0, 10);
-      const existing = byClinician.get(clinicianId).shifts[dayKey];
+
+      if (!cId || s.status === "gap") {
+        // Gap shift — attach to a virtual "gap" clinician row
+        const gapKey = `gap_${s.practice_id || "unknown"}`;
+        if (!byClinician.has(gapKey)) {
+          const practiceName = s.practice_name || s.practice_id || "Unknown Practice";
+          byClinician.set(gapKey, {
+            clinician: {
+              _id:      gapKey,
+              id:       gapKey,
+              fullName: `⚠ Gap — ${practiceName}`,
+              isGapRow: true,
+            },
+            shifts: {},
+          });
+        }
+        const existing = byClinician.get(gapKey).shifts[dayKey];
+        if (!existing) byClinician.get(gapKey).shifts[dayKey] = s;
+        continue;
+      }
+
+      // Normal shift — ensure clinician row exists
+      if (!byClinician.has(cId)) {
+        const c = clinicianMap.get(cId) ?? {
+          _id:      cId,
+          id:       cId,
+          fullName: s.clinician_name || cId,
+        };
+        byClinician.set(cId, { clinician: c, shifts: {} });
+      }
+
+      const existing = byClinician.get(cId).shifts[dayKey];
+      // Prefer "working" over other statuses if multiple shifts same day
       if (!existing || s.status === "working") {
-        byClinician.get(clinicianId).shifts[dayKey] = s;
+        byClinician.get(cId).shifts[dayKey] = s;
       }
     }
+
+    // Remove clinician rows that have zero shifts this month
+    // (keep only rows that have at least one shift OR are gap rows)
+    const cliniciansWithShifts = Array.from(byClinician.values()).filter(
+      (row) => Object.keys(row.shifts).length > 0
+    );
 
     return ok(res, {
       month: parseIntStrict(req.query.month),
-      year: parseIntStrict(req.query.year),
-      clinicians: Array.from(byClinician.values()),
+      year:  parseIntStrict(req.query.year),
+      clinicians:  cliniciansWithShifts,
       totalShifts: shifts.length,
     });
   } catch (err) {
@@ -344,7 +430,7 @@ export const getClinicianRota = async (req, res, next) => {
     return ok(res, {
       clinician,
       month: parseIntStrict(req.query.month),
-      year: parseIntStrict(req.query.year),
+      year:  parseIntStrict(req.query.year),
       shifts,
     });
   } catch (err) {
@@ -356,7 +442,7 @@ export const getClinicianRota = async (req, res, next) => {
 export const generateMonthlyRota = async (req, res, next) => {
   try {
     const month = parseIntStrict(req.body?.month);
-    const year = parseIntStrict(req.body?.year);
+    const year  = parseIntStrict(req.body?.year);
     const range = monthRange(month, year);
     if (!range) return fail(res, 400, "month and year are required");
 
@@ -380,80 +466,65 @@ export const createShift = async (req, res, next) => {
 
     const payload = {
       clinician_id: toUUID(req.body?.clinician_id) || toMongoId(req.body?.clinician_id) || null,
-      practice_id: practiceId,
-      client_id: toUUID(req.body?.client_id) || null,
-      date: req.body?.date,
-      day_of_week: req.body?.day_of_week || null,
-      start_time: req.body?.start_time || null,
-      end_time: req.body?.end_time || null,
+      practice_id:  practiceId,
+      client_id:    toUUID(req.body?.client_id) || null,
+      date:         req.body?.date,
+      day_of_week:  req.body?.day_of_week || null,
+      start_time:   req.body?.start_time || null,
+      end_time:     req.body?.end_time || null,
       hours:
         req.body?.hours != null && req.body?.hours !== ""
           ? Number(req.body?.hours)
           : computeHours(req.body?.start_time, req.body?.end_time),
-      clinical_system: req.body?.clinical_system || null,
-      status: String(req.body?.status || "working").toLowerCase(),
-      is_cover: req.body?.is_cover === true || req.body?.is_cover === "true",
-      project_code: req.body?.project_code || null,
-      service_code: req.body?.service_code
-        ? String(req.body?.service_code).toUpperCase()
-        : null,
-      original_gap_id: toUUID(req.body?.original_gap_id) || null,
-      cover_reason: req.body?.cover_reason || null,
-      confirmation_received:
-        req.body?.confirmation_received === true ||
-        req.body?.confirmation_received === "true",
-      access_request_needed:
-        req.body?.access_request_needed === true ||
-        req.body?.access_request_needed === "true",
-      client_informed:
-        req.body?.client_informed === true || req.body?.client_informed === "true",
-      workstreams_notes: req.body?.workstreams_notes || null,
-      clinician_notified:
-        req.body?.clinician_notified === true || req.body?.clinician_notified === "true",
+      clinical_system:     req.body?.clinical_system || null,
+      status:              String(req.body?.status || "working").toLowerCase(),
+      is_cover:            req.body?.is_cover === true || req.body?.is_cover === "true",
+      project_code:        req.body?.project_code || null,
+      service_code:        req.body?.service_code ? String(req.body?.service_code).toUpperCase() : null,
+      original_gap_id:     toUUID(req.body?.original_gap_id) || null,
+      cover_reason:        req.body?.cover_reason || null,
+      confirmation_received: req.body?.confirmation_received === true || req.body?.confirmation_received === "true",
+      access_request_needed: req.body?.access_request_needed === true || req.body?.access_request_needed === "true",
+      client_informed:     req.body?.client_informed === true || req.body?.client_informed === "true",
+      workstreams_notes:   req.body?.workstreams_notes || null,
+      clinician_notified:  req.body?.clinician_notified === true || req.body?.clinician_notified === "true",
       hours_to_cover:
         req.body?.hours_to_cover != null && req.body?.hours_to_cover !== ""
-          ? Number(req.body?.hours_to_cover)
-          : null,
+          ? Number(req.body?.hours_to_cover) : null,
       hours_covered:
         req.body?.hours_covered != null && req.body?.hours_covered !== ""
-          ? Number(req.body?.hours_covered)
-          : null,
-      compliance_checked:
-        req.body?.compliance_checked === true || req.body?.compliance_checked === "true",
-      compliance_override_by: toUUID(req.body?.compliance_override_by) || null,
+          ? Number(req.body?.hours_covered) : null,
+      compliance_checked:         req.body?.compliance_checked === true || req.body?.compliance_checked === "true",
+      compliance_override_by:     toUUID(req.body?.compliance_override_by) || null,
       compliance_override_reason: req.body?.compliance_override_reason || null,
-      source: req.body?.source || "manual",
+      source:         req.body?.source || "manual",
       source_leave_id: toUUID(req.body?.source_leave_id) || null,
-      created_by: toUUID(req.user?._id || req.user?.id) || toMongoId(req.user?._id || req.user?.id) || null,
+      created_by:     toUUID(req.user?._id || req.user?.id) || toMongoId(req.user?._id || req.user?.id) || null,
     };
 
     validateCoverEntry(payload);
 
-    // BR-R2: Check restriction
     if (payload.clinician_id) {
       const restriction = await checkRestrictedClinician(payload.clinician_id, payload.practice_id);
       if (restriction.blocked) {
         await logAudit(req, "ROTA_BOOKING_BLOCKED_RESTRICTED", "Shift", {
           detail: `Blocked: restricted clinician at practice ${payload.practice_id}`,
-          after: { clinicianId: payload.clinician_id, practiceId: payload.practice_id },
+          after:  { clinicianId: payload.clinician_id, practiceId: payload.practice_id },
           status: "blocked",
         });
         return fail(res, 403, restriction.reason);
       }
 
-      // BR-R3: Check compliance
       const compliance = await checkMandatoryCompliance(payload.clinician_id);
       if (!compliance.passed) {
         const canOverride = ["super_admin", "ops_manager"].includes(String(req.user?.role || ""));
         if (!canOverride) {
           await logAudit(req, "ROTA_BOOKING_BLOCKED_COMPLIANCE", "Shift", {
             detail: `Blocked: missing compliance (${compliance.missing.join(", ")})`,
-            after: { clinicianId: payload.clinician_id, missing: compliance.missing },
+            after:  { clinicianId: payload.clinician_id, missing: compliance.missing },
             status: "blocked",
           });
-          return fail(res, 409, "Clinician missing mandatory compliance", {
-            missing: compliance.missing,
-          });
+          return fail(res, 409, "Clinician missing mandatory compliance", { missing: compliance.missing });
         }
       }
       payload.compliance_checked = true;
@@ -463,8 +534,8 @@ export const createShift = async (req, res, next) => {
 
     await logAudit(req, "CREATE_SHIFT", "Shift", {
       resourceId: shift.id,
-      detail: `Created shift (${shift.status}) on ${shift.date}`,
-      after: safeJson(shift),
+      detail:     `Created shift (${shift.status}) on ${shift.date}`,
+      after:      safeJson(shift),
     });
 
     return ok(res, shift, "Shift created", 201);
@@ -488,12 +559,12 @@ export const updateShift = async (req, res, next) => {
         clinician_id: toUUID(req.body?.clinician_id) || toMongoId(req.body?.clinician_id) || null,
       }),
       ...(req.body?.practice_id !== undefined && { practice_id: toPracticeId(req.body?.practice_id) }),
-      ...(req.body?.client_id !== undefined && { client_id: toUUID(req.body?.client_id) || null }),
-      ...(req.body?.date !== undefined && { date: req.body?.date }),
-      ...(req.body?.status !== undefined && { status: String(req.body?.status).toLowerCase() }),
+      ...(req.body?.client_id   !== undefined && { client_id: toUUID(req.body?.client_id) || null }),
+      ...(req.body?.date        !== undefined && { date: req.body?.date }),
+      ...(req.body?.status      !== undefined && { status: String(req.body?.status).toLowerCase() }),
+      ...(req.body?.workstreams_notes !== undefined && { workstreams_notes: req.body?.workstreams_notes }),
     };
 
-    // BR-R2: Check restriction if clinician changed
     if (patch.clinician_id) {
       const restriction = await checkRestrictedClinician(
         patch.clinician_id,
@@ -502,8 +573,8 @@ export const updateShift = async (req, res, next) => {
       if (restriction.blocked) {
         await logAudit(req, "ROTA_UPDATE_BLOCKED_RESTRICTED", "Shift", {
           resourceId: shiftId,
-          detail: `Blocked update: restricted clinician`,
-          status: "blocked",
+          detail:     "Blocked update: restricted clinician",
+          status:     "blocked",
         });
         return fail(res, 403, restriction.reason);
       }
@@ -513,9 +584,9 @@ export const updateShift = async (req, res, next) => {
 
     await logAudit(req, "UPDATE_SHIFT", "Shift", {
       resourceId: shiftId,
-      detail: `Updated shift ${shiftId}`,
-      before: safeJson(before),
-      after: safeJson(updated),
+      detail:     `Updated shift ${shiftId}`,
+      before:     safeJson(before),
+      after:      safeJson(updated),
     });
 
     return ok(res, updated, "Shift updated");
@@ -538,8 +609,8 @@ export const deleteShift = async (req, res, next) => {
 
     await logAudit(req, "DELETE_SHIFT", "Shift", {
       resourceId: shiftId,
-      detail: `Deleted shift ${shiftId}`,
-      before: safeJson(before),
+      detail:     `Deleted shift ${shiftId}`,
+      before:     safeJson(before),
     });
 
     return ok(res, { id: shiftId }, "Shift deleted");
@@ -554,16 +625,25 @@ export const getGapReport = async (req, res, next) => {
     const days = parseIntStrict(req.query.days) ?? 14;
     const gaps = await Shift.findGapsAhead(days);
 
+    // Resolve practice names for gap report
+    const { practiceMap } = await buildLookupMaps();
+
     const gapsWithUrgency = gaps.map((g) => {
-      const gapDate = new Date(`${String(g.date).slice(0, 10)}T00:00:00Z`).getTime();
-      const urgent = gapDate - Date.now() <= 48 * 3600000;
-      return { ...g, urgent };
+      const raw = typeof g.toObject === "function" ? g.toObject() : { ...g };
+      const gapDate = new Date(`${String(raw.date).slice(0, 10)}T00:00:00Z`).getTime();
+      const urgent  = gapDate - Date.now() <= 48 * 3_600_000;
+
+      // Resolve practice name
+      const pId = raw.practice_id ? String(raw.practice_id) : null;
+      raw.practice_name = pId ? (practiceMap.get(pId)?.name ?? raw.practice_id) : raw.practice_id;
+
+      return { ...raw, urgent };
     });
 
     return ok(res, {
       days,
-      gaps: gapsWithUrgency,
-      total: gapsWithUrgency.length,
+      gaps:   gapsWithUrgency,
+      total:  gapsWithUrgency.length,
       urgent: gapsWithUrgency.filter((g) => g.urgent).length,
     });
   } catch (err) {
@@ -574,68 +654,62 @@ export const getGapReport = async (req, res, next) => {
 /* ─── POST /api/rota/cover ──────────────────────────────────────────────── */
 export const assignCover = async (req, res, next) => {
   try {
-    const gapId = toUUID(req.body?.gapId || req.body?.original_gap_id);
+    const gapId      = toUUID(req.body?.gapId || req.body?.original_gap_id);
     const clinicianId = toMongoId(req.body?.clinicianId || req.body?.clinician_id);
 
-    if (!gapId) return fail(res, 400, "gapId is required");
+    if (!gapId)       return fail(res, 400, "gapId is required");
     if (!clinicianId) return fail(res, 400, "clinicianId is required");
 
     const gap = await Shift.findById(gapId);
-    if (!gap) return fail(res, 404, "Gap shift not found");
-    if (gap.status !== "gap") return fail(res, 409, "Shift is not a gap");
+    if (!gap)                  return fail(res, 404, "Gap shift not found");
+    if (gap.status !== "gap")  return fail(res, 409, "Shift is not a gap");
 
-    // BR-R2: Check restriction
     const restriction = await checkRestrictedClinician(clinicianId, gap.practice_id);
     if (restriction.blocked) {
       await logAudit(req, "COVER_ASSIGN_BLOCKED_RESTRICTED", "Shift", {
-        detail: `Blocked cover: restricted clinician`,
+        detail: "Blocked cover: restricted clinician",
         status: "blocked",
       });
       return fail(res, 403, restriction.reason);
     }
 
-    // BR-R3: Check compliance
     const compliance = await checkMandatoryCompliance(clinicianId);
     if (!compliance.passed) {
       const canOverride = ["super_admin", "ops_manager"].includes(String(req.user?.role || ""));
       if (!canOverride) {
-        return fail(res, 409, "Clinician missing mandatory compliance", {
-          missing: compliance.missing,
-        });
+        return fail(res, 409, "Clinician missing mandatory compliance", { missing: compliance.missing });
       }
     }
 
     const coverPayload = {
-      clinician_id: clinicianId,
-      practice_id: gap.practice_id,
-      client_id: gap.client_id || null,
-      date: gap.date,
-      day_of_week: gap.day_of_week,
-      start_time: req.body?.start_time || gap.start_time,
-      end_time: req.body?.end_time || gap.end_time,
+      clinician_id:  clinicianId,
+      practice_id:   gap.practice_id,
+      client_id:     gap.client_id || null,
+      date:          gap.date,
+      day_of_week:   gap.day_of_week,
+      start_time:    req.body?.start_time || gap.start_time,
+      end_time:      req.body?.end_time   || gap.end_time,
       hours:
         req.body?.hours != null && req.body?.hours !== ""
           ? Number(req.body?.hours)
           : gap.hours,
-      status: "cover",
-      is_cover: true,
+      status:      "cover",
+      is_cover:    true,
       project_code: "COV1",
       service_code: "GPX",
-      original_gap_id: gapId,
+      original_gap_id:   gapId,
       compliance_checked: true,
-      source: "manual",
+      source:    "manual",
       created_by: toUUID(req.user?._id || req.user?.id) || null,
     };
 
     const coverShift = await Shift.create(coverPayload);
-
-    // Mark gap as cancelled
     await Shift.findByIdAndUpdate(gapId, { status: "cancelled" });
 
     await logAudit(req, "ASSIGN_COVER", "Shift", {
       resourceId: coverShift.id,
-      detail: `Assigned cover for gap ${gapId}`,
-      after: safeJson({ gapId, coverShiftId: coverShift.id }),
+      detail:     `Assigned cover for gap ${gapId}`,
+      after:      safeJson({ gapId, coverShiftId: coverShift.id }),
     });
 
     return ok(res, { gapId, coverShift }, "Cover assigned", 201);
@@ -648,7 +722,7 @@ export const assignCover = async (req, res, next) => {
 /* ─── GET /api/rota/cover-requests ──────────────────────────────────────── */
 export const getCoverRequests = async (req, res, next) => {
   try {
-    const status = String(req.query.status || "open").toLowerCase();
+    const status      = String(req.query.status || "open").toLowerCase();
     const finalStatus = ["open", "filled", "cancelled"].includes(status) ? status : "open";
 
     const result = await query(
@@ -657,9 +731,9 @@ export const getCoverRequests = async (req, res, next) => {
     );
 
     return ok(res, {
-      status: finalStatus,
+      status:   finalStatus,
       requests: result.rows,
-      total: result.rows.length,
+      total:    result.rows.length,
     });
   } catch (err) {
     next(err);
@@ -669,17 +743,17 @@ export const getCoverRequests = async (req, res, next) => {
 /* ─── POST /api/rota/send/:clientId ────────────────────────────────────── */
 export const sendRotaToClient = async (req, res, next) => {
   try {
-    const clientId = toPracticeId(req.params.clientId);
+    const clientId   = toPracticeId(req.params.clientId);
     if (!clientId) return fail(res, 400, "Invalid clientId");
 
-    const month = parseIntStrict(req.body?.month);
-    const year = parseIntStrict(req.body?.year);
+    const month      = parseIntStrict(req.body?.month);
+    const year       = parseIntStrict(req.body?.year);
     const recipients = Array.isArray(req.body?.recipients)
       ? req.body.recipients.filter(Boolean)
       : [];
     const range = monthRange(month, year);
 
-    if (!range) return fail(res, 400, "month and year are required");
+    if (!range)                  return fail(res, 400, "month and year are required");
     if (recipients.length === 0) return fail(res, 400, "recipients are required");
 
     const shifts = await Shift.find({
@@ -689,38 +763,38 @@ export const sendRotaToClient = async (req, res, next) => {
 
     const html = buildRotaEmailHTML(shifts, month, year);
     await transporter.sendMail({
-      from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
-      to: recipients.join(","),
+      from:    process.env.EMAIL_FROM || process.env.EMAIL_USER,
+      to:      recipients.join(","),
       subject: `CPS Rota ${String(month).padStart(2, "0")}/${year}`,
       html,
     });
 
     const distribution = await RotaDistribution.create({
-      client_id: clientId,
-      client_name: req.body?.client_name || "",
+      client_id:        clientId,
+      client_name:      req.body?.client_name || "",
       month,
       year,
-      sent_by: toUUID(req.user?._id || req.user?.id) || null,
+      sent_by:          toUUID(req.user?._id || req.user?.id) || null,
       recipient_emails: recipients,
     });
 
     await logAudit(req, "SEND_ROTA_TO_CLIENT", "RotaDistribution", {
       resourceId: distribution.id,
-      detail: `Sent rota to client ${clientId} for ${String(month).padStart(2, "0")}/${year}`,
-      after: safeJson(distribution),
+      detail:     `Sent rota to client ${clientId} for ${String(month).padStart(2, "0")}/${year}`,
+      after:      safeJson(distribution),
     });
 
     await ContactHistory.create({
       entityType: "Client",
-      entityId: String(clientId),
-      type: "email",
-      subject: `Rota sent ${String(month).padStart(2, "0")}/${year}`,
-      notes: `Rota distribution sent to ${recipients.join(", ")}`,
-      date: new Date().toISOString(),
-      createdBy: toUUID(req.user?._id || req.user?.id) || null,
+      entityId:   String(clientId),
+      type:       "email",
+      subject:    `Rota sent ${String(month).padStart(2, "0")}/${year}`,
+      notes:      `Rota distribution sent to ${recipients.join(", ")}`,
+      date:       new Date().toISOString(),
+      createdBy:  toUUID(req.user?._id || req.user?.id) || null,
       metadata: {
-        timestamp: new Date().toISOString(),
-        sent_by: req.user?._id || req.user?.id,
+        timestamp:       new Date().toISOString(),
+        sent_by:         req.user?._id || req.user?.id,
         recipient_emails: recipients,
       },
     });
@@ -735,35 +809,30 @@ export const sendRotaToClient = async (req, res, next) => {
 export const seedShiftsFromJson = async (req, res, next) => {
   try {
     const seedDataPath = join(__dirname, "../seed-data/shifts.json");
-    const rawText = await readFile(seedDataPath, "utf8");
-    const rows = JSON.parse(rawText);
+    const rawText      = await readFile(seedDataPath, "utf8");
+    const rows         = JSON.parse(rawText);
 
-    const clinicians = await Clinician.find({}).lean();
-    const emailToId = new Map(
+    const clinicians  = await Clinician.find({}).lean();
+    const emailToId   = new Map(
       clinicians
         .filter((c) => c?.email)
         .map((c) => [String(c.email).toLowerCase(), String(c._id || c.id)])
     );
 
-    let inserted = 0;
-    let skipped = 0;
-    let failed = 0;
+    let inserted = 0, skipped = 0, failed = 0;
 
     for (const raw of rows) {
       const realKeys = Object.keys(raw || {}).filter((k) => k !== "_comment");
       if (!realKeys.length) continue;
 
       const practice_id = toPracticeId(raw._practiceOdsCode);
-      if (!practice_id || !raw.date) {
-        skipped++;
-        continue;
-      }
+      if (!practice_id || !raw.date) { skipped++; continue; }
 
       const clinician_id = raw._clinicianEmail
         ? (emailToId.get(String(raw._clinicianEmail).toLowerCase()) ?? null)
         : null;
 
-      const status = String(raw.status || "working").toLowerCase();
+      const status     = String(raw.status || "working").toLowerCase();
       const start_time = normalizeTime(raw.start_time);
 
       const existing = await query(
@@ -774,36 +843,32 @@ export const seedShiftsFromJson = async (req, res, next) => {
         [raw.date, practice_id, status, start_time]
       );
 
-      if (existing.rows?.[0]?.id) {
-        skipped++;
-        continue;
-      }
+      if (existing.rows?.[0]?.id) { skipped++; continue; }
 
       const payload = {
-        clinician_id: status === "gap" ? null : clinician_id,
+        clinician_id:          status === "gap" ? null : clinician_id,
         practice_id,
-        client_id: raw.client_xero_code ? String(raw.client_xero_code) : null,
-        date: raw.date,
-        day_of_week: raw.day_of_week || null,
+        date:                  raw.date,
+        day_of_week:           raw.day_of_week || null,
         start_time,
-        end_time: normalizeTime(raw.end_time),
-        hours: raw.hours != null && raw.hours !== "" ? Number(raw.hours) : null,
-        clinical_system: raw.clinical_system || null,
+        end_time:              normalizeTime(raw.end_time),
+        hours:                 raw.hours != null && raw.hours !== "" ? Number(raw.hours) : null,
+        clinical_system:       raw.clinical_system || null,
         status,
-        is_cover: raw.is_cover === true || raw.is_cover === "true",
-        project_code: raw.project_code || null,
-        service_code: raw.service_code ? String(raw.service_code).toUpperCase() : null,
-        cover_reason: raw.cover_reason || null,
+        is_cover:              raw.is_cover === true || raw.is_cover === "true",
+        project_code:          raw.project_code || null,
+        service_code:          raw.service_code ? String(raw.service_code).toUpperCase() : null,
+        cover_reason:          raw.cover_reason || null,
         confirmation_received: raw.confirmation_received === true || raw.confirmation_received === "true",
         access_request_needed: raw.access_request_needed === true || raw.access_request_needed === "true",
-        client_informed: raw.client_informed === true || raw.client_informed === "true",
-        workstreams_notes: raw.workstreams_notes || null,
-        clinician_notified: raw.clinician_notified === true || raw.clinician_notified === "true",
-        hours_to_cover: raw.hours_to_cover != null && raw.hours_to_cover !== "" ? Number(raw.hours_to_cover) : null,
-        hours_covered: raw.hours_covered != null && raw.hours_covered !== "" ? Number(raw.hours_covered) : null,
-        compliance_checked: raw.compliance_checked === true || raw.compliance_checked === "true",
-        source: raw.source || "manual",
-        created_by: toUUID(req.user?._id || req.user?.id) || null,
+        client_informed:       raw.client_informed === true || raw.client_informed === "true",
+        workstreams_notes:     raw.workstreams_notes || null,
+        clinician_notified:    raw.clinician_notified === true || raw.clinician_notified === "true",
+        hours_to_cover:        raw.hours_to_cover != null && raw.hours_to_cover !== "" ? Number(raw.hours_to_cover) : null,
+        hours_covered:         raw.hours_covered  != null && raw.hours_covered  !== "" ? Number(raw.hours_covered)  : null,
+        compliance_checked:    raw.compliance_checked === true || raw.compliance_checked === "true",
+        source:                raw.source || "manual",
+        created_by:            toUUID(req.user?._id || req.user?.id) || null,
       };
 
       try {
@@ -817,7 +882,7 @@ export const seedShiftsFromJson = async (req, res, next) => {
 
     await logAudit(req, "ROTA_SEED_SHIFTS", "Shift", {
       detail: `Seeded shifts from JSON: ${inserted} inserted, ${skipped} skipped, ${failed} failed`,
-      after: { inserted, skipped, failed },
+      after:  { inserted, skipped, failed },
     });
 
     return ok(res, { inserted, skipped, failed }, "Shifts seeded");
@@ -840,8 +905,8 @@ export const getRotaById = async (req, res, next) => {
 };
 
 /* ─── Aliases ────────────────────────────────────────────────────────────── */
-export const createRota = createShift;
-export const getRota = getRotaGrid;
-export const getRotaByIdAlias = getRotaById;
-export const updateRota = updateShift;
-export const deleteRota = deleteShift;
+export const createRota        = createShift;
+export const getRota           = getRotaGrid;
+export const getRotaByIdAlias  = getRotaById;
+export const updateRota        = updateShift;
+export const deleteRota        = deleteShift;
