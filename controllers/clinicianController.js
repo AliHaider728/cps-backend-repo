@@ -1,20 +1,13 @@
 /**
  * controllers/clinicianController.js — Module 3
  *
- * Endpoints (mounted at /api/clinicians by routes/clinicianRoutes.js):
- *   GET    /                             → list with filters
- *   POST   /                             → create
- *   GET    /:id                          → detail
- *   PUT    /:id                          → update
- *   DELETE /:id                          → delete (admin)
- *   GET    /:id/client-history           → past/current PCN+practice assignments
- *   POST   /:id/client-history           → add client history entry
- *   PUT    /:id/client-history/:recordId → update client history entry
- *   PATCH  /:id/client-history/:recordId/system-access → update system access
- *   PATCH  /:id/restrict                 → set isRestricted=true (+reason)
- *   PATCH  /:id/unrestrict               → set isRestricted=false
+ * UPDATED: createClinician now also creates a user login account
+ * when createLogin: true + email + password are passed in the body.
+ * The user record uses role: "clinician" and links back to the
+ * clinician record via clinicianId.
  */
 
+import bcrypt                  from "bcryptjs";
 import Clinician               from "../models/Clinician.js";
 import ClinicianClientHistory  from "../models/ClinicianClientHistory.js";
 import ClinicianLeaveEntry     from "../models/ClinicianLeaveEntry.js";
@@ -22,6 +15,7 @@ import User                    from "../models/User.js";
 import { logAudit }            from "../middleware/auditLogger.js";
 import { normalizeId }         from "../lib/ids.js";
 import { calcAllBalances }     from "../lib/leaveCalc.js";
+import { sendWelcomeEmail }    from "../utils/sendEmail.js";
 
 /* ─── helpers ────────────────────────────────────────────── */
 const safeJson = (v) => JSON.parse(JSON.stringify(v ?? null));
@@ -77,7 +71,6 @@ export const getClinicians = async (req, res, next) => {
 
     docs = docs.filter((d) => matchesSearch(d, search));
 
-    // Enrich with leave balance + ops/supervisor names
     const userIds = new Set();
     docs.forEach((d) => {
       if (d.opsLead)    userIds.add(String(d.opsLead));
@@ -119,16 +112,91 @@ export const getClinicians = async (req, res, next) => {
 /* ─── CREATE ─────────────────────────────────────────────── */
 export const createClinician = async (req, res, next) => {
   try {
-    const payload = { ...req.body, createdBy: req.user?._id || null };
+    const {
+      // Login account fields (optional) — stripped before clinician save
+      createLogin,
+      loginPassword,
+      // Everything else goes to Clinician model
+      ...clinicianData
+    } = req.body;
+
+    const payload = { ...clinicianData, createdBy: req.user?._id || null };
     const created = await Clinician.create(payload);
+
+    // ── Optionally create a linked user login account ──────────────
+    let userCreated = null;
+    let userError   = null;
+
+    const shouldCreate =
+      createLogin === true ||
+      createLogin === "true" ||
+      createLogin === 1;
+
+    if (shouldCreate && created.email && loginPassword) {
+      try {
+        const normalizedEmail = String(created.email).trim().toLowerCase();
+
+        // Check for duplicate email in users
+        const existing = await User.findOne({ email: normalizedEmail }).lean();
+        if (existing) {
+          userError = `A login account with email ${normalizedEmail} already exists`;
+        } else {
+          const hashed = await bcrypt.hash(String(loginPassword), 12);
+
+          userCreated = await User.create({
+            name:               created.fullName || normalizedEmail,
+            email:              normalizedEmail,
+            password:           hashed,
+            role:               "clinician",
+            isActive:           true,
+            mustChangePassword: false,
+            isAnonymised:       false,
+            clinicianId:        created._id,   // link back to Clinician record
+            createdBy:          req.user?._id || null,
+            lastLogin:          null,
+            phone:              created.phone  || "",
+            department:         "Clinical",
+            jobTitle:           created.clinicianType || "Clinician",
+            startDate:          created.startDate || null,
+            emergencyContact:   { name: "", relationship: "", phone: "", email: "" },
+          });
+
+          // Send welcome email (non-blocking)
+          try {
+            await sendWelcomeEmail({
+              name:     userCreated.name,
+              email:    userCreated.email,
+              password: loginPassword,
+              role:     "clinician",
+            });
+          } catch (emailErr) {
+            console.error("[createClinician EMAIL ERROR]", emailErr.message);
+          }
+
+          // Update clinician record with user link
+          await Clinician.findByIdAndUpdate(created._id, { user: userCreated._id });
+        }
+      } catch (err) {
+        console.error("[createClinician USER ERROR]", err.message);
+        userError = err.message;
+      }
+    }
 
     await logAudit(req, "CREATE_CLINICIAN", "Clinician", {
       resourceId: created._id,
-      detail: `Created clinician "${created.fullName || created.email || created._id}"`,
+      detail: `Created clinician "${created.fullName || created.email || created._id}"${userCreated ? " with login account" : ""}`,
       after:  safeJson(created),
     });
 
-    res.status(201).json({ clinician: created });
+    res.status(201).json({
+      clinician: created,
+      userCreated: userCreated ? {
+        id:    userCreated._id,
+        email: userCreated.email,
+        role:  userCreated.role,
+      } : null,
+      userError: userError || null,
+    });
   } catch (err) {
     next(err);
   }
@@ -166,6 +234,9 @@ export const updateClinician = async (req, res, next) => {
     const body = { ...req.body };
     delete body._id;
     delete body.createdAt;
+    // Strip login-only fields if accidentally sent on update
+    delete body.createLogin;
+    delete body.loginPassword;
 
     const updated = await Clinician.findByIdAndUpdate(id, body, { new: true });
 
@@ -224,12 +295,10 @@ export const getClientHistory = async (req, res, next) => {
 export const addClientHistory = async (req, res, next) => {
   try {
     const id = validateId(req.params.id);
-
     const clinician = await Clinician.findById(id).lean();
     if (!clinician) return res.status(404).json({ message: "Clinician not found" });
 
     const body = req.body || {};
-
     const record = await ClinicianClientHistory.create({
       clinician:      id,
       pcn:            body.pcn            || null,
@@ -297,9 +366,7 @@ export const updateSystemAccess = async (req, res, next) => {
     if (String(before.clinician) !== String(id))
       return res.status(403).json({ message: "Record does not belong to this clinician" });
 
-    const systemAccess = Array.isArray(req.body?.systemAccess)
-      ? req.body.systemAccess
-      : [];
+    const systemAccess = Array.isArray(req.body?.systemAccess) ? req.body.systemAccess : [];
 
     const updated = await ClinicianClientHistory.findByIdAndUpdate(
       recordId,
