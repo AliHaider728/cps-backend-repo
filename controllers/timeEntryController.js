@@ -25,16 +25,46 @@ const fail = (res, status, message) =>
 /* ─── Resolve clinician ID from user ──────────────────────────────────────── */
 async function resolveClinicianId(user) {
   if (user.role !== "clinician") return null;
-  // The clinician record stores user as its linked user id
-  const result = await query(
-    `SELECT id, data->>'user' AS user_id
-     FROM app_records
-     WHERE model = 'Clinician'
-     AND data->>'user' = $1
-     LIMIT 1`,
-    [String(user._id || user.id)]
-  );
-  return result.rows[0]?.id || null;
+
+  const userId = String(user._id || user.id || "");
+  if (!userId) return null;
+
+  // Try 1: JWT token mein directly clinicianId ho (fastest)
+  if (user.clinicianId) {
+    console.log("[resolveClinicianId] found via token.clinicianId:", user.clinicianId);
+    return String(user.clinicianId);
+  }
+
+  // Try 2: MongoDB Clinician model — user field se match
+  try {
+    const clinician = await Clinician.findOne({ user: userId }).lean();
+    if (clinician?._id) {
+      console.log("[resolveClinicianId] found via Mongo:", clinician._id);
+      return String(clinician._id);
+    }
+  } catch (e) {
+    console.error("[resolveClinicianId Mongo error]", e.message);
+  }
+
+  // Try 3: PostgreSQL app_records fallback
+  try {
+    const result = await query(
+      `SELECT id FROM app_records
+       WHERE model = 'Clinician'
+       AND (data->>'user' = $1 OR data->>'userId' = $1)
+       LIMIT 1`,
+      [userId]
+    );
+    if (result.rows[0]?.id) {
+      console.log("[resolveClinicianId] found via PG:", result.rows[0].id);
+      return result.rows[0].id;
+    }
+  } catch (e) {
+    console.error("[resolveClinicianId PG error]", e.message);
+  }
+
+  console.warn("[resolveClinicianId] no clinician record found for userId:", userId);
+  return null;
 }
 
 /* ─── CLOCK IN ──────────────────────────────────────────────────────────────── */
@@ -94,7 +124,6 @@ export const getActive = async (req, res, next) => {
       clinicianId = await resolveClinicianId(req.user);
       if (!clinicianId) return ok(res, null, "No clinician profile found");
     } else {
-      // Admin can query any clinician's active entry
       clinicianId = req.query.clinicianId || null;
       if (!clinicianId) return fail(res, 400, "clinicianId query param required for admin");
     }
@@ -185,32 +214,32 @@ export const getAdminSummary = async (req, res, next) => {
       const ts = timeMap[row.id] || { totalEntries: 0, totalActualHours: 0, currentlyClockedIn: false };
       const ss = shiftMap[row.id] || { totalShifts: 0, totalPlannedHours: 0 };
       return {
-        clinicianId:       row.id,
-        fullName:          d.fullName || "",
-        clinicianType:     d.clinicianType || "",
-        contractType:      d.contractType || "",
-        isActive:          d.isActive !== false,
-        totalShiftsMonth:  ss.totalShifts,
-        plannedHoursMonth: ss.totalPlannedHours,
-        actualHoursMonth:  ts.totalActualHours,
+        clinicianId:        row.id,
+        fullName:           d.fullName || "",
+        clinicianType:      d.clinicianType || "",
+        contractType:       d.contractType || "",
+        isActive:           d.isActive !== false,
+        totalShiftsMonth:   ss.totalShifts,
+        plannedHoursMonth:  ss.totalPlannedHours,
+        actualHoursMonth:   ts.totalActualHours,
         currentlyClockedIn: ts.currentlyClockedIn,
       };
     });
 
     // Aggregate totals
-    const totalShifts = clinicianSummaries.reduce((s, c) => s + c.totalShiftsMonth, 0);
-    const totalPlanned = clinicianSummaries.reduce((s, c) => s + c.plannedHoursMonth, 0);
-    const totalActual  = clinicianSummaries.reduce((s, c) => s + c.actualHoursMonth, 0);
+    const totalShifts    = clinicianSummaries.reduce((s, c) => s + c.totalShiftsMonth, 0);
+    const totalPlanned   = clinicianSummaries.reduce((s, c) => s + c.plannedHoursMonth, 0);
+    const totalActual    = clinicianSummaries.reduce((s, c) => s + c.actualHoursMonth, 0);
     const totalClockedIn = clinicianSummaries.filter((c) => c.currentlyClockedIn).length;
 
     return ok(res, {
       month: new Date().toLocaleString("en-GB", { month: "long", year: "numeric" }),
       totals: {
-        clinicians:        clinicianSummaries.length,
-        shiftsThisMonth:   totalShifts,
-        plannedHours:      Math.round(totalPlanned * 10) / 10,
-        actualHours:       Math.round(totalActual * 10) / 10,
-        pendingLeave:      Number(pendingLeave.rows[0]?.pending || 0),
+        clinicians:         clinicianSummaries.length,
+        shiftsThisMonth:    totalShifts,
+        plannedHours:       Math.round(totalPlanned * 10) / 10,
+        actualHours:        Math.round(totalActual * 10) / 10,
+        pendingLeave:       Number(pendingLeave.rows[0]?.pending || 0),
         currentlyClockedIn: totalClockedIn,
       },
       clinicians: clinicianSummaries,

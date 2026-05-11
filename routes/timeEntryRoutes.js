@@ -30,9 +30,12 @@ const router = Router();
 
 const adminRoles = ["super_admin", "director", "ops_manager", "finance", "training", "workforce"];
 
-/* ── Clinician-only routes ─────────────────────────────────────────────────── */
-router.post("/clock-in",  verifyToken, allowRoles("clinician"), clockIn);
-router.post("/clock-out", verifyToken, allowRoles("clinician"), clockOut);
+/* ── Clock-in / Clock-out
+     allowRoles hata diya — role check controller mein
+     resolveClinicianId() karta hai (403 deta hai agar clinician nahi)
+  ─────────────────────────────────────────────────────────────────────────── */
+router.post("/clock-in",  verifyToken, clockIn);
+router.post("/clock-out", verifyToken, clockOut);
 
 /* ── Mixed: clinician sees own, admin can pass ?clinicianId ────────────────── */
 router.get("/active", verifyToken, allowRoles("clinician", ...adminRoles), getActive);

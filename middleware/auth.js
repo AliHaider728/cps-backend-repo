@@ -1,10 +1,40 @@
 import jwt from "jsonwebtoken";
-import { findAppRecordById } from "../config/db.js";
+import { findAppRecordById, query } from "../config/db.js";
 
 const USER_MODEL = "user";
 
 async function findUserById(id) {
   return findAppRecordById(USER_MODEL, id);
+}
+
+/* ─── Attach clinicianId to user if role is clinician ─────────────────────── */
+async function attachClinicianId(user) {
+  if (user.role !== "clinician") return user;
+
+  // Already has it (e.g. stored in user record)
+  if (user.clinicianId) return user;
+
+  const userId = String(user._id || user.id || "");
+  if (!userId) return user;
+
+  // Try MongoDB-style app_records (Clinician model)
+  try {
+    const result = await query(
+      `SELECT id FROM app_records
+       WHERE model = 'Clinician'
+       AND (data->>'user' = $1 OR data->>'userId' = $1)
+       LIMIT 1`,
+      [userId]
+    );
+    if (result.rows[0]?.id) {
+      user.clinicianId = result.rows[0].id;
+      return user;
+    }
+  } catch (e) {
+    console.error("[attachClinicianId PG error]", e.message);
+  }
+
+  return user;
 }
 
 export const verifyToken = async (req, res, next) => {
@@ -39,7 +69,9 @@ export const verifyToken = async (req, res, next) => {
       });
     }
 
-    req.user = user;
+    // ── Clinician ke liye clinicianId attach karo ──────────────
+    req.user = await attachClinicianId(user);
+
     return next();
   } catch (error) {
     if (error.name === "TokenExpiredError") {
@@ -47,7 +79,7 @@ export const verifyToken = async (req, res, next) => {
         code: "TOKEN_EXPIRED",
         message: "Session expired. Please refresh your token.",
         expiredAt: error.expiredAt,
-        requiresRefresh: true, // Signal to frontend that refresh is needed
+        requiresRefresh: true,
       });
     }
 
@@ -71,17 +103,16 @@ export const optionalAuth = async (req, res, next) => {
   }
 
   if (!token) {
-    return next(); // Continue without user
+    return next();
   }
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user = await findUserById(decoded.id);
     if (user && user.isActive !== false) {
-      req.user = user;
+      req.user = await attachClinicianId(user);
     }
   } catch (error) {
-    // Ignore errors for optional auth
     console.warn("[optionalAuth] Token validation failed:", error.message);
   }
 
