@@ -46,12 +46,31 @@ function sanitizeUser(user) {
   return safeUser;
 }
 
-function buildAuthUser(user) {
+async function buildAuthUser(user) {
+  let clinicianId = user.clinicianId || null;
+
+  if (user.role === "clinician" && !clinicianId) {
+    try {
+      const userId = String(user._id || user.id || "");
+      const result = await query(
+        `SELECT id FROM app_records
+         WHERE model = 'Clinician'
+         AND (data->>'user' = $1 OR data->>'userId' = $1)
+         LIMIT 1`,
+        [userId]
+      );
+      clinicianId = result.rows[0]?.id || null;
+    } catch (e) {
+      console.error("[buildAuthUser clinicianId lookup]", e.message);
+    }
+  }
+
   return {
     id:                 user._id,
     name:               user.name,
     email:              user.email,
     role:               user.role,
+    clinicianId,
     mustChangePassword: user.mustChangePassword ?? false,
     redirectTo:         ROLE_REDIRECTS[user.role] || "/",
   };
@@ -212,7 +231,7 @@ export const login = async (req, res) => {
       resourceId: user._id,
       detail:     `${user.name} logged in (${user.role})`,
     });
-    return res.json({ success: true, token: signToken(user._id), user: buildAuthUser(req.user) });
+    return res.json({ success: true, token: signToken(user._id), user: await buildAuthUser(req.user) });
   } catch (error) {
     console.error("[login ERROR]", error.message);
     return res.status(500).json({ message: error.message });
@@ -220,7 +239,7 @@ export const login = async (req, res) => {
 };
 
 export const getMe = async (req, res) => {
-  return res.json({ success: true, user: buildAuthUser(req.user) });
+  return res.json({ success: true, user: await buildAuthUser(req.user) });
 };
 
 export const logout = async (req, res) => {

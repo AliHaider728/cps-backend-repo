@@ -1,205 +1,228 @@
-/**
- * controllers/timeEntryController.js — Rota Module (Clock-In / Clock-Out)
- *
- * Spec reference: CPS_Rota_Management_Specification §2.5 Clinician Personal Rota / Diary
- *
- * Endpoints (mounted at /api/time-entries by timeEntryRoutes.js):
- *   POST   /clock-in         → clinician clocks in for a shift
- *   POST   /clock-out        → clinician clocks out (calculates actual hours)
- *   GET    /active           → get own active entry (clinician) or by ?clinicianId (admin)
- *   GET    /                 → list entries — clinician sees own; admin can filter by ?clinicianId
- *   GET    /admin/summary    → super admin: all clinicians shift + hours totals this month
- */
-
-import TimeEntry from "../models/TimeEntry.js";
-import Clinician from "../models/Clinician.js";
-import { logAudit } from "../middleware/auditLogger.js";
 import { query } from "../config/db.js";
+import { logAudit } from "../middleware/auditLogger.js";
+import { v4 as uuidv4 } from "uuid";
 
-const ok   = (res, data, message = "OK", status = 200) =>
+const MODEL = "time_entry";
+
+const ok = (res, data, message = "OK", status = 200) =>
   res.status(status).json({ success: true, data, message });
-
 const fail = (res, status, message) =>
   res.status(status).json({ success: false, message });
 
-/* ─── Resolve clinician ID from user ──────────────────────────────────────── */
-async function resolveClinicianId(user) {
-  if (user.role !== "clinician") return null;
-
-  const userId = String(user._id || user.id || "");
-  if (!userId) return null;
-
-  // Try 1: JWT token mein directly clinicianId ho (fastest)
-  if (user.clinicianId) {
-    console.log("[resolveClinicianId] found via token.clinicianId:", user.clinicianId);
-    return String(user.clinicianId);
-  }
-
-  // Try 2: MongoDB Clinician model — user field se match
-  try {
-    const clinician = await Clinician.findOne({ user: userId }).lean();
-    if (clinician?._id) {
-      console.log("[resolveClinicianId] found via Mongo:", clinician._id);
-      return String(clinician._id);
-    }
-  } catch (e) {
-    console.error("[resolveClinicianId Mongo error]", e.message);
-  }
-
-  // Try 3: PostgreSQL app_records fallback
-  try {
-    const result = await query(
-      `SELECT id FROM app_records
-       WHERE model = 'Clinician'
-       AND (data->>'user' = $1 OR data->>'userId' = $1)
-       LIMIT 1`,
-      [userId]
-    );
-    if (result.rows[0]?.id) {
-      console.log("[resolveClinicianId] found via PG:", result.rows[0].id);
-      return result.rows[0].id;
-    }
-  } catch (e) {
-    console.error("[resolveClinicianId PG error]", e.message);
-  }
-
-  console.warn("[resolveClinicianId] no clinician record found for userId:", userId);
-  return null;
+function mapRow(row) {
+  if (!row) return null;
+  return { id: row.id, ...(row.data || {}), createdAt: row.created_at, updatedAt: row.updated_at };
 }
 
-/* ─── CLOCK IN ──────────────────────────────────────────────────────────────── */
+export const getActiveEntry = async (req, res, next) => {
+  try {
+    const userId = String(req.user._id || req.user.id || "");
+    if (!userId) return fail(res, 400, "User ID missing from token");
+
+    const result = await query(
+      `SELECT id, data, created_at, updated_at
+       FROM app_records
+       WHERE model = $1
+         AND data->>'user_id' = $2
+         AND data->>'status' = 'active'
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [MODEL, userId]
+    );
+
+    return ok(res, result.rows[0] ? mapRow(result.rows[0]) : null, "Active entry");
+  } catch (err) {
+    next(err);
+  }
+};
+
 export const clockIn = async (req, res, next) => {
   try {
-    const { shiftId } = req.body || {};
+    const userId = String(req.user._id || req.user.id || "");
+    const clinicianId = req.user.clinicianId || null;
 
-    const clinicianId = await resolveClinicianId(req.user);
-    if (!clinicianId) {
-      return fail(res, 403, "Only clinicians can clock in");
+    if (!userId) return fail(res, 400, "User ID missing from token");
+
+    const existing = await query(
+      `SELECT id FROM app_records
+       WHERE model = $1 AND data->>'user_id' = $2 AND data->>'status' = 'active'
+       LIMIT 1`,
+      [MODEL, userId]
+    );
+    if (existing.rows.length > 0) {
+      return fail(res, 409, "Already clocked in. Please clock out first.");
     }
 
-    const entry = await TimeEntry.clockIn({ clinicianId, shiftId: shiftId || null });
+    const now = new Date().toISOString();
+    const id = uuidv4();
+    const payload = {
+      clinician_id:  clinicianId,
+      user_id:       userId,
+      clock_in:      now,
+      clock_out:     null,
+      planned_hours: req.body?.planned_hours || null,
+      actual_hours:  null,
+      status:        "active",
+      notes:         req.body?.notes || "",
+      created_by:    userId,
+      createdAt:     now,
+      updatedAt:     now,
+    };
+
+    const result = await query(
+      `INSERT INTO app_records (model, id, data, created_at, updated_at)
+       VALUES ($1, $2, $3::jsonb, NOW(), NOW())
+       RETURNING id, data, created_at, updated_at`,
+      [MODEL, id, JSON.stringify(payload)]
+    );
+
+    const entry = mapRow(result.rows[0]);
 
     await logAudit(req, "CLOCK_IN", "TimeEntry", {
-      after: { clinicianId, shiftId: shiftId || null, clockIn: entry.clock_in },
+      resourceId: entry.id,
+      detail:     `Clinician clocked in at ${now}`,
+      after:      entry,
     });
 
     return ok(res, entry, "Clocked in successfully", 201);
   } catch (err) {
-    if (err.statusCode) return fail(res, err.statusCode, err.message);
     next(err);
   }
 };
 
-/* ─── CLOCK OUT ─────────────────────────────────────────────────────────────── */
 export const clockOut = async (req, res, next) => {
   try {
-    const clinicianId = await resolveClinicianId(req.user);
-    if (!clinicianId) {
-      return fail(res, 403, "Only clinicians can clock out");
+    const userId = String(req.user._id || req.user.id || "");
+
+    if (!userId) return fail(res, 400, "User ID missing from token");
+
+    const active = await query(
+      `SELECT id, data FROM app_records
+       WHERE model = $1 AND data->>'user_id' = $2 AND data->>'status' = 'active'
+       ORDER BY created_at DESC LIMIT 1`,
+      [MODEL, userId]
+    );
+    if (!active.rows.length) {
+      return fail(res, 404, "No active shift found. Please clock in first.");
     }
 
-    const entry = await TimeEntry.clockOut(clinicianId);
+    const row = active.rows[0];
+    const entry = { id: row.id, ...(row.data || {}) };
+    const now = new Date();
+    const clockInTime = new Date(entry.clock_in);
+    const diffMs = now.getTime() - clockInTime.getTime();
+    const actualHours = Math.round((diffMs / 3_600_000) * 100) / 100;
+
+    const patch = {
+      ...entry,
+      clock_out:    now.toISOString(),
+      actual_hours: actualHours,
+      status:       "completed",
+      updatedAt:    now.toISOString(),
+    };
+
+    const result = await query(
+      `UPDATE app_records
+       SET data = $3::jsonb, updated_at = NOW()
+       WHERE model = $1 AND id = $2
+       RETURNING id, data, created_at, updated_at`,
+      [MODEL, row.id, JSON.stringify(patch)]
+    );
+
+    const updated = mapRow(result.rows[0]);
 
     await logAudit(req, "CLOCK_OUT", "TimeEntry", {
-      after: {
-        clinicianId,
-        clockOut:    entry.clock_out,
-        actualHours: entry.actual_hours,
-      },
+      resourceId: updated.id,
+      detail:     `Clocked out. Duration: ${actualHours}h`,
+      after:      updated,
     });
 
-    return ok(res, entry, "Clocked out successfully");
+    return ok(res, updated, "Clocked out successfully");
   } catch (err) {
-    if (err.statusCode) return fail(res, err.statusCode, err.message);
     next(err);
   }
 };
 
-/* ─── ACTIVE ENTRY ──────────────────────────────────────────────────────────── */
-export const getActive = async (req, res, next) => {
+export const getTimeEntries = async (req, res, next) => {
   try {
-    let clinicianId;
+    const userId = String(req.user._id || req.user.id || "");
+    const limit = Math.min(parseInt(req.query.limit || "20", 10), 100);
+    const offset = parseInt(req.query.offset || "0", 10);
 
-    if (req.user.role === "clinician") {
-      clinicianId = await resolveClinicianId(req.user);
-      if (!clinicianId) return ok(res, null, "No clinician profile found");
-    } else {
-      clinicianId = req.query.clinicianId || null;
-      if (!clinicianId) return fail(res, 400, "clinicianId query param required for admin");
-    }
+    if (!userId) return fail(res, 400, "User ID missing from token");
 
-    const entry = await TimeEntry.findActive(clinicianId);
-    return ok(res, entry || null);
+    const result = await query(
+      `SELECT id, data, created_at, updated_at
+       FROM app_records
+       WHERE model = $1 AND data->>'user_id' = $2
+       ORDER BY created_at DESC
+       LIMIT $3 OFFSET $4`,
+      [MODEL, userId, limit, offset]
+    );
+
+    const countResult = await query(
+      `SELECT COUNT(*) FROM app_records WHERE model = $1 AND data->>'user_id' = $2`,
+      [MODEL, userId]
+    );
+
+    return ok(res, {
+      entries: result.rows.map(mapRow),
+      total:   parseInt(countResult.rows[0].count, 10),
+      limit,
+      offset,
+    }, "Time entries");
   } catch (err) {
     next(err);
   }
 };
 
-/* ─── LIST ENTRIES ──────────────────────────────────────────────────────────── */
-export const listEntries = async (req, res, next) => {
-  try {
-    const { from, to, status, limit } = req.query;
-
-    let clinicianId;
-    if (req.user.role === "clinician") {
-      clinicianId = await resolveClinicianId(req.user);
-      if (!clinicianId) return ok(res, []);
-    } else {
-      clinicianId = req.query.clinicianId || null;
-    }
-
-    const entries = await TimeEntry.list({
-      clinicianId,
-      from:   from  || null,
-      to:     to    || null,
-      status: status || null,
-      limit:  limit ? parseInt(limit, 10) : 200,
-    });
-
-    return ok(res, entries);
-  } catch (err) {
-    next(err);
-  }
-};
-
-/* ─── ADMIN SUMMARY ─────────────────────────────────────────────────────────── */
 export const getAdminSummary = async (req, res, next) => {
   try {
-    // Time-entry stats this month
-    const timeStats = await TimeEntry.adminSummary();
-    const timeMap   = {};
-    for (const row of timeStats) {
+    const timeStats = await query(
+      `SELECT
+         data->>'clinician_id' AS clinician_id,
+         COUNT(*) AS total_entries,
+         COALESCE(SUM(COALESCE(NULLIF(data->>'actual_hours', '')::numeric, 0)), 0) AS total_actual_hours,
+         COUNT(*) FILTER (WHERE data->>'status' = 'active') AS currently_clocked_in
+       FROM app_records
+       WHERE model = $1
+         AND COALESCE(NULLIF(data->>'clock_in', '')::timestamptz, created_at) >= date_trunc('month', NOW())
+       GROUP BY data->>'clinician_id'`,
+      [MODEL]
+    );
+
+    const timeMap = {};
+    for (const row of timeStats.rows) {
+      if (!row.clinician_id) continue;
       timeMap[row.clinician_id] = {
-        totalEntries:       Number(row.total_entries),
-        totalActualHours:   Number(row.total_actual_hours),
-        currentlyClockedIn: Number(row.currently_clocked_in) > 0,
+        totalEntries:       Number(row.total_entries || 0),
+        totalActualHours:   Number(row.total_actual_hours || 0),
+        currentlyClockedIn: Number(row.currently_clocked_in || 0) > 0,
       };
     }
 
-    // All clinicians
     const clinicians = await query(
       `SELECT id, data FROM app_records WHERE model = 'Clinician' ORDER BY data->>'fullName'`
     );
 
-    // Shifts this month per clinician
     const shiftsResult = await query(
       `SELECT clinician_id,
-              COUNT(*)                               AS total_shifts,
-              COALESCE(SUM(hours), 0)               AS total_planned_hours
+              COUNT(*) AS total_shifts,
+              COALESCE(SUM(hours), 0) AS total_planned_hours
        FROM shifts
        WHERE date >= date_trunc('month', NOW())
          AND date < date_trunc('month', NOW()) + INTERVAL '1 month'
        GROUP BY clinician_id`
     );
+
     const shiftMap = {};
     for (const row of shiftsResult.rows) {
       shiftMap[row.clinician_id] = {
-        totalShifts:      Number(row.total_shifts),
-        totalPlannedHours: Number(row.total_planned_hours),
+        totalShifts:       Number(row.total_shifts || 0),
+        totalPlannedHours: Number(row.total_planned_hours || 0),
       };
     }
 
-    // Pending leave this month
     const pendingLeave = await query(
       `SELECT COUNT(*) AS pending
        FROM app_records
@@ -208,29 +231,27 @@ export const getAdminSummary = async (req, res, next) => {
          AND (data->>'startDate')::date >= date_trunc('month', NOW())`
     );
 
-    // Build per-clinician summary
     const clinicianSummaries = clinicians.rows.map((row) => {
-      const d = row.data || {};
-      const ts = timeMap[row.id] || { totalEntries: 0, totalActualHours: 0, currentlyClockedIn: false };
-      const ss = shiftMap[row.id] || { totalShifts: 0, totalPlannedHours: 0 };
+      const data = row.data || {};
+      const time = timeMap[row.id] || { totalEntries: 0, totalActualHours: 0, currentlyClockedIn: false };
+      const shifts = shiftMap[row.id] || { totalShifts: 0, totalPlannedHours: 0 };
       return {
         clinicianId:        row.id,
-        fullName:           d.fullName || "",
-        clinicianType:      d.clinicianType || "",
-        contractType:       d.contractType || "",
-        isActive:           d.isActive !== false,
-        totalShiftsMonth:   ss.totalShifts,
-        plannedHoursMonth:  ss.totalPlannedHours,
-        actualHoursMonth:   ts.totalActualHours,
-        currentlyClockedIn: ts.currentlyClockedIn,
+        fullName:           data.fullName || data.name || "",
+        clinicianType:      data.clinicianType || "",
+        contractType:       data.contractType || "",
+        isActive:           data.isActive !== false,
+        totalShiftsMonth:   shifts.totalShifts,
+        plannedHoursMonth:  shifts.totalPlannedHours,
+        actualHoursMonth:   time.totalActualHours,
+        currentlyClockedIn: time.currentlyClockedIn,
       };
     });
 
-    // Aggregate totals
-    const totalShifts    = clinicianSummaries.reduce((s, c) => s + c.totalShiftsMonth, 0);
-    const totalPlanned   = clinicianSummaries.reduce((s, c) => s + c.plannedHoursMonth, 0);
-    const totalActual    = clinicianSummaries.reduce((s, c) => s + c.actualHoursMonth, 0);
-    const totalClockedIn = clinicianSummaries.filter((c) => c.currentlyClockedIn).length;
+    const totalShifts = clinicianSummaries.reduce((sum, clinician) => sum + clinician.totalShiftsMonth, 0);
+    const totalPlanned = clinicianSummaries.reduce((sum, clinician) => sum + clinician.plannedHoursMonth, 0);
+    const totalActual = clinicianSummaries.reduce((sum, clinician) => sum + clinician.actualHoursMonth, 0);
+    const totalClockedIn = clinicianSummaries.filter((clinician) => clinician.currentlyClockedIn).length;
 
     return ok(res, {
       month: new Date().toLocaleString("en-GB", { month: "long", year: "numeric" }),
@@ -243,7 +264,7 @@ export const getAdminSummary = async (req, res, next) => {
         currentlyClockedIn: totalClockedIn,
       },
       clinicians: clinicianSummaries,
-    });
+    }, "Time entry admin summary");
   } catch (err) {
     next(err);
   }
