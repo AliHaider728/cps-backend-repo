@@ -118,3 +118,6 @@ export const optionalAuth = async (req, res, next) => {
 
   return next();
 };
+
+// ── Alias exports — routes jo 'authenticate' import karte hain unke liye ──
+export const authenticate = verifyToken;

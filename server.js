@@ -15,6 +15,9 @@ import clinicianRoutes from "./routes/clinicianRoutes.js";
 import restrictedClinicianRoutes from "./routes/restrictedClinicianRoutes.js";    
 import rotaRoutes from "./routes/rotaRoutes.js";
 import timeEntryRoutes from "./routes/timeEntryRoutes.js";
+import timesheetRoutes from "./routes/timesheetRoutes.js";
+import basePatternRoutes from "./routes/basePatternRoutes.js";
+import coverRoutes from "./routes/coverRoutes.js";
 import { startGapDetectionScheduler } from "./services/rotaGapService.js";
 
 dotenv.config();
@@ -135,6 +138,9 @@ app.use("/api/clinicians", clinicianRoutes);
 app.use("/api/restricted-clinicians", restrictedClinicianRoutes);
 app.use("/api/rota", rotaRoutes);
 app.use("/api/time-entries", timeEntryRoutes);
+app.use("/api/timesheets", timesheetRoutes);
+app.use("/api/base-patterns", basePatternRoutes);
+app.use("/api/cover", coverRoutes);
 
 
 /*   HEALTH CHECK   */

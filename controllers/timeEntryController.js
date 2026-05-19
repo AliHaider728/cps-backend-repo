@@ -269,3 +269,58 @@ export const getAdminSummary = async (req, res, next) => {
     next(err);
   }
 };
+
+export const getClinicianTimeEntriesAdmin = async (req, res, next) => {
+  try {
+    const { clinicianId } = req.params;
+    const limit = Math.min(parseInt(req.query.limit || "50", 10), 200);
+    const offset = parseInt(req.query.offset || "0", 10);
+
+    const clinicianRecord = await query(
+      `SELECT data->>'user' AS user_id, data->>'userId' AS user_id_alt
+       FROM app_records
+       WHERE model = 'Clinician' AND id = $1
+       LIMIT 1`,
+      [clinicianId]
+    );
+
+    if (!clinicianRecord.rows.length) {
+      return res.status(404).json({ success: false, message: "Clinician not found" });
+    }
+
+    const userId = clinicianRecord.rows[0].user_id || clinicianRecord.rows[0].user_id_alt || null;
+
+    const [entriesResult, countResult] = await Promise.all([
+      query(
+        `SELECT id, data, created_at, updated_at FROM app_records
+         WHERE model = 'time_entry'
+           AND (data->>'clinician_id' = $1 OR data->>'user_id' = $2)
+         ORDER BY created_at DESC
+         LIMIT $3 OFFSET $4`,
+        [clinicianId, userId, limit, offset]
+      ),
+      query(
+        `SELECT COUNT(*) FROM app_records
+         WHERE model = 'time_entry'
+           AND (data->>'clinician_id' = $1 OR data->>'user_id' = $2)`,
+        [clinicianId, userId]
+      ),
+    ]);
+
+    const entries = entriesResult.rows.map((row) => ({ id: row.id, ...row.data }));
+    const activeEntry = entries.find((entry) => entry.status === "active");
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        entries,
+        total: parseInt(countResult.rows[0].count, 10),
+        is_clocked_in: !!activeEntry,
+        active_since: activeEntry?.clock_in || null,
+      },
+      message: "Clinician time entries",
+    });
+  } catch (err) {
+    next(err);
+  }
+};

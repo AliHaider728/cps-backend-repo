@@ -7,6 +7,7 @@ import {
   clockOut,
   getTimeEntries,
   getAdminSummary,
+  getClinicianTimeEntriesAdmin,
 } from "../controllers/timeEntryController.js";
 
 const router = Router();
@@ -18,6 +19,7 @@ router.get("/active", ...clinicianOnly, getActiveEntry);
 router.post("/clock-in", ...clinicianOnly, clockIn);
 router.post("/clock-out", ...clinicianOnly, clockOut);
 router.get("/admin/summary", ...adminOnly, getAdminSummary);
+router.get("/admin/clinician/:clinicianId", ...adminOnly, getClinicianTimeEntriesAdmin);
 router.get("/", ...clinicianOnly, getTimeEntries);
 
 export default router;

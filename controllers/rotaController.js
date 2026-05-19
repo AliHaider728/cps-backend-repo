@@ -11,6 +11,7 @@
 import nodemailer from "nodemailer";
 import { query } from "../config/db.js";
 import { logAudit } from "../middleware/auditLogger.js";
+import { v4 as uuidv4 } from "uuid";
 import { readFile } from "fs/promises";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -18,7 +19,6 @@ import { fileURLToPath } from "url";
 import Shift from "../models/Shift.js";
 import RotaDistribution from "../models/RotaDistribution.js";
 import Clinician from "../models/Clinician.js";
-import RestrictedClinician from "../models/RestrictedClinician.js";
 import ClinicianComplianceDoc from "../models/ClinicianComplianceDoc.js";
 import ContactHistory from "../models/ContactHistory.js";
 
@@ -81,22 +81,27 @@ const REQUIRED_COMPLIANCE = [
 ];
 
 export async function checkRestrictedClinician(clinicianId, practiceId) {
-  const clinician = toMongoId(clinicianId);
-  const practice = toPracticeId(practiceId);
+  const clinician = toUUID(clinicianId);
+  const practice = toUUID(practiceId);
 
   if (!clinician || !practice) return { blocked: false, reason: "" };
 
-  const record = await RestrictedClinician.findOne({
-    clinician,
-    entityType: "practice",
-    entityId: String(practice),
-    isActive: true,
-  }).lean();
+  const result = await query(
+    `SELECT *
+       FROM restricted_clinicians
+      WHERE clinician_id = $1
+        AND entity_type IN ('practice', 'surgery')
+        AND entity_id = $2
+        AND is_active = true
+      LIMIT 1`,
+    [clinician, practice]
+  );
+  const record = result.rows[0];
 
   if (record) {
     return {
       blocked: true,
-      reason: record.reason || "Clinician is restricted at this practice",
+      reason: record.reason || "Clinician is restricted at this surgery",
       record,
     };
   }
@@ -131,14 +136,14 @@ export function validateCoverEntry(entry = {}) {
   const isCover = entry.is_cover === true || entry.is_cover === "true";
 
   if (isCover) {
-    if (String(entry.project_code || "").trim() !== "COV1") {
-      const err = new Error("Cover shifts must use project_code = COV1");
+    if (String(entry.project_code || "").trim() !== "COVER") {
+      const err = new Error("Cover shifts must use project_code = COVER");
       err.statusCode = 400;
       throw err;
     }
     const service = String(entry.service_code || "").toUpperCase();
-    if (!["PCN", "EA", "GPX", "EAX"].includes(service)) {
-      const err = new Error("Cover shifts must use service_code PCN | EA | GPX | EAX");
+    if (!["PCN", "GP", "EA"].includes(service)) {
+      const err = new Error("Cover shifts must use service_code PCN | GP | EA");
       err.statusCode = 400;
       throw err;
     }
@@ -167,8 +172,8 @@ export function validateCoverEntry(entry = {}) {
 
 export const checkRestrictedClinicianEntry = async (req, res, next) => {
   try {
-    const clinicianId = toMongoId(req.query.clinicianId);
-    const practiceId = toPracticeId(req.query.practiceId);
+    const clinicianId = toUUID(req.query.clinicianId);
+    const practiceId = toUUID(req.query.practiceId);
     if (!clinicianId || !practiceId)
       return fail(res, 400, "clinicianId and practiceId are required");
     const result = await checkRestrictedClinician(clinicianId, practiceId);
@@ -245,6 +250,122 @@ const normalizeTime = (t) => {
   const s = String(t).trim();
   if (!s) return null;
   return s.length === 5 ? `${s}:00` : s;
+};
+
+const ROTA_STATUSES = new Set(["working", "annual_leave", "sick", "cppe", "gap", "cover", "cancelled"]);
+const SERVICE_CODES = new Set(["PCN", "GP", "EA"]);
+
+const calcRotaEntryHours = (shiftStart, shiftEnd) => {
+  const [startH, startM] = String(shiftStart || "").split(":").map(Number);
+  const [endH, endM] = String(shiftEnd || "").split(":").map(Number);
+  if (![startH, startM, endH, endM].every(Number.isFinite)) return null;
+  const total = ((endH * 60 + endM) - (startH * 60 + startM)) / 60;
+  return total > 0 ? Math.round(total * 100) / 100 : null;
+};
+
+export const createBulkShifts = async (req, res, next) => {
+  try {
+    const {
+      clinician_id,
+      clinician_name,
+      practice_id,
+      practice_name,
+      pcn_id,
+      date_from,
+      date_to,
+      days_of_week = [1, 2, 3, 4, 5],
+      shift_start = "09:00",
+      shift_end = "17:00",
+      hourly_rate,
+      status = "working",
+      clinical_system,
+      service_code,
+      notes = "",
+    } = req.body;
+
+    if (!practice_id || !date_from || !date_to) {
+      return fail(res, 400, "practice_id, date_from, and date_to are required");
+    }
+
+    const finalStatus = String(status || "working").toLowerCase();
+    if (!ROTA_STATUSES.has(finalStatus)) {
+      return fail(res, 400, "Invalid rota status");
+    }
+
+    const finalServiceCode = service_code ? String(service_code).toUpperCase() : null;
+    if (finalServiceCode && !SERVICE_CODES.has(finalServiceCode)) {
+      return fail(res, 400, "Invalid service_code");
+    }
+
+    const total_hours = calcRotaEntryHours(shift_start, shift_end);
+    if (!total_hours) {
+      return fail(res, 400, "shift_end must be after shift_start");
+    }
+
+    const rate = hourly_rate !== undefined && hourly_rate !== null && hourly_rate !== ""
+      ? Number(hourly_rate)
+      : null;
+    const total_cost = rate !== null
+      ? Math.round(total_hours * rate * 100) / 100
+      : null;
+
+    const selectedDays = new Set(
+      (Array.isArray(days_of_week) ? days_of_week : [1, 2, 3, 4, 5]).map((day) => Number(day))
+    );
+    const userId = String(req.user._id || req.user.id);
+    const now = new Date().toISOString();
+    const created = [];
+    const current = new Date(`${date_from}T00:00:00Z`);
+    const end = new Date(`${date_to}T00:00:00Z`);
+
+    while (current <= end) {
+      const dayOfWeek = current.getUTCDay();
+      if (selectedDays.has(dayOfWeek)) {
+        const id = uuidv4();
+        const dateStr = current.toISOString().slice(0, 10);
+        const payload = {
+          clinician_id:    finalStatus === "gap" ? null : clinician_id || null,
+          clinician_name:  finalStatus === "gap" ? null : clinician_name || null,
+          practice_id,
+          practice_name:   practice_name || null,
+          pcn_id:          pcn_id || null,
+          date:            dateStr,
+          date_from,
+          date_to,
+          shift_start,
+          shift_end,
+          total_hours,
+          hourly_rate:     rate,
+          total_cost,
+          status:          finalStatus,
+          clinical_system: clinical_system || null,
+          service_code:    finalServiceCode,
+          is_cover:        finalStatus === "cover",
+          notes,
+          created_by:      userId,
+          createdAt:       now,
+          updatedAt:       now,
+        };
+
+        await query(
+          `INSERT INTO app_records (id, model, data, created_at, updated_at)
+           VALUES ($1, 'RotaEntry', $2::jsonb, NOW(), NOW())`,
+          [id, JSON.stringify(payload)]
+        );
+        created.push({ id, ...payload });
+      }
+      current.setUTCDate(current.getUTCDate() + 1);
+    }
+
+    return ok(
+      res,
+      { created_count: created.length, entries: created },
+      `${created.length} shifts created successfully`,
+      201
+    );
+  } catch (err) {
+    next(err);
+  }
 };
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -695,8 +816,8 @@ export const assignCover = async (req, res, next) => {
           : gap.hours,
       status:      "cover",
       is_cover:    true,
-      project_code: "COV1",
-      service_code: "GPX",
+      project_code: "COVER",
+      service_code: String(req.body?.service_code || gap.service_code || "PCN").toUpperCase(),
       original_gap_id:   gapId,
       compliance_checked: true,
       source:    "manual",
@@ -905,6 +1026,425 @@ export const getRotaById = async (req, res, next) => {
 };
 
 /* ─── Aliases ────────────────────────────────────────────────────────────── */
+const currentClinicianId = (req) =>
+  toUUID(req.user?.clinicianId) || toUUID(req.user?.clinician_id) || toUUID(req.user?._id) || toUUID(req.user?.id);
+
+const sqlMonthRange = (month, year) => {
+  const range = monthRange(month, year);
+  if (!range) return null;
+  const endInclusive = new Date(`${range.endDate}T00:00:00Z`);
+  endInclusive.setUTCDate(endInclusive.getUTCDate() - 1);
+  return { ...range, endInclusive: endInclusive.toISOString().slice(0, 10) };
+};
+
+const mapRotaShiftRow = (row = {}) => ({
+  ...row,
+  date: row.shift_date?.toISOString?.().slice(0, 10) || row.shift_date,
+  shift_date: row.shift_date?.toISOString?.().slice(0, 10) || row.shift_date,
+  status: row.shift_type,
+  practice_id: row.surgery_id,
+  practice_name: row.surgery_name,
+  total_hours: row.expected_hours != null ? Number(row.expected_hours) : null,
+  hours: row.expected_hours != null ? Number(row.expected_hours) : null,
+});
+
+const fetchRotaShifts = async ({ month, year, clinicianId = null }) => {
+  const params = [month, year];
+  let clinicianFilter = "";
+  if (clinicianId) {
+    params.push(clinicianId);
+    clinicianFilter = ` AND rs.clinician_id = $${params.length}`;
+  }
+  const result = await query(
+    `SELECT rs.*,
+            COALESCE(c.full_name, c.email, rs.clinician_id::text) AS clinician_name,
+            COALESCE(p.name, rs.surgery_id::text) AS surgery_name,
+            pc.name AS pcn_name
+       FROM rota_shifts rs
+       LEFT JOIN clinicians c ON c.id = rs.clinician_id
+       LEFT JOIN practices p ON p.id = rs.surgery_id
+       LEFT JOIN pcns pc ON pc.id = p.pcn_id
+      WHERE rs.rota_month = $1 AND rs.rota_year = $2${clinicianFilter}
+      ORDER BY rs.shift_date ASC, clinician_name ASC`,
+    params
+  );
+  return result.rows.map(mapRotaShiftRow);
+};
+
+const getTimesheetEntries = async (timesheetId) => {
+  const result = await query(
+    `SELECT te.*,
+            COALESCE(p.name, te.surgery_id::text) AS surgery_name,
+            CASE WHEN te.actual_hours IS NULL OR te.expected_hours IS NULL
+              THEN NULL ELSE ROUND((te.actual_hours - te.expected_hours)::numeric, 2)
+            END AS difference
+       FROM timesheet_entries te
+       LEFT JOIN practices p ON p.id = te.surgery_id
+      WHERE te.timesheet_id = $1
+      ORDER BY te.shift_date ASC`,
+    [timesheetId]
+  );
+  return result.rows;
+};
+
+const refreshTimesheetTotal = async (timesheetId) => {
+  const result = await query(
+    `UPDATE timesheets
+        SET total_hours = COALESCE((
+              SELECT ROUND(SUM(COALESCE(actual_hours, 0))::numeric, 2)
+                FROM timesheet_entries
+               WHERE timesheet_id = $1
+            ), 0),
+            updated_at = NOW()
+      WHERE id = $1
+      RETURNING *`,
+    [timesheetId]
+  );
+  return result.rows[0];
+};
+
+const ensureTimesheetEntries = async (timesheet, month, year) => {
+  await query(
+    `INSERT INTO timesheet_entries (
+       timesheet_id, clinician_id, surgery_id, shift_date, expected_hours,
+       is_cover, project_code, service_code
+     )
+     SELECT $1, rs.clinician_id, rs.surgery_id, rs.shift_date, rs.expected_hours,
+            rs.is_cover, CASE WHEN rs.is_cover THEN 'COVER' ELSE NULL END, NULL
+       FROM rota_shifts rs
+      WHERE rs.clinician_id = $2
+        AND rs.rota_month = $3
+        AND rs.rota_year = $4
+        AND rs.shift_type = 'working'
+        AND NOT EXISTS (
+          SELECT 1 FROM timesheet_entries te
+           WHERE te.timesheet_id = $1
+             AND te.clinician_id = rs.clinician_id
+             AND te.shift_date = rs.shift_date
+             AND COALESCE(te.surgery_id::text, '') = COALESCE(rs.surgery_id::text, '')
+        )`,
+    [timesheet.id, timesheet.clinician_id, month, year]
+  );
+};
+
+export const getMonthlyRota = async (req, res, next) => {
+  try {
+    const month = parseIntStrict(req.query.month);
+    const year = parseIntStrict(req.query.year);
+    if (!monthRange(month, year)) return fail(res, 400, "month and year are required");
+    const clinicianId = req.user?.role === "clinician" ? currentClinicianId(req) : null;
+    const shifts = await fetchRotaShifts({ month, year, clinicianId });
+    const clinicians = new Map();
+    for (const shift of shifts) {
+      const key = String(shift.clinician_id);
+      if (!clinicians.has(key)) {
+        clinicians.set(key, {
+          clinician: { id: key, _id: key, fullName: shift.clinician_name || "Clinician", name: shift.clinician_name || "Clinician" },
+          shifts: {},
+        });
+      }
+      clinicians.get(key).shifts[shift.shift_date] = shift;
+    }
+    return ok(res, { month, year, shifts, clinicians: Array.from(clinicians.values()) });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const generateMonthlyRotaFromPatterns = async (req, res, next) => {
+  try {
+    const month = parseIntStrict(req.body?.month || req.query?.month || req.params?.month);
+    const year = parseIntStrict(req.body?.year || req.query?.year || req.params?.year);
+    const range = sqlMonthRange(month, year);
+    if (!range) return fail(res, 400, "month and year are required");
+    const patterns = await query(
+      `SELECT * FROM base_patterns
+        WHERE is_active = true
+          AND effective_from <= $1
+          AND (effective_to IS NULL OR effective_to >= $2)
+        ORDER BY clinician_id, day_of_week`,
+      [range.endInclusive, range.startDate]
+    );
+    let created = 0;
+    let skipped = 0;
+    const userId = toUUID(req.user?._id || req.user?.id);
+    for (const pattern of patterns.rows) {
+      const cursor = new Date(`${range.startDate}T00:00:00Z`);
+      const end = new Date(`${range.endInclusive}T00:00:00Z`);
+      while (cursor <= end) {
+        const date = cursor.toISOString().slice(0, 10);
+        if (cursor.getUTCDay() === Number(pattern.day_of_week)) {
+          const leave = await query(
+            `SELECT id FROM clinician_leave_entries
+              WHERE clinician_id = $1 AND approved = true
+                AND start_date <= $2 AND end_date >= $2
+              LIMIT 1`,
+            [pattern.clinician_id, date]
+          );
+          const restriction = await checkRestrictedClinician(pattern.clinician_id, pattern.surgery_id);
+          if (leave.rows[0] || restriction.blocked) {
+            skipped++;
+          } else {
+            const inserted = await query(
+              `INSERT INTO rota_shifts (
+                 clinician_id, surgery_id, shift_date, shift_type,
+                 start_time, end_time, expected_hours, is_filled,
+                 rota_month, rota_year, created_by
+               )
+               VALUES ($1,$2,$3,'working',$4,$5,$6,true,$7,$8,$9)
+               ON CONFLICT (clinician_id, surgery_id, shift_date, shift_type) DO NOTHING
+               RETURNING id`,
+              [pattern.clinician_id, pattern.surgery_id, date, pattern.start_time, pattern.end_time, pattern.expected_hours, month, year, userId]
+            );
+            if (inserted.rows[0]) created++;
+            else skipped++;
+          }
+        }
+        cursor.setUTCDate(cursor.getUTCDate() + 1);
+      }
+    }
+    return ok(res, { created, skipped }, "Monthly rota generated", 201);
+  } catch (err) {
+    if (err.statusCode) return fail(res, err.statusCode, err.message);
+    next(err);
+  }
+};
+
+export const getRotaGaps = async (req, res, next) => {
+  try {
+    const result = await query(
+      `SELECT rs.*,
+              COALESCE(c.full_name, c.email, rs.clinician_id::text) AS clinician_name,
+              COALESCE(p.name, rs.surgery_id::text) AS surgery_name
+         FROM rota_shifts rs
+         LEFT JOIN clinicians c ON c.id = rs.clinician_id
+         LEFT JOIN practices p ON p.id = rs.surgery_id
+        WHERE rs.is_filled = false
+          AND rs.shift_type = 'working'
+          AND rs.shift_date >= CURRENT_DATE
+          AND rs.shift_date <= CURRENT_DATE + INTERVAL '14 days'
+        ORDER BY rs.shift_date ASC`
+    );
+    const gaps = result.rows.map((row) => {
+      const shift = mapRotaShiftRow(row);
+      const startsAt = new Date(`${shift.shift_date}T${shift.start_time || "00:00:00"}Z`).getTime();
+      const hoursUntil = (startsAt - Date.now()) / 3600000;
+      return { ...shift, urgency: hoursUntil <= 24 ? "critical" : hoursUntil <= 48 ? "urgent" : "normal", isCritical: hoursUntil <= 24, isUrgent: hoursUntil <= 48 };
+    });
+    return ok(res, { gaps, total: gaps.length, urgent: gaps.filter((g) => g.urgency === "urgent").length, critical: gaps.filter((g) => g.urgency === "critical").length });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const sendRotaToClients = async (req, res, next) => {
+  try {
+    const month = parseIntStrict(req.body?.month || req.query?.month);
+    const year = parseIntStrict(req.body?.year || req.query?.year);
+    if (!monthRange(month, year)) return fail(res, 400, "month and year are required");
+    await query(`UPDATE rota_shifts SET sent_to_client = true, updated_at = NOW() WHERE rota_month = $1 AND rota_year = $2`, [month, year]);
+    return ok(res, { month, year }, "Rota marked as sent to clients");
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const getMyRota = async (req, res, next) => {
+  try {
+    const clinicianId = currentClinicianId(req);
+    const month = parseIntStrict(req.query.month);
+    const year = parseIntStrict(req.query.year);
+    if (!clinicianId) return fail(res, 403, "Clinician profile is not linked to this user");
+    if (!monthRange(month, year)) return fail(res, 400, "month and year are required");
+    const shifts = await fetchRotaShifts({ month, year, clinicianId });
+    return ok(res, { month, year, shifts });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const getTimesheetForMonth = async (req, res, next) => {
+  try {
+    const clinicianId = currentClinicianId(req);
+    const month = parseIntStrict(req.query.month);
+    const year = parseIntStrict(req.query.year);
+    if (!clinicianId) return fail(res, 403, "Clinician profile is not linked to this user");
+    if (!monthRange(month, year)) return fail(res, 400, "month and year are required");
+    const result = await query(
+      `INSERT INTO timesheets (clinician_id, month, year)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (clinician_id, month, year) DO UPDATE SET updated_at = timesheets.updated_at
+       RETURNING *`,
+      [clinicianId, month, year]
+    );
+    await ensureTimesheetEntries(result.rows[0], month, year);
+    const timesheet = await refreshTimesheetTotal(result.rows[0].id);
+    const entries = await getTimesheetEntries(timesheet.id);
+    return ok(res, { ...timesheet, entries });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const updateTimesheetEntry = async (req, res, next) => {
+  try {
+    const clinicianId = currentClinicianId(req);
+    const entryId = toUUID(req.params.id);
+    if (!entryId) return fail(res, 400, "Invalid entry id");
+    const existing = await query(`SELECT * FROM timesheet_entries WHERE id = $1 LIMIT 1`, [entryId]);
+    const entry = existing.rows[0];
+    if (!entry) return fail(res, 404, "Timesheet entry not found");
+    if (String(entry.clinician_id) !== String(clinicianId)) return fail(res, 403, "Cannot update another clinician's timesheet entry");
+    const start = normalizeTime(req.body?.start_time);
+    const end = normalizeTime(req.body?.end_time);
+    const result = await query(
+      `UPDATE timesheet_entries
+          SET start_time = $1, end_time = $2, notes = $3,
+              actual_hours = $4, updated_at = NOW()
+        WHERE id = $5 RETURNING *`,
+      [start, end, req.body?.notes || null, computeHours(start, end), entryId]
+    );
+    await refreshTimesheetTotal(entry.timesheet_id);
+    return ok(res, result.rows[0], "Timesheet entry updated");
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const submitTimesheet = async (req, res, next) => {
+  try {
+    const clinicianId = currentClinicianId(req);
+    const timesheetId = toUUID(req.params.id);
+    const timesheetResult = await query(`SELECT * FROM timesheets WHERE id = $1 LIMIT 1`, [timesheetId]);
+    const timesheet = timesheetResult.rows[0];
+    if (!timesheet) return fail(res, 404, "Timesheet not found");
+    if (String(timesheet.clinician_id) !== String(clinicianId)) return fail(res, 403, "Cannot submit another clinician's timesheet");
+    const entries = await getTimesheetEntries(timesheetId);
+    const incomplete = entries.filter((entry) => !entry.start_time || !entry.end_time || (entry.is_cover && (entry.project_code !== "COVER" || !entry.service_code)));
+    if (incomplete.length) return fail(res, 400, "Timesheet has incomplete entries", { incomplete_entries: incomplete });
+    const updated = await query(`UPDATE timesheets SET status = 'submitted', submitted_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *`, [timesheetId]);
+    return ok(res, { ...updated.rows[0], entries }, "Timesheet submitted");
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const getPendingTimesheets = async (req, res, next) => {
+  try {
+    const result = await query(
+      `SELECT ts.*,
+              COALESCE(c.full_name, c.email, ts.clinician_id::text) AS clinician_name,
+              COUNT(te.id)::int AS total_entries,
+              COALESCE(ROUND(SUM(te.expected_hours)::numeric, 2), 0) AS expected_hours,
+              COALESCE(ROUND(SUM(te.actual_hours)::numeric, 2), 0) AS actual_hours
+         FROM timesheets ts
+         LEFT JOIN clinicians c ON c.id = ts.clinician_id
+         LEFT JOIN timesheet_entries te ON te.timesheet_id = ts.id
+        WHERE ts.status = 'submitted'
+        GROUP BY ts.id, c.full_name, c.email
+        ORDER BY ts.submitted_at ASC`
+    );
+    return ok(res, result.rows);
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const getTimesheetDetail = async (req, res, next) => {
+  try {
+    const timesheetId = toUUID(req.params.id);
+    const result = await query(
+      `SELECT ts.*, COALESCE(c.full_name, c.email, ts.clinician_id::text) AS clinician_name
+         FROM timesheets ts
+         LEFT JOIN clinicians c ON c.id = ts.clinician_id
+        WHERE ts.id = $1 LIMIT 1`,
+      [timesheetId]
+    );
+    if (!result.rows[0]) return fail(res, 404, "Timesheet not found");
+    const entries = await getTimesheetEntries(timesheetId);
+    return ok(res, { ...result.rows[0], entries });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const getClinicianTimesheetForAdmin = async (req, res, next) => {
+  try {
+    const clinicianId = toUUID(req.params.clinicianId);
+    const month = parseIntStrict(req.query.month);
+    const year = parseIntStrict(req.query.year);
+    if (!clinicianId) return fail(res, 400, "Invalid clinician id");
+    if (!monthRange(month, year)) return fail(res, 400, "month and year are required");
+
+    const result = await query(
+      `SELECT ts.*, COALESCE(c.full_name, c.email, ts.clinician_id::text) AS clinician_name
+         FROM timesheets ts
+         LEFT JOIN clinicians c ON c.id = ts.clinician_id
+        WHERE ts.clinician_id = $1 AND ts.month = $2 AND ts.year = $3
+        LIMIT 1`,
+      [clinicianId, month, year]
+    );
+
+    if (!result.rows[0]) {
+      return ok(res, {
+        clinician_id: clinicianId,
+        month,
+        year,
+        status: "draft",
+        entries: [],
+        history: [],
+      }, "No timesheet created for this month yet");
+    }
+
+    const entries = await getTimesheetEntries(result.rows[0].id);
+    const history = await query(
+      `SELECT id, month, year, status, submitted_at, approved_at, rejected_at, rejection_reason, total_hours
+         FROM timesheets
+        WHERE clinician_id = $1
+        ORDER BY year DESC, month DESC`,
+      [clinicianId]
+    );
+
+    return ok(res, { ...result.rows[0], entries, history: history.rows });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const approveTimesheet = async (req, res, next) => {
+  try {
+    const result = await query(
+      `UPDATE timesheets
+          SET status = 'approved', approved_by = $2, approved_at = NOW(),
+              invoice_sent = false, updated_at = NOW()
+        WHERE id = $1 RETURNING *`,
+      [toUUID(req.params.id), toUUID(req.user?._id || req.user?.id)]
+    );
+    if (!result.rows[0]) return fail(res, 404, "Timesheet not found");
+    return ok(res, result.rows[0], "Timesheet approved");
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const rejectTimesheet = async (req, res, next) => {
+  try {
+    const reason = String(req.body?.rejection_reason || "").trim();
+    if (!reason) return fail(res, 400, "rejection_reason is required");
+    const result = await query(
+      `UPDATE timesheets
+          SET status = 'rejected', rejected_by = $2, rejected_at = NOW(),
+              rejection_reason = $3, updated_at = NOW()
+        WHERE id = $1 RETURNING *`,
+      [toUUID(req.params.id), toUUID(req.user?._id || req.user?.id), reason]
+    );
+    if (!result.rows[0]) return fail(res, 404, "Timesheet not found");
+    return ok(res, result.rows[0], "Timesheet rejected");
+  } catch (err) {
+    next(err);
+  }
+};
+
 export const createRota        = createShift;
 export const getRota           = getRotaGrid;
 export const getRotaByIdAlias  = getRotaById;
