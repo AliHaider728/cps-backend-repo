@@ -103,7 +103,45 @@ export async function ensureSchema() {
       );
     `);
 
-    // ── 3. shifts (legacy Shift model) ───────────────────────────────────
+    // ── 3. Stub lookup tables ─────────────────────────────────────────────
+    // clinicians / practices / pcns / users live in Supabase, but rotaController
+    // does LEFT JOINs against them in PostgreSQL queries.
+    // These are read-only stubs — just enough for JOINs to resolve without error.
+    // Names fall back to UUID text via COALESCE in the queries.
+    await query(`
+      CREATE TABLE IF NOT EXISTS clinicians (
+        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        full_name     TEXT,
+        email         TEXT,
+        clinician_type TEXT,
+        contract_type TEXT
+      );
+    `);
+
+    await query(`
+      CREATE TABLE IF NOT EXISTS practices (
+        id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name    TEXT,
+        pcn_id  UUID
+      );
+    `);
+
+    await query(`
+      CREATE TABLE IF NOT EXISTS pcns (
+        id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name TEXT
+      );
+    `);
+
+    await query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        email TEXT,
+        role  TEXT
+      );
+    `);
+
+    // ── 5. shifts (legacy Shift model) ───────────────────────────────────
     await query(`
       CREATE TABLE IF NOT EXISTS shifts (
         id                         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -146,7 +184,7 @@ export async function ensureSchema() {
     await query(`CREATE INDEX IF NOT EXISTS idx_shifts_clinician_date ON shifts(clinician_id, date);`);
     await query(`CREATE INDEX IF NOT EXISTS idx_shifts_status_date    ON shifts(status, date);`);
 
-    // ── 4. base_patterns ─────────────────────────────────────────────────
+    // ── 6. base_patterns ─────────────────────────────────────────────────
     await query(`
       CREATE TABLE IF NOT EXISTS base_patterns (
         id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -167,7 +205,7 @@ export async function ensureSchema() {
     `);
     await query(`CREATE INDEX IF NOT EXISTS idx_base_patterns_active ON base_patterns(is_active, day_of_week);`);
 
-    // ── 5. rota_shifts ────────────────────────────────────────────────────
+    // ── 7. rota_shifts ────────────────────────────────────────────────────
     await query(`
       CREATE TABLE IF NOT EXISTS rota_shifts (
         id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -197,7 +235,7 @@ export async function ensureSchema() {
     await query(`CREATE INDEX IF NOT EXISTS idx_rota_shifts_month_year ON rota_shifts(rota_year, rota_month);`);
     await query(`CREATE INDEX IF NOT EXISTS idx_rota_shifts_gap        ON rota_shifts(is_filled, shift_type, shift_date);`);
 
-    // ── 6. timesheets ─────────────────────────────────────────────────────
+    // ── 8. timesheets ─────────────────────────────────────────────────────
     await query(`
       CREATE TABLE IF NOT EXISTS timesheets (
         id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -222,7 +260,7 @@ export async function ensureSchema() {
     await query(`CREATE INDEX IF NOT EXISTS idx_timesheets_status           ON timesheets(status);`);
     await query(`CREATE INDEX IF NOT EXISTS idx_timesheets_clinician_period ON timesheets(clinician_id, year, month);`);
 
-    // ── 7. timesheet_entries ──────────────────────────────────────────────
+    // ── 9. timesheet_entries ──────────────────────────────────────────────
     await query(`
       CREATE TABLE IF NOT EXISTS timesheet_entries (
         id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -245,7 +283,7 @@ export async function ensureSchema() {
     await query(`CREATE INDEX IF NOT EXISTS idx_timesheet_entries_timesheet ON timesheet_entries(timesheet_id);`);
     await query(`CREATE INDEX IF NOT EXISTS idx_timesheet_entries_clinician ON timesheet_entries(clinician_id, shift_date);`);
 
-    // ── 8. cover_requests ─────────────────────────────────────────────────
+    // ── 10. cover_requests ────────────────────────────────────────────────
     await query(`
       CREATE TABLE IF NOT EXISTS cover_requests (
         id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -279,7 +317,7 @@ export async function ensureSchema() {
     await query(`CREATE INDEX IF NOT EXISTS idx_cover_requests_status_date  ON cover_requests(status, shift_date);`);
     await query(`CREATE INDEX IF NOT EXISTS idx_cover_requests_status_date2 ON cover_requests(status, date);`);
 
-    // ── 9. rota_distributions ─────────────────────────────────────────────
+    // ── 11. rota_distributions ────────────────────────────────────────────
     await query(`
       CREATE TABLE IF NOT EXISTS rota_distributions (
         id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -297,7 +335,7 @@ export async function ensureSchema() {
         ON rota_distributions(client_id, month, year);
     `);
 
-    // ── 10. time_entries ──────────────────────────────────────────────────
+    // ── 12. time_entries ──────────────────────────────────────────────────
     await query(`
       CREATE TABLE IF NOT EXISTS time_entries (
         id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
