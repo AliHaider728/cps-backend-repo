@@ -3,7 +3,7 @@
  *
  * Stored in PostgreSQL `shifts` table.
  * practice_id / client_id / clinician_id → TEXT (not UUID)
- * ✅ Added: hourly_rate, total_value
+ *  Added: hourly_rate, total_value
  */
 
 import { query } from "../config/db.js";
@@ -19,8 +19,8 @@ class Shift {
       start_time                 = null,
       end_time                   = null,
       hours                      = null,
-      hourly_rate                = null,   // ✅ NEW
-      total_value                = null,   // ✅ NEW
+      hourly_rate                = null,   //  NEW
+      total_value                = null,   //  NEW
       clinical_system            = null,
       status                     = "working",
       is_cover                   = false,
@@ -193,8 +193,8 @@ class Shift {
       start_time:                 row.start_time,
       end_time:                   row.end_time,
       hours:                      row.hours        ? parseFloat(row.hours)        : null,
-      hourly_rate:                row.hourly_rate  ? parseFloat(row.hourly_rate)  : null,  // ✅
-      total_value:                row.total_value  ? parseFloat(row.total_value)  : null,  // ✅
+      hourly_rate:                row.hourly_rate  ? parseFloat(row.hourly_rate)  : null,  // 
+      total_value:                row.total_value  ? parseFloat(row.total_value)  : null,  // 
       clinical_system:            row.clinical_system,
       status:                     row.status,
       is_cover:                   row.is_cover,
