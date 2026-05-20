@@ -22,19 +22,25 @@ const REVIEWERS = ["super_admin", "ops_manager", "finance", "director"];
 
 router.use(authenticate);
 
-router.get("/my", allowRoles(...CLINICIAN), getMyTimesheet);
+// ── Clinician (self) ──────────────────────────────────────────────────────
+router.get("/my",              allowRoles(...CLINICIAN), getMyTimesheet);
 router.get("/my/:month/:year", allowRoles(...CLINICIAN), getMyTimesheet);
-router.put("/entries/:id", allowRoles(...CLINICIAN), updateTimesheetEntry);
-router.post("/submit", allowRoles(...CLINICIAN), submitTimesheet);
+router.put("/entries/:id",     allowRoles(...CLINICIAN), updateTimesheetEntry);
+router.post("/submit",         allowRoles(...CLINICIAN), submitTimesheet);
 
-router.get("/pending", allowRoles(...APPROVERS), getPendingTimesheets);
-router.get("/history", allowRoles(...REVIEWERS), getTimesheetHistory);
-router.get("/:id/detail", allowRoles(...REVIEWERS), getTimesheetDetail);
-router.post("/:id/approve", allowRoles(...APPROVERS), approveTimesheet);
-router.post("/:id/reject", allowRoles(...APPROVERS), rejectTimesheet);
+// ── Approvals ─────────────────────────────────────────────────────────────
+router.get("/pending",       allowRoles(...APPROVERS), getPendingTimesheets);
+router.get("/history",       allowRoles(...REVIEWERS), getTimesheetHistory);
+router.get("/:id/detail",    allowRoles(...REVIEWERS), getTimesheetDetail);
+router.post("/:id/approve",  allowRoles(...APPROVERS), approveTimesheet);
+router.post("/:id/reject",   allowRoles(...APPROVERS), rejectTimesheet);
 
-router.get("/admin", allowRoles(...REVIEWERS), adminGetTimesheets);
-router.get("/admin/clinician/:clinicianId", allowRoles(...REVIEWERS), adminGetClinicianTimesheet);
-router.patch("/admin/:id/review", allowRoles(...APPROVERS), adminApproveTimesheet);
+// ── Admin ─────────────────────────────────────────────────────────────────
+router.get("/admin",                          allowRoles(...REVIEWERS), adminGetTimesheets);
+router.get("/admin/clinician/:clinicianId",   allowRoles(...REVIEWERS), adminGetClinicianTimesheet);
+router.patch("/admin/:id/review",             allowRoles(...APPROVERS), adminApproveTimesheet);
+
+//  FIX: CalendarPanel calls GET /timesheets/clinician/:id — this route was missing
+router.get("/clinician/:clinicianId",         allowRoles(...REVIEWERS), adminGetClinicianTimesheet);
 
 export default router;

@@ -6,6 +6,7 @@
  * ✅ Proper model imports
  * ✅ Complete error handling
  * ✅ FIX: getRotaGrid now resolves clinician + practice names from UUIDs
+ * ✅ FIX: createBulkShifts now inserts into rota_shifts (not app_records)
  */
 
 import nodemailer from "nodemailer";
@@ -263,6 +264,9 @@ const calcRotaEntryHours = (shiftStart, shiftEnd) => {
   return total > 0 ? Math.round(total * 100) / 100 : null;
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ✅ FIXED: createBulkShifts — now inserts into rota_shifts (not app_records)
+// ─────────────────────────────────────────────────────────────────────────────
 export const createBulkShifts = async (req, res, next) => {
   try {
     const {
@@ -292,7 +296,9 @@ export const createBulkShifts = async (req, res, next) => {
       return fail(res, 400, "Invalid rota status");
     }
 
-    const finalServiceCode = service_code ? String(service_code).toUpperCase() : null;
+    const finalServiceCode = service_code
+      ? String(service_code).toUpperCase()
+      : null;
     if (finalServiceCode && !SERVICE_CODES.has(finalServiceCode)) {
       return fail(res, 400, "Invalid service_code");
     }
@@ -302,58 +308,104 @@ export const createBulkShifts = async (req, res, next) => {
       return fail(res, 400, "shift_end must be after shift_start");
     }
 
-    const rate = hourly_rate !== undefined && hourly_rate !== null && hourly_rate !== ""
-      ? Number(hourly_rate)
-      : null;
-    const total_cost = rate !== null
-      ? Math.round(total_hours * rate * 100) / 100
-      : null;
+    const rate =
+      hourly_rate !== undefined && hourly_rate !== null && hourly_rate !== ""
+        ? Number(hourly_rate)
+        : null;
+    const total_cost =
+      rate !== null
+        ? Math.round(total_hours * rate * 100) / 100
+        : null;
 
     const selectedDays = new Set(
-      (Array.isArray(days_of_week) ? days_of_week : [1, 2, 3, 4, 5]).map((day) => Number(day))
+      (Array.isArray(days_of_week) ? days_of_week : [1, 2, 3, 4, 5]).map(
+        (day) => Number(day)
+      )
     );
+
     const userId = String(req.user._id || req.user.id);
-    const now = new Date().toISOString();
     const created = [];
     const current = new Date(`${date_from}T00:00:00Z`);
     const end = new Date(`${date_to}T00:00:00Z`);
 
+    // Parse month/year from date_from for rota_month / rota_year columns
+    const rotaMonth = current.getUTCMonth() + 1;
+    const rotaYear  = current.getUTCFullYear();
+
     while (current <= end) {
       const dayOfWeek = current.getUTCDay();
+
       if (selectedDays.has(dayOfWeek)) {
-        const id = uuidv4();
+        const id      = uuidv4();
         const dateStr = current.toISOString().slice(0, 10);
-        const payload = {
-          clinician_id:    finalStatus === "gap" ? null : clinician_id || null,
-          clinician_name:  finalStatus === "gap" ? null : clinician_name || null,
+
+        // ✅ Insert into rota_shifts — same table as all other shift operations
+        await query(
+          `INSERT INTO rota_shifts (
+             id,
+             clinician_id,
+             surgery_id,
+             shift_date,
+             shift_type,
+             start_time,
+             end_time,
+             expected_hours,
+             is_cover,
+             is_filled,
+             rota_month,
+             rota_year,
+             clinical_system,
+             service_code,
+             notes,
+             created_by,
+             created_at,
+             updated_at
+           ) VALUES (
+             $1, $2, $3, $4, $5, $6, $7, $8,
+             $9, $10, $11, $12, $13, $14, $15, $16,
+             NOW(), NOW()
+           )`,
+          [
+            id,
+            finalStatus === "gap" ? null : (clinician_id || null),   // clinician_id
+            practice_id,                                               // surgery_id = practice_id
+            dateStr,                                                   // shift_date
+            finalStatus,                                               // shift_type
+            shift_start,                                               // start_time
+            shift_end,                                                 // end_time
+            total_hours,                                               // expected_hours
+            finalStatus === "cover",                                   // is_cover
+            finalStatus === "working",                                 // is_filled
+            rotaMonth,                                                 // rota_month
+            rotaYear,                                                  // rota_year
+            clinical_system || null,                                   // clinical_system
+            finalServiceCode,                                          // service_code
+            notes || null,                                             // notes
+            userId,                                                    // created_by
+          ]
+        );
+
+        created.push({
+          id,
+          clinician_id:   finalStatus === "gap" ? null : (clinician_id || null),
+          clinician_name: finalStatus === "gap" ? null : (clinician_name || null),
           practice_id,
-          practice_name:   practice_name || null,
-          pcn_id:          pcn_id || null,
-          date:            dateStr,
-          date_from,
-          date_to,
+          practice_name:  practice_name || null,
+          pcn_id:         pcn_id || null,
+          date:           dateStr,
           shift_start,
           shift_end,
           total_hours,
-          hourly_rate:     rate,
+          hourly_rate:    rate,
           total_cost,
-          status:          finalStatus,
+          status:         finalStatus,
           clinical_system: clinical_system || null,
-          service_code:    finalServiceCode,
-          is_cover:        finalStatus === "cover",
-          notes,
-          created_by:      userId,
-          createdAt:       now,
-          updatedAt:       now,
-        };
-
-        await query(
-          `INSERT INTO app_records (id, model, data, created_at, updated_at)
-           VALUES ($1, 'RotaEntry', $2::jsonb, NOW(), NOW())`,
-          [id, JSON.stringify(payload)]
-        );
-        created.push({ id, ...payload });
+          service_code:   finalServiceCode,
+          is_cover:       finalStatus === "cover",
+          notes:          notes || null,
+        });
       }
+
       current.setUTCDate(current.getUTCDate() + 1);
     }
 
@@ -456,29 +508,21 @@ export const getRotaGrid = async (req, res, next) => {
     });
 
     // ── Build per-clinician grid ───────────────────────────────────────────
-    // All known clinicians from app_records (active ones)
     const allClinicians = Array.from(clinicianMap.values()).sort((a, b) =>
       String(a.fullName).localeCompare(String(b.fullName))
     );
 
-    // byClinician: clinicianId → { clinician, shifts: { dateISO: shiftObj } }
     const byClinician = new Map();
 
-    // Pre-populate with all known clinicians
     for (const c of allClinicians) {
       byClinician.set(c._id, { clinician: c, shifts: {} });
     }
-
-    // Also add a special "gap" row for unassigned shifts
-    // We'll collect gap shifts separately and add them under each clinician row
-    // that has a gap on that day, or create a virtual "Unassigned" row
 
     for (const s of enrichedShifts) {
       const cId = s.clinician_id ? String(s.clinician_id) : null;
       const dayKey = String(s.date).slice(0, 10);
 
       if (!cId || s.status === "gap") {
-        // Gap shift — attach to a virtual "gap" clinician row
         const gapKey = `gap_${s.practice_id || "unknown"}`;
         if (!byClinician.has(gapKey)) {
           const practiceName = s.practice_name || s.practice_id || "Unknown Practice";
@@ -497,7 +541,6 @@ export const getRotaGrid = async (req, res, next) => {
         continue;
       }
 
-      // Normal shift — ensure clinician row exists
       if (!byClinician.has(cId)) {
         const c = clinicianMap.get(cId) ?? {
           _id:      cId,
@@ -508,14 +551,11 @@ export const getRotaGrid = async (req, res, next) => {
       }
 
       const existing = byClinician.get(cId).shifts[dayKey];
-      // Prefer "working" over other statuses if multiple shifts same day
       if (!existing || s.status === "working") {
         byClinician.get(cId).shifts[dayKey] = s;
       }
     }
 
-    // Remove clinician rows that have zero shifts this month
-    // (keep only rows that have at least one shift OR are gap rows)
     const cliniciansWithShifts = Array.from(byClinician.values()).filter(
       (row) => Object.keys(row.shifts).length > 0
     );
@@ -746,7 +786,6 @@ export const getGapReport = async (req, res, next) => {
     const days = parseIntStrict(req.query.days) ?? 14;
     const gaps = await Shift.findGapsAhead(days);
 
-    // Resolve practice names for gap report
     const { practiceMap } = await buildLookupMaps();
 
     const gapsWithUrgency = gaps.map((g) => {
@@ -754,7 +793,6 @@ export const getGapReport = async (req, res, next) => {
       const gapDate = new Date(`${String(raw.date).slice(0, 10)}T00:00:00Z`).getTime();
       const urgent  = gapDate - Date.now() <= 48 * 3_600_000;
 
-      // Resolve practice name
       const pId = raw.practice_id ? String(raw.practice_id) : null;
       raw.practice_name = pId ? (practiceMap.get(pId)?.name ?? raw.practice_id) : raw.practice_id;
 
