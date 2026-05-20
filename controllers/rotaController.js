@@ -7,6 +7,7 @@
  * ✅ Complete error handling
  * ✅ FIX: getRotaGrid now resolves clinician + practice names from UUIDs
  * ✅ FIX: createBulkShifts now inserts into rota_shifts (not app_records)
+ * ✅ FIX: getClinicianRota now uses SQL fetchRotaShifts instead of Mongoose
  */
 
 import nodemailer from "nodemailer";
@@ -565,28 +566,57 @@ export const getRotaGrid = async (req, res, next) => {
   }
 };
 
-/* ─── GET /api/rota/:id/diary?month=&year= ──────────────────────────────── */
+/* ─── GET /api/rota/clinician/:id?month=&year= ──────────────────────────────── */
 export const getClinicianRota = async (req, res, next) => {
   try {
-    const clinicianId = toMongoId(req.params.id);
+    // ✅ FIX: Accept BOTH UUID (from app_records) AND MongoDB ID (legacy)
+    const clinicianId = toUUID(req.params.id) || toMongoId(req.params.id);
     if (!clinicianId) return fail(res, 400, "Invalid clinician id");
 
-    const range = monthRange(req.query.month, req.query.year);
-    if (!range) return fail(res, 400, "month and year are required");
+    const month = parseIntStrict(req.query.month);
+    const year = parseIntStrict(req.query.year);
+    if (!monthRange(month, year)) return fail(res, 400, "month and year are required");
 
-    const clinician = await Clinician.findById(clinicianId).lean();
+    // ✅ FIX: Fetch from PostgreSQL (app_records) — Clinician model
+    let clinician = null;
+    if (toUUID(clinicianId)) {
+      // UUID format — fetch from app_records Clinician model
+      const appRecord = await query(
+        `SELECT id, data FROM app_records WHERE model = 'Clinician' AND id = $1 LIMIT 1`,
+        [clinicianId]
+      );
+      if (appRecord.rows[0]) {
+        const d = appRecord.rows[0].data || {};
+        clinician = {
+          id: appRecord.rows[0].id,
+          _id: appRecord.rows[0].id,
+          fullName: d.fullName || d.name,
+          email: d.email,
+          clinicianType: d.clinicianType,
+          contractType: d.contractType,
+        };
+      }
+    } else {
+      // MongoDB format (legacy) — try Mongoose
+      try {
+        const doc = await Clinician.findById(clinicianId).lean();
+        clinician = doc;
+      } catch (e) {
+        // Continue with null
+      }
+    }
+
     if (!clinician) return fail(res, 404, "Clinician not found");
 
-    const shifts = await Shift.find({
-      clinician_id: clinicianId,
-      dateRange: { start: range.startDate, end: range.endDate },
-    });
+    // ✅ FIX: Fetch shifts from SQL rota_shifts table using fetchRotaShifts helper
+    const shifts = await fetchRotaShifts({ month, year, clinicianId });
 
     return ok(res, {
       clinician,
-      month: parseIntStrict(req.query.month),
-      year:  parseIntStrict(req.query.year),
+      month,
+      year,
       shifts,
+      totalShifts: shifts.length,
     });
   } catch (err) {
     next(err);
