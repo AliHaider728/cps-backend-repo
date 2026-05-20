@@ -339,7 +339,7 @@ export const createBulkShifts = async (req, res, next) => {
         const id      = uuidv4();
         const dateStr = current.toISOString().slice(0, 10);
 
-        // ✅ Insert into rota_shifts — same table as all other shift operations
+        // ✅ Insert into rota_shifts — only columns that exist in the table
         await query(
           `INSERT INTO rota_shifts (
              id,
@@ -354,20 +354,18 @@ export const createBulkShifts = async (req, res, next) => {
              is_filled,
              rota_month,
              rota_year,
-             service_code,
-             notes,
              created_by,
              created_at,
              updated_at
            ) VALUES (
              $1, $2, $3, $4, $5, $6, $7, $8,
-             $9, $10, $11, $12, $13, $14, $15,
+             $9, $10, $11, $12, $13,
              NOW(), NOW()
            )`,
           [
             id,
             finalStatus === "gap" ? null : (clinician_id || null),   // clinician_id
-            practice_id,                                               // surgery_id = practice_id
+            practice_id,                                               // surgery_id
             dateStr,                                                   // shift_date
             finalStatus,                                               // shift_type
             shift_start,                                               // start_time
@@ -377,8 +375,6 @@ export const createBulkShifts = async (req, res, next) => {
             finalStatus === "working",                                 // is_filled
             rotaMonth,                                                 // rota_month
             rotaYear,                                                  // rota_year
-            finalServiceCode,                                          // service_code
-            notes || null,                                             // notes
             userId,                                                    // created_by
           ]
         );
