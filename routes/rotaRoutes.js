@@ -13,7 +13,7 @@ import {
   createBulkShifts,
   createShift,
   updateShift,
-  deleteShift,
+  deleteShift,  
   getRotaGaps,
   assignCover,
   sendRotaToClient,

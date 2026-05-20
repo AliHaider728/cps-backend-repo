@@ -1,7 +1,9 @@
 /**
  * controllers/timesheetController.js
  * FIX: Removed all Supabase client calls — now uses PostgreSQL query() throughout.
- * Reason: timesheets, timesheet_entries, rota_shifts all live in PostgreSQL now.
+ * FIX 2: ensureDraftTimesheet query now uses EXTRACT(MONTH/YEAR FROM shift_date)
+ *         instead of rota_month/rota_year which don't exist in rota_shifts.
+ *         Also uses status = 'working' instead of shift_type = 'working'.
  */
 
 import { asyncHandler } from "../lib/asyncHandler.js";
@@ -15,7 +17,7 @@ const ok   = (res, data, message = "OK", status = 200) =>
 const fail = (res, status, message) =>
   res.status(status).json({ success: false, message });
 
-const userId     = (req) => req.user?._id || req.user?.id;
+const userId      = (req) => req.user?._id || req.user?.id;
 const clinicianId = (req) =>
   req.user?.clinicianId || req.user?.clinician_id || userId(req);
 
@@ -31,10 +33,6 @@ function withEntryMeta(entry) {
   };
 }
 
-/**
- * Fetch timesheet entries with surgery names resolved from the practices table.
- * Falls back gracefully if practices table doesn't exist.
- */
 async function fetchEntries(timesheet_id) {
   const entries = await TimesheetEntry.findByTimesheet(timesheet_id);
   return entries.map((e) => withEntryMeta(e));
@@ -42,7 +40,11 @@ async function fetchEntries(timesheet_id) {
 
 /**
  * Find-or-create a draft timesheet and auto-populate entries from rota_shifts.
- * Uses PostgreSQL for both timesheets and rota_shifts.
+ *
+ * ✅ FIX: rota_shifts has shift_date (DATE column), NOT rota_month/rota_year.
+ *         Use EXTRACT(MONTH FROM shift_date) and EXTRACT(YEAR FROM shift_date).
+ *         Also rota_shifts uses `status` column, not `shift_type`.
+ *         Cover shifts also included (status = 'cover').
  */
 async function ensureDraftTimesheet(req, month, year) {
   const cid = clinicianId(req);
@@ -57,38 +59,53 @@ async function ensureDraftTimesheet(req, month, year) {
   const existingEntries = await TimesheetEntry.findByTimesheet(timesheet.id);
   if (existingEntries.length > 0) return timesheet;
 
-  // 3. Pull matching rota_shifts from PostgreSQL
+  // 3. ✅ FIX: Pull matching rota_shifts using EXTRACT on shift_date
+  //           Include both 'working' and 'cover' shifts
   const shiftsResult = await query(
-    `SELECT * FROM rota_shifts
-      WHERE clinician_id = $1
-        AND rota_month   = $2
-        AND rota_year    = $3
-        AND shift_type   = 'working'
-      ORDER BY shift_date ASC`,
+    `SELECT
+        rs.*,
+        p.name AS surgery_name
+      FROM rota_shifts rs
+      LEFT JOIN practices p ON p.id = rs.practice_id
+      WHERE rs.clinician_id = $1
+        AND EXTRACT(MONTH FROM rs.shift_date) = $2
+        AND EXTRACT(YEAR  FROM rs.shift_date) = $3
+        AND rs.status IN ('working', 'cover')
+      ORDER BY rs.shift_date ASC`,
     [cid, month, year]
   );
 
   const shifts = shiftsResult.rows;
 
-  if (shifts.length > 0) {
-    await TimesheetEntry.upsert(
-      shifts.map((shift) => ({
-        timesheet_id:   timesheet.id,
-        clinician_id:   cid,
-        surgery_id:     shift.surgery_id    ?? null,
-        shift_date:     shift.shift_date,
-        start_time:     null,
-        end_time:       null,
-        actual_hours:   null,
-        expected_hours: shift.expected_hours ?? null,
-        is_cover:       !!shift.is_cover || shift.shift_type === "cover",
-        project_code:   shift.is_cover || shift.shift_type === "cover" ? "COVER" : (shift.project_code ?? null),
-        service_code:   shift.service_code ?? null,
-        notes:          "",
-      }))
-    );
-  }
+  if (shifts.length === 0) return timesheet;
 
+  // 4. Calculate expected_hours from shift_start / shift_end if not stored
+  const entries = shifts.map((shift) => {
+    const expectedHours =
+      shift.expected_hours ??
+      (shift.shift_start && shift.shift_end
+        ? calculateHours(shift.shift_start, shift.shift_end)
+        : null);
+
+    return {
+      timesheet_id:   timesheet.id,
+      clinician_id:   cid,
+      // ✅ FIX: rota_shifts uses practice_id, not surgery_id
+      surgery_id:     shift.surgery_id ?? shift.practice_id ?? null,
+      surgery_name:   shift.surgery_name ?? shift.practice_name ?? null,
+      shift_date:     shift.shift_date,
+      start_time:     null,
+      end_time:       null,
+      actual_hours:   null,
+      expected_hours: expectedHours,
+      is_cover:       shift.status === "cover" || !!shift.is_cover,
+      project_code:   shift.status === "cover" ? "COVER" : (shift.project_code ?? null),
+      service_code:   shift.service_code ?? null,
+      notes:          "",
+    };
+  });
+
+  await TimesheetEntry.upsert(entries);
   return timesheet;
 }
 
@@ -116,7 +133,6 @@ export const updateTimesheetEntry = asyncHandler(async (req, res) => {
     return fail(res, 400, "start_time must be before end_time");
   }
 
-  // Guard: entry must belong to this clinician and timesheet must be editable
   const current = await TimesheetEntry.findByIdWithStatus(req.params.id, clinicianId(req));
   if (!current) return fail(res, 404, "Timesheet entry not found");
   if (!["draft", "rejected"].includes(current.timesheet_status)) {
@@ -202,12 +218,12 @@ export const getTimesheetDetail = asyncHandler(async (req, res) => {
 
   if (!result.rows[0]) return fail(res, 404, "Timesheet not found");
 
-  const timesheet     = result.rows[0];
-  const entries       = await fetchEntries(timesheet.id);
+  const timesheet      = result.rows[0];
+  const entries        = await fetchEntries(timesheet.id);
   const total_expected = Math.round(
     entries.reduce((s, e) => s + Number(e.expected_hours || 0), 0) * 100
   ) / 100;
-  const total_actual  = Math.round(
+  const total_actual   = Math.round(
     entries.reduce((s, e) => s + Number(e.actual_hours   || 0), 0) * 100
   ) / 100;
 
@@ -242,6 +258,7 @@ export const getTimesheetHistory = asyncHandler(async (req, res) => {
   return ok(res, history);
 });
 
+// ✅ Admin fetches a specific clinician's timesheet (for CalendarPanel → Timesheet view)
 export const adminGetClinicianTimesheet = asyncHandler(async (req, res) => {
   const month = Number(req.query.month);
   const year  = Number(req.query.year);
@@ -252,12 +269,12 @@ export const adminGetClinicianTimesheet = asyncHandler(async (req, res) => {
 });
 
 // ─── aliases (keeps existing route bindings working) ─────────────────────────
-export const adminGetTimesheets          = getTimesheetHistory;
-export const adminGetPendingTimesheets   = getPendingTimesheets;
-export const adminGetTimesheetDetail     = getTimesheetDetail;
-export const adminApproveTimesheetPost   = approveTimesheet;
-export const adminRejectTimesheetPost    = rejectTimesheet;
-export const adminApproveTimesheet = asyncHandler(async (req, res) => {
+export const adminGetTimesheets        = getTimesheetHistory;
+export const adminGetPendingTimesheets = getPendingTimesheets;
+export const adminGetTimesheetDetail   = getTimesheetDetail;
+export const adminApproveTimesheetPost = approveTimesheet;
+export const adminRejectTimesheetPost  = rejectTimesheet;
+export const adminApproveTimesheet     = asyncHandler(async (req, res) => {
   if (req.body?.action === "rejected") {
     const reason = String(req.body?.rejection_reason || req.body?.reason || "").trim();
     if (!reason) return fail(res, 400, "rejection_reason is required");
