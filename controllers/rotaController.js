@@ -354,7 +354,6 @@ export const createBulkShifts = async (req, res, next) => {
              is_filled,
              rota_month,
              rota_year,
-             clinical_system,
              service_code,
              notes,
              created_by,
@@ -362,7 +361,7 @@ export const createBulkShifts = async (req, res, next) => {
              updated_at
            ) VALUES (
              $1, $2, $3, $4, $5, $6, $7, $8,
-             $9, $10, $11, $12, $13, $14, $15, $16,
+             $9, $10, $11, $12, $13, $14, $15,
              NOW(), NOW()
            )`,
           [
@@ -378,7 +377,6 @@ export const createBulkShifts = async (req, res, next) => {
             finalStatus === "working",                                 // is_filled
             rotaMonth,                                                 // rota_month
             rotaYear,                                                  // rota_year
-            clinical_system || null,                                   // clinical_system
             finalServiceCode,                                          // service_code
             notes || null,                                             // notes
             userId,                                                    // created_by
