@@ -1,9 +1,11 @@
 /**
  * controllers/timesheetController.js
- * FIX: Removed all Supabase client calls — now uses PostgreSQL query() throughout.
- * FIX 2: ensureDraftTimesheet query now uses EXTRACT(MONTH/YEAR FROM shift_date)
- *         instead of rota_month/rota_year which don't exist in rota_shifts.
- *         Also uses status = 'working' instead of shift_type = 'working'.
+ *
+ * ✅ FIX 1: ensureDraftTimesheet — JOIN uses surgery_id (not practice_id)
+ * ✅ FIX 2: Uses rota_month / rota_year columns (not EXTRACT on shift_date)
+ * ✅ FIX 3: Uses shift_type IN ('working','cover') (not status column)
+ * ✅ FIX 4: Uses start_time / end_time (not shift_start / shift_end)
+ * ✅ FIX 5: surgery_id used in entry mapping (not practice_id fallback)
  */
 
 import { asyncHandler } from "../lib/asyncHandler.js";
@@ -41,10 +43,14 @@ async function fetchEntries(timesheet_id) {
 /**
  * Find-or-create a draft timesheet and auto-populate entries from rota_shifts.
  *
- * ✅ FIX: rota_shifts has shift_date (DATE column), NOT rota_month/rota_year.
- *         Use EXTRACT(MONTH FROM shift_date) and EXTRACT(YEAR FROM shift_date).
- *         Also rota_shifts uses `status` column, not `shift_type`.
- *         Cover shifts also included (status = 'cover').
+ * ✅ rota_shifts schema (from createBulkShifts):
+ *    - surgery_id  (practice UUID — NOT practice_id)
+ *    - shift_type  (status column — 'working' | 'cover' | etc.)
+ *    - rota_month  (int)
+ *    - rota_year   (int)
+ *    - start_time  (time — NOT shift_start)
+ *    - end_time    (time — NOT shift_end)
+ *    - expected_hours (numeric)
  */
 async function ensureDraftTimesheet(req, month, year) {
   const cid = clinicianId(req);
@@ -59,47 +65,47 @@ async function ensureDraftTimesheet(req, month, year) {
   const existingEntries = await TimesheetEntry.findByTimesheet(timesheet.id);
   if (existingEntries.length > 0) return timesheet;
 
-  // 3. ✅ FIX: Pull matching rota_shifts using EXTRACT on shift_date
-  //           Include both 'working' and 'cover' shifts
+  // 3. ✅ FIX: Use surgery_id for JOIN, rota_month/rota_year for filtering,
+  //           shift_type for status filter (not 'status' column)
   const shiftsResult = await query(
     `SELECT
         rs.*,
         p.name AS surgery_name
       FROM rota_shifts rs
-      LEFT JOIN practices p ON p.id = rs.practice_id
+      LEFT JOIN practices p ON p.id = rs.surgery_id
       WHERE rs.clinician_id = $1
-        AND EXTRACT(MONTH FROM rs.shift_date) = $2
-        AND EXTRACT(YEAR  FROM rs.shift_date) = $3
-        AND rs.status IN ('working', 'cover')
+        AND rs.rota_month = $2
+        AND rs.rota_year  = $3
+        AND rs.shift_type IN ('working', 'cover')
       ORDER BY rs.shift_date ASC`,
     [cid, month, year]
   );
 
   const shifts = shiftsResult.rows;
-
   if (shifts.length === 0) return timesheet;
 
-  // 4. Calculate expected_hours from shift_start / shift_end if not stored
+  // 4. ✅ FIX: Use start_time / end_time (not shift_start / shift_end)
   const entries = shifts.map((shift) => {
     const expectedHours =
-      shift.expected_hours ??
-      (shift.shift_start && shift.shift_end
-        ? calculateHours(shift.shift_start, shift.shift_end)
-        : null);
+      shift.expected_hours != null
+        ? Number(shift.expected_hours)
+        : (shift.start_time && shift.end_time
+            ? calculateHours(shift.start_time, shift.end_time)
+            : null);
 
     return {
       timesheet_id:   timesheet.id,
       clinician_id:   cid,
-      // ✅ FIX: rota_shifts uses practice_id, not surgery_id
-      surgery_id:     shift.surgery_id ?? shift.practice_id ?? null,
-      surgery_name:   shift.surgery_name ?? shift.practice_name ?? null,
+      // ✅ FIX: rota_shifts stores practice as surgery_id
+      surgery_id:     shift.surgery_id ?? null,
+      surgery_name:   shift.surgery_name ?? null,
       shift_date:     shift.shift_date,
       start_time:     null,
       end_time:       null,
       actual_hours:   null,
       expected_hours: expectedHours,
-      is_cover:       shift.status === "cover" || !!shift.is_cover,
-      project_code:   shift.status === "cover" ? "COVER" : (shift.project_code ?? null),
+      is_cover:       shift.shift_type === "cover" || !!shift.is_cover,
+      project_code:   shift.shift_type === "cover" ? "COVER" : (shift.project_code ?? null),
       service_code:   shift.service_code ?? null,
       notes:          "",
     };
