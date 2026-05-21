@@ -10,6 +10,7 @@
  *   - Relationship records remain intact across ICB -> Federation -> Client -> Practice
  *   - Module 3: Clinician Management seed data added
  *   - Module 5: Rota & Shifts seed data added (native SQL table via Supabase)
+ *   - Module 6: Timesheet + TimesheetEntry seeding from shifts (fixes MyTimesheet page)
  *   - Refactored: all static data moved to seed-data/ JSON files
  *   - FIX: Strip client_xero_code + all non-schema fields before shifts insert
  *
@@ -194,7 +195,6 @@ async function ensureRecord(model, payload, field, value, label) {
   return created;
 }
 
-
 async function patchRecordIfNeeded(model, currentRecord, patch, label) {
   const hasChanges = Object.entries(patch).some(([key, value]) => !sameJson(currentRecord?.[key], value));
   if (!hasChanges) { log.info(`${label} already up to date`); return currentRecord; }
@@ -281,13 +281,29 @@ export async function runSeed() {
       await deleteAllByModel("ClinicianComplianceDoc");
       await deleteAllByModel("Clinician");
 
-      // ── Also wipe native shifts tables (--fresh mode) ──────────────────
-      log.info('Clearing shifts tables (--fresh)...');
+      // ── Also wipe native Supabase tables (--fresh mode) ───────────────
+      log.info("Clearing Supabase native tables (--fresh)...");
       const supabaseFresh = getSupabaseClient();
+
+      // Order matters: entries before timesheets (FK constraint), shifts last
+      const { error: te_err } = await supabaseFresh
+        .from("timesheet_entries")
+        .delete()
+        .neq("id", "00000000-0000-0000-0000-000000000000");
+      if (te_err) log.warn(`timesheet_entries clear: ${te_err.message}`);
+      else log.ok("timesheet_entries cleared");
+
+      const { error: ts_err } = await supabaseFresh
+        .from("timesheets")
+        .delete()
+        .neq("id", "00000000-0000-0000-0000-000000000000");
+      if (ts_err) log.warn(`timesheets clear: ${ts_err.message}`);
+      else log.ok("timesheets cleared");
+
       await supabaseFresh.from("rota_distributions").delete().neq("id", "00000000-0000-0000-0000-000000000000");
       await supabaseFresh.from("cover_requests").delete().neq("id", "00000000-0000-0000-0000-000000000000");
       await supabaseFresh.from("shifts").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-      log.ok("Shifts tables cleared");
+      log.ok("Supabase native tables cleared");
 
       log.ok("Fresh wipe complete");
     } else {
@@ -632,16 +648,14 @@ export async function runSeed() {
     const supabase = getSupabaseClient();
 
     // ── Build email → clinician UUID map ──────────────────────────────────
-    // Priority: Clinician model records (have real emails from clinicians.json)
-    // Fallback: seeded users with clinician role
     const clinicianEmailMap = new Map();
 
-    // First pass: Clinician model records (Dr. Ali Haider, Sarah Thompson, Dr. Rania Aziz)
+    // First pass: Clinician model records
     for (const c of Object.values(clinicianMap)) {
       if (c?.email) clinicianEmailMap.set(c.email.toLowerCase(), c.id);
     }
 
-    // Second pass: seeded user accounts (clinician@, clinician2@)
+    // Second pass: seeded user accounts (fallback)
     for (const u of seededUsers.filter((u) => u.role === "clinician")) {
       if (u.email && !clinicianEmailMap.has(u.email.toLowerCase())) {
         clinicianEmailMap.set(u.email.toLowerCase(), u.id);
@@ -653,7 +667,7 @@ export async function runSeed() {
       log.info(`  ${email} → ${id}`);
     }
 
-    // Build ODS code → practice UUID map from app_records practices
+    // Build ODS code → practice UUID map
     const practiceOdsMap = new Map(
       Object.values(practiceMap)
         .filter((p) => p?.odsCode)
@@ -665,21 +679,25 @@ export async function runSeed() {
       log.info(`  ${ods} → ${id}`);
     }
 
+    // Build practice UUID → practice name map (used later in Module 6)
+    const practiceIdToName = new Map(
+      Object.values(practiceMap)
+        .filter((p) => p?.id && p?.name)
+        .map((p) => [p.id, p.name])
+    );
+
     let shiftsInserted = 0;
     let shiftsSkipped  = 0;
     let shiftsFailed   = 0;
 
     for (const raw of SHIFTS_SEED_RAW) {
-      // Skip entries that are comment-only (only have _comment key)
       const realKeys = Object.keys(raw).filter((k) => !k.startsWith("_"));
       if (!realKeys.length) continue;
 
-      // Resolve IDs from ref fields
       const clinician_id = raw._clinicianEmail
         ? (clinicianEmailMap.get(raw._clinicianEmail.toLowerCase()) ?? null)
         : null;
 
-      // Warn if email was provided but not resolved
       if (raw._clinicianEmail && !clinician_id) {
         log.warn(`Shifts: clinician email "${raw._clinicianEmail}" not found in map — shift will be inserted with null clinician_id`);
       }
@@ -694,7 +712,7 @@ export async function runSeed() {
         continue;
       }
 
-      // Duplicate check: same date + practice + status + start_time
+      // Duplicate check
       const { data: existing, error: checkErr } = await supabase
         .from("shifts")
         .select("id")
@@ -714,14 +732,12 @@ export async function runSeed() {
         continue;
       }
 
-      // ── Strip ALL non-DB fields before insert ─────────────────────────
-      // Remove underscore ref fields (_clinicianEmail, _practiceOdsCode, _comment)
-      // AND any field not in SHIFTS_ALLOWED_COLUMNS (e.g. client_xero_code)
+      // Strip all non-DB fields before insert
       const shiftRecord = { id: uuidv4(), clinician_id, practice_id, created_by: admin.id };
 
       for (const [key, value] of Object.entries(raw)) {
-        if (key.startsWith("_")) continue;           // ref-only field
-        if (!SHIFTS_ALLOWED_COLUMNS.has(key)) {      // not in schema
+        if (key.startsWith("_")) continue;
+        if (!SHIFTS_ALLOWED_COLUMNS.has(key)) {
           log.info(`  Dropping non-schema field: ${key}`);
           continue;
         }
@@ -748,7 +764,172 @@ export async function runSeed() {
        END MODULE 5
     ═══════════════════════════════════════════════════════ */
 
-    log.ok("\nSeed complete!");
+    /* ═══════════════════════════════════════════════════════
+       MODULE 6 — TIMESHEETS + TIMESHEET ENTRIES
+       Reads all assigned shifts from Supabase, groups them by
+       clinician + month + year, creates one timesheet record
+       per group, then one timesheet_entry per shift.
+       This is what makes MyTimesheet page show data.
+    ═══════════════════════════════════════════════════════ */
+
+    log.info("\nSeeding Timesheets (Module 6)...");
+
+    // Fetch every shift that has a clinician assigned
+    // (gap shifts with null clinician_id are skipped — they have no owner)
+    const { data: allShifts, error: shiftsErr } = await supabase
+      .from("shifts")
+      .select("id, date, start_time, end_time, hours, status, practice_id, clinician_id, is_cover")
+      .not("clinician_id", "is", null);
+
+    if (shiftsErr) {
+      log.error(`Module 6: failed to fetch shifts — ${shiftsErr.message}`);
+    } else {
+      log.info(`Module 6: ${allShifts.length} assigned shifts fetched`);
+
+      // ── Group shifts by clinician + year + month ───────────────────────
+      const grouped = {};
+      for (const shift of allShifts) {
+        // Parse date safely — treat as local date to avoid UTC midnight drift
+        const d     = new Date(`${shift.date}T00:00:00`);
+        const month = d.getMonth() + 1;
+        const year  = d.getFullYear();
+        const key   = `${shift.clinician_id}__${year}__${month}`;
+
+        if (!grouped[key]) {
+          grouped[key] = { clinician_id: shift.clinician_id, month, year, shifts: [] };
+        }
+        grouped[key].shifts.push(shift);
+      }
+
+      log.info(`Module 6: ${Object.keys(grouped).length} clinician-month group(s) to process`);
+
+      let tsInserted = 0;
+      let tsSkipped  = 0;
+      let teInserted = 0;
+      let teSkipped  = 0;
+      let teFailed   = 0;
+
+      for (const { clinician_id, month, year, shifts } of Object.values(grouped)) {
+
+        // ── 1. Upsert timesheet record (one per clinician per month) ──────
+        const { data: existingTs, error: tsCheckErr } = await supabase
+          .from("timesheets")
+          .select("id, status")
+          .eq("clinician_id", clinician_id)
+          .eq("month", month)
+          .eq("year", year)
+          .maybeSingle();
+
+        if (tsCheckErr) {
+          log.warn(`Module 6: timesheet check failed for ${clinician_id} ${month}/${year} — ${tsCheckErr.message}`);
+          continue;
+        }
+
+        let timesheetId;
+
+        if (existingTs) {
+          timesheetId = existingTs.id;
+          log.info(`Timesheet exists: clinician=${clinician_id} ${month}/${year} [${existingTs.status}] — skipped`);
+          tsSkipped++;
+        } else {
+          const { data: newTs, error: tsInsertErr } = await supabase
+            .from("timesheets")
+            .insert({
+              id:               uuidv4(),
+              clinician_id,
+              month,
+              year,
+              status:           "draft",
+              submitted_at:     null,
+              approved_at:      null,
+              rejection_reason: null,
+              created_by:       admin.id,
+            })
+            .select("id")
+            .single();
+
+          if (tsInsertErr) {
+            log.error(`Module 6: timesheet insert failed for ${clinician_id} ${month}/${year} — ${tsInsertErr.message}`);
+            continue;
+          }
+
+          timesheetId = newTs.id;
+          log.ok(`Timesheet created: ${month}/${year} clinician=${clinician_id}`);
+          tsInserted++;
+        }
+
+        // ── 2. Seed one timesheet_entry per shift ─────────────────────────
+        for (const shift of shifts) {
+
+          // Duplicate check — one entry per shift per timesheet
+          const { data: existingEntry, error: teCheckErr } = await supabase
+            .from("timesheet_entries")
+            .select("id")
+            .eq("timesheet_id", timesheetId)
+            .eq("shift_id", shift.id)
+            .maybeSingle();
+
+          if (teCheckErr) {
+            log.warn(`Module 6: entry check failed for shift ${shift.id} — ${teCheckErr.message}`);
+            teFailed++;
+            continue;
+          }
+
+          if (existingEntry) {
+            teSkipped++;
+            continue;
+          }
+
+          // Calculate expected_hours from shift start/end times (or fall back to shift.hours)
+          let expected_hours = parseFloat(shift.hours ?? 0);
+          if (!expected_hours && shift.start_time && shift.end_time) {
+            const [sh, sm] = shift.start_time.split(":").map(Number);
+            const [eh, em] = shift.end_time.split(":").map(Number);
+            const diffMins = (eh * 60 + em) - (sh * 60 + sm);
+            expected_hours = diffMins > 0 ? Math.round((diffMins / 60) * 100) / 100 : 0;
+          }
+
+          const surgery_name = practiceIdToName.get(shift.practice_id) ?? null;
+
+          const { error: teInsertErr } = await supabase
+            .from("timesheet_entries")
+            .insert({
+              id:             uuidv4(),
+              timesheet_id:   timesheetId,
+              shift_id:       shift.id,
+              shift_date:     shift.date,
+              expected_hours,
+              actual_hours:   null,              // clinician fills in via MyTimesheet page
+              start_time:     shift.start_time ?? null,
+              end_time:       shift.end_time   ?? null,
+              surgery_name,
+              practice_id:    shift.practice_id,
+              is_cover:       shift.is_cover ?? shift.status === "cover",
+              notes:          null,
+              created_by:     admin.id,
+            });
+
+          if (teInsertErr) {
+            log.error(`Module 6: entry insert failed shift=${shift.id} — ${teInsertErr.message}`);
+            teFailed++;
+          } else {
+            log.ok(`  Entry: ${shift.date} | ${shift.status} | ${expected_hours}h expected | ${surgery_name ?? "unknown practice"}`);
+            teInserted++;
+          }
+        }
+      }
+
+      log.ok(
+        `Timesheets: ${tsInserted} created, ${tsSkipped} skipped | ` +
+        `Entries: ${teInserted} created, ${teSkipped} skipped, ${teFailed} failed`
+      );
+    }
+
+    /* ═══════════════════════════════════════════════════════
+       END MODULE 6
+    ═══════════════════════════════════════════════════════ */
+
+    log.ok("\n✅ Seed complete!");
     log.info(
       `Users: ${USERS.length} | ICBs: ${ICBS.length} | ` +
       `Federations: ${Object.keys(fedMap).length} | Clients: ${Object.keys(clientMap).length} | ` +
@@ -759,7 +940,8 @@ export async function runSeed() {
       `Leave Entries: ${LEAVE_SEED.length} | ` +
       `Supervision Logs: ${SUPERVISION_SEED.length} | ` +
       `Client History: ${CLIENT_HISTORY_SEED.length} | ` +
-      `Shifts: ${shiftsInserted} inserted`
+      `Shifts: ${shiftsInserted} inserted | ` +
+      `Timesheets + Entries: seeded via Module 6`
     );
     log.info(`Mode: ${FRESH_SEED ? "DESTRUCTIVE (--fresh)" : "SAFE (no deletions)"}`);
   } finally {
