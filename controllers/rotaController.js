@@ -720,6 +720,11 @@ export const createShift = async (req, res, next) => {
     }
 
     const shift = await Shift.create(payload);
+    try {
+      await mirrorShiftToRotaShifts(shift);
+    } catch (mirrorErr) {
+      console.warn("[createShift] rota_shifts mirror:", mirrorErr.message);
+    }
 
     await logAudit(req, "CREATE_SHIFT", "Shift", {
       resourceId: shift.id,
@@ -1240,6 +1245,149 @@ const fetchRotaShifts = async ({ month, year, clinicianId = null }) => {
   return mergeShiftLists(fromRota, fromShifts);
 };
 
+const fetchAllRotaShiftsFromRotaTable = async (clinicianId) => {
+  const params = [];
+  let clinicianFilter = "";
+  if (clinicianId) {
+    params.push(clinicianId);
+    clinicianFilter = ` AND TRIM(rs.clinician_id::text) = TRIM($${params.length}::text)`;
+  }
+  const result = await query(
+    `SELECT rs.*,
+            COALESCE(c.full_name, cr.data->>'fullName', cr.data->>'name', c.email, rs.clinician_id::text) AS clinician_name,
+            COALESCE(p.name, pr.data->>'name', rs.surgery_id::text) AS surgery_name,
+            pc.name AS pcn_name
+       FROM rota_shifts rs
+       LEFT JOIN clinicians c ON c.id::text = rs.clinician_id::text
+       LEFT JOIN app_records cr ON cr.model = 'Clinician' AND cr.id = rs.clinician_id::text
+       LEFT JOIN practices p ON p.id::text = rs.surgery_id::text
+       LEFT JOIN app_records pr ON pr.model = 'practice' AND pr.id = rs.surgery_id::text
+       LEFT JOIN pcns pc ON pc.id = p.pcn_id
+      WHERE 1=1${clinicianFilter}
+      ORDER BY rs.shift_date ASC`,
+    params
+  );
+  return result.rows.map(mapRotaShiftRow);
+};
+
+const fetchAllRotaShiftsFromShiftsTable = async (clinicianId) => {
+  const params = [];
+  let clinicianFilter = "";
+  if (clinicianId) {
+    params.push(clinicianId);
+    clinicianFilter = ` AND TRIM(COALESCE(s.clinician_id::text, '')) = TRIM($${params.length}::text)`;
+  } else {
+    clinicianFilter = ` AND COALESCE(s.clinician_id::text, '') <> ''`;
+  }
+  const result = await query(
+    `SELECT s.*,
+            COALESCE(c.full_name, cr.data->>'fullName', cr.data->>'name', s.clinician_id::text) AS clinician_name,
+            COALESCE(p.name, pr.data->>'name', s.practice_id::text) AS practice_name,
+            pc.name AS pcn_name
+       FROM shifts s
+       LEFT JOIN clinicians c ON c.id::text = s.clinician_id::text
+       LEFT JOIN app_records cr ON cr.model = 'Clinician' AND cr.id = s.clinician_id::text
+       LEFT JOIN practices p ON p.id::text = s.practice_id::text
+       LEFT JOIN app_records pr ON pr.model = 'practice' AND pr.id = s.practice_id::text
+       LEFT JOIN pcns pc ON pc.id = p.pcn_id
+      WHERE s.status <> 'cancelled'${clinicianFilter}
+      ORDER BY s.date ASC`,
+    params
+  );
+  return result.rows.map(mapShiftTableRow);
+};
+
+/** All assigned shifts for a clinician (no month/year cap). */
+const fetchAllRotaShiftsForClinician = async (clinicianId) => {
+  const id = normalizeClinicianId(clinicianId);
+  if (!id) return [];
+  const fromRota = await fetchAllRotaShiftsFromRotaTable(id);
+  const fromShifts = await fetchAllRotaShiftsFromShiftsTable(id);
+  return mergeShiftLists(fromRota, fromShifts);
+};
+
+/** Mirror a `shifts` row into `rota_shifts` so clinician portal always sees admin bookings. */
+async function mirrorShiftToRotaShifts(shift) {
+  if (!shift?.date || !shift?.practice_id) return;
+  const clinicianId = shift.clinician_id || null;
+  const dateStr = String(shift.date).slice(0, 10);
+  const [y, m] = dateStr.split("-").map(Number);
+  const shiftType = String(shift.status || "working").toLowerCase();
+  const mappedType = shiftType === "cppe" ? "cppe_training" : shiftType;
+  const hours = shift.hours ?? computeHours(shift.start_time, shift.end_time);
+
+  try {
+    await query(
+      `INSERT INTO rota_shifts (
+         id, clinician_id, surgery_id, shift_date, shift_type,
+         start_time, end_time, expected_hours, is_cover, is_filled,
+         rota_month, rota_year, created_by, created_at, updated_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW()
+       )
+       ON CONFLICT (id) DO UPDATE SET
+         clinician_id = EXCLUDED.clinician_id,
+         surgery_id = EXCLUDED.surgery_id,
+         shift_date = EXCLUDED.shift_date,
+         shift_type = EXCLUDED.shift_type,
+         start_time = EXCLUDED.start_time,
+         end_time = EXCLUDED.end_time,
+         expected_hours = EXCLUDED.expected_hours,
+         is_cover = EXCLUDED.is_cover,
+         is_filled = EXCLUDED.is_filled,
+         rota_month = EXCLUDED.rota_month,
+         rota_year = EXCLUDED.rota_year,
+         updated_at = NOW()`,
+      [
+        shift.id,
+        clinicianId,
+        shift.practice_id,
+        dateStr,
+        mappedType,
+        shift.start_time || null,
+        shift.end_time || null,
+        hours,
+        !!shift.is_cover || shiftType === "cover",
+        shiftType === "working" && !!clinicianId,
+        m,
+        y,
+        shift.created_by || null,
+      ]
+    );
+  } catch (err) {
+    await query(
+      `INSERT INTO rota_shifts (
+         id, clinician_id, surgery_id, shift_date, shift_type,
+         start_time, end_time, expected_hours, is_cover, is_filled,
+         rota_month, rota_year, created_by, created_at, updated_at
+       )
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW()
+       WHERE NOT EXISTS (
+         SELECT 1 FROM rota_shifts rs
+          WHERE TRIM(COALESCE(rs.clinician_id::text, '')) = TRIM(COALESCE($2::text, ''))
+            AND rs.shift_date = $4::date
+            AND TRIM(COALESCE(rs.surgery_id::text, '')) = TRIM(COALESCE($3::text, ''))
+            AND rs.shift_type = $5
+       )`,
+      [
+        shift.id,
+        clinicianId,
+        shift.practice_id,
+        dateStr,
+        mappedType,
+        shift.start_time || null,
+        shift.end_time || null,
+        hours,
+        !!shift.is_cover || shiftType === "cover",
+        shiftType === "working" && !!clinicianId,
+        m,
+        y,
+        shift.created_by || null,
+      ]
+    );
+  }
+}
+
 const getTimesheetEntries = async (timesheetId) => {
   const result = await query(
     `SELECT te.*,
@@ -1439,15 +1587,30 @@ export const sendRotaToClients = async (req, res, next) => {
   }
 };
 
+const isAllScope = (req) =>
+  req.query.scope === "all" ||
+  req.query.all === "true" ||
+  req.query.all === "1";
+
 export const getMyRota = async (req, res, next) => {
   try {
     const clinicianId = await resolveRequestClinicianId(req);
+    if (!clinicianId) return fail(res, 403, "Clinician profile is not linked to this user");
+
+    if (isAllScope(req)) {
+      const shifts = await fetchAllRotaShiftsForClinician(clinicianId);
+      return ok(res, { scope: "all", clinicianId, shifts, total: shifts.length });
+    }
+
     const month = parseIntStrict(req.query.month);
     const year = parseIntStrict(req.query.year);
-    if (!clinicianId) return fail(res, 403, "Clinician profile is not linked to this user");
-    if (!monthRange(month, year)) return fail(res, 400, "month and year are required");
+    if (!monthRange(month, year)) {
+      const shifts = await fetchAllRotaShiftsForClinician(clinicianId);
+      return ok(res, { scope: "all", clinicianId, shifts, total: shifts.length });
+    }
+
     const shifts = await fetchRotaShifts({ month, year, clinicianId });
-    return ok(res, { month, year, shifts });
+    return ok(res, { scope: "month", month, year, clinicianId, shifts, total: shifts.length });
   } catch (err) {
     next(err);
   }
@@ -1456,10 +1619,44 @@ export const getMyRota = async (req, res, next) => {
 export const getTimesheetForMonth = async (req, res, next) => {
   try {
     const clinicianId = await resolveRequestClinicianId(req);
+    if (!clinicianId) return fail(res, 403, "Clinician profile is not linked to this user");
+
+    if (isAllScope(req)) {
+      const shifts = await fetchAllRotaShiftsForClinician(clinicianId);
+      const timesheetsResult = await query(
+        `SELECT ts.*,
+                COUNT(te.id)::int AS entry_count
+           FROM timesheets ts
+           LEFT JOIN timesheet_entries te ON te.timesheet_id = ts.id
+          WHERE TRIM(ts.clinician_id::text) = TRIM($1::text)
+          GROUP BY ts.id
+          ORDER BY ts.year DESC, ts.month DESC`,
+        [clinicianId]
+      );
+      const timeEntriesResult = await query(
+        `SELECT te.*,
+                COALESCE(p.name, pr.data->>'name', te.surgery_id::text) AS surgery_name
+           FROM timesheet_entries te
+           LEFT JOIN practices p ON p.id = te.surgery_id
+           LEFT JOIN app_records pr ON pr.model = 'practice' AND pr.id = te.surgery_id::text
+          WHERE TRIM(te.clinician_id::text) = TRIM($1::text)
+          ORDER BY te.shift_date DESC`,
+        [clinicianId]
+      );
+      return ok(res, {
+        scope: "all",
+        clinicianId,
+        shifts,
+        timesheets: timesheetsResult.rows,
+        entries: timeEntriesResult.rows,
+        totalShifts: shifts.length,
+      });
+    }
+
     const month = parseIntStrict(req.query.month);
     const year = parseIntStrict(req.query.year);
-    if (!clinicianId) return fail(res, 403, "Clinician profile is not linked to this user");
-    if (!monthRange(month, year)) return fail(res, 400, "month and year are required");
+    if (!monthRange(month, year)) return fail(res, 400, "month and year are required (or use scope=all)");
+
     const result = await query(
       `INSERT INTO timesheets (clinician_id, month, year)
        VALUES ($1, $2, $3)
@@ -1471,7 +1668,7 @@ export const getTimesheetForMonth = async (req, res, next) => {
     const timesheet = await refreshTimesheetTotal(result.rows[0].id);
     const entries = await getTimesheetEntries(timesheet.id);
     const shifts = await fetchRotaShifts({ month, year, clinicianId });
-    return ok(res, { timesheet, entries, shifts });
+    return ok(res, { scope: "month", month, year, timesheet, entries, shifts });
   } catch (err) {
     next(err);
   }

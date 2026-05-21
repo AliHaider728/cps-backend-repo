@@ -13,7 +13,11 @@ import { v4 as uuidv4 } from "uuid";
 import { query }           from "../config/db.js";
 import { getRequestIp, logAudit } from "../middleware/auditLogger.js";
 import { sendWelcomeEmail }        from "../utils/sendEmail.js";
-import { resolveClinicianIdForUser } from "../lib/clinicianLink.js";
+import {
+  resolveClinicianIdForUser,
+  linkUserToClinician,
+  unlinkUserFromClinician,
+} from "../lib/clinicianLink.js";
 
 const USER_MODEL      = "user";
 const AUDIT_MODEL     = "audit_log";
@@ -279,7 +283,15 @@ export const getAllUsers = async (req, res) => {
       params
     );
 
-    const users = result.rows.map((row) => sanitizeUser(mapUserRow(row)));
+    const users = await Promise.all(
+      result.rows.map(async (row) => {
+        const u = sanitizeUser(mapUserRow(row));
+        if (u.role === "clinician") {
+          u.clinicianId = await resolveClinicianIdForUser(u);
+        }
+        return u;
+      })
+    );
     return res.json({ success: true, users });
   } catch (error) {
     console.error("[getAllUsers ERROR]", error.message);
@@ -292,7 +304,11 @@ export const getUserById = async (req, res) => {
   try {
     const user = await findUserById(req.params.id);
     if (!user) return res.status(404).json({ message: "User not found" });
-    return res.json({ success: true, user: sanitizeUser(user) });
+    const safe = sanitizeUser(user);
+    if (safe.role === "clinician") {
+      safe.clinicianId = await resolveClinicianIdForUser(user);
+    }
+    return res.json({ success: true, user: safe });
   } catch (error) {
     console.error("[getUserById ERROR]", error.message);
     return res.status(500).json({ message: error.message });
@@ -344,13 +360,23 @@ export const createUser = async (req, res) => {
       console.error("[createUser EMAIL ERROR]", emailError.message);
     }
 
+    const linkedClinicianId =
+      req.body?.linkedClinicianId ?? req.body?.clinicianId ?? req.body?.clinician_id;
+    if (user.role === "clinician" && linkedClinicianId) {
+      await linkUserToClinician(user._id, linkedClinicianId);
+    }
+
     await logAudit(req, "CREATE_USER", "User", {
       resourceId: user._id,
       detail:     `Created user ${user.name} with role ${user.role}`,
       after:      { name: user.name, email: user.email, role: user.role, isActive: user.isActive },
     });
 
-    return res.status(201).json({ success: true, user: sanitizeUser(user) });
+    const safe = sanitizeUser(user);
+    if (safe.role === "clinician") {
+      safe.clinicianId = await resolveClinicianIdForUser(user);
+    }
+    return res.status(201).json({ success: true, user: safe });
   } catch (error) {
     console.error("[createUser ERROR]", error.message);
     return res.status(500).json({ message: error.message });
@@ -387,6 +413,11 @@ export const updateUser = async (req, res) => {
     if (typeof role     === "string" && role.trim()) patch.role     = role;
     if (typeof isActive === "boolean")               patch.isActive = isActive;
 
+    const linkedClinicianId =
+      req.body?.linkedClinicianId ??
+      req.body?.clinicianId ??
+      req.body?.clinician_id;
+
     if (password) {
       patch.password           = await bcrypt.hash(String(password), PASSWORD_ROUNDS);
       patch.mustChangePassword = true;
@@ -422,6 +453,15 @@ export const updateUser = async (req, res) => {
     const updatedUser = await updateUserRecord(id, patch);
     if (!updatedUser) return res.status(404).json({ message: "User not found" });
 
+    const effectiveRole = patch.role || existingUser.role;
+    if (linkedClinicianId === null || linkedClinicianId === "") {
+      if (effectiveRole === "clinician") {
+        await unlinkUserFromClinician(id);
+      }
+    } else if (linkedClinicianId) {
+      await linkUserToClinician(id, linkedClinicianId);
+    }
+
     await logAudit(req, "UPDATE_USER", "User", {
       resourceId: updatedUser._id,
       detail:     `Updated user ${updatedUser.name}`,
@@ -429,10 +469,15 @@ export const updateUser = async (req, res) => {
       after:  { name: updatedUser.name,  email: updatedUser.email,  role: updatedUser.role,  isActive: updatedUser.isActive  },
     });
 
-    return res.json({ success: true, user: sanitizeUser(updatedUser) });
+    const safe = sanitizeUser(updatedUser);
+    if (effectiveRole === "clinician") {
+      safe.clinicianId = await resolveClinicianIdForUser(updatedUser);
+    }
+    return res.json({ success: true, user: safe });
   } catch (error) {
     console.error("[updateUser ERROR]", error.message);
-    return res.status(500).json({ message: error.message });
+    const status = error.statusCode || 500;
+    return res.status(status).json({ message: error.message });
   }
 };
 
