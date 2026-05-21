@@ -13,6 +13,7 @@ import { v4 as uuidv4 } from "uuid";
 import { query }           from "../config/db.js";
 import { getRequestIp, logAudit } from "../middleware/auditLogger.js";
 import { sendWelcomeEmail }        from "../utils/sendEmail.js";
+import { resolveClinicianIdForUser } from "../lib/clinicianLink.js";
 
 const USER_MODEL      = "user";
 const AUDIT_MODEL     = "audit_log";
@@ -47,23 +48,8 @@ function sanitizeUser(user) {
 }
 
 async function buildAuthUser(user) {
-  let clinicianId = user.clinicianId || null;
-
-  if (user.role === "clinician" && !clinicianId) {
-    try {
-      const userId = String(user._id || user.id || "");
-      const result = await query(
-        `SELECT id FROM app_records
-         WHERE model = 'Clinician'
-         AND (data->>'user' = $1 OR data->>'userId' = $1)
-         LIMIT 1`,
-        [userId]
-      );
-      clinicianId = result.rows[0]?.id || null;
-    } catch (e) {
-      console.error("[buildAuthUser clinicianId lookup]", e.message);
-    }
-  }
+  const clinicianId =
+    user.role === "clinician" ? await resolveClinicianIdForUser(user) : null;
 
   return {
     id:                 user._id,
