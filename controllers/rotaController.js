@@ -17,6 +17,7 @@ import {
   normalizeClinicianId,
   resolveClinicianIdForUser,
 } from "../lib/clinicianLink.js";
+import { applyCoverShiftDefaults } from "../lib/rotaPracticeEnrich.js";
 import { v4 as uuidv4 } from "uuid";
 import { readFile } from "fs/promises";
 import { join, dirname } from "path";
@@ -691,6 +692,8 @@ export const createShift = async (req, res, next) => {
       created_by:     toUUID(req.user?._id || req.user?.id) || toMongoId(req.user?._id || req.user?.id) || null,
     };
 
+    const withCover = await applyCoverShiftDefaults(payload, practiceId);
+    Object.assign(payload, withCover);
     validateCoverEntry(payload);
 
     if (payload.clinician_id) {
@@ -1126,6 +1129,11 @@ const mapRotaShiftRow = (row = {}) => ({
   shift_type: row.shift_type || row.status,
   practice_id: row.surgery_id || row.practice_id,
   practice_name: row.surgery_name || row.practice_name,
+  clinical_system: row.clinical_system || null,
+  hourly_rate:
+    row.hourly_rate != null && row.hourly_rate !== ""
+      ? Number(row.hourly_rate)
+      : null,
   total_hours: row.expected_hours != null ? Number(row.expected_hours) : row.hours != null ? Number(row.hours) : null,
   hours: row.expected_hours != null ? Number(row.expected_hours) : row.hours != null ? Number(row.hours) : null,
 });
@@ -1186,14 +1194,16 @@ const fetchRotaShiftsFromRotaTable = async ({ month, year, clinicianId, range })
   }
   const result = await query(
     `SELECT rs.*,
-            COALESCE(c.full_name, cr.data->>'fullName', cr.data->>'name', c.email, rs.clinician_id::text) AS clinician_name,
-            COALESCE(p.name, pr.data->>'name', rs.surgery_id::text) AS surgery_name,
+            COALESCE(c.full_name, cr.data->>'fullName', cr.data->>'name', c.email) AS clinician_name,
+            NULLIF(TRIM(COALESCE(p.name, pr.data->>'name', pr.data->>'practiceName', cl.data->>'name')), '') AS surgery_name,
+            NULLIF(TRIM(COALESCE(pr.data->>'clinicalSystem', pr.data->>'system', cl.data->>'clinicalSystem', cl.data->>'system')), '') AS clinical_system,
             pc.name AS pcn_name
        FROM rota_shifts rs
        LEFT JOIN clinicians c ON c.id::text = rs.clinician_id::text
        LEFT JOIN app_records cr ON cr.model = 'Clinician' AND cr.id = rs.clinician_id::text
        LEFT JOIN practices p ON p.id::text = rs.surgery_id::text
-       LEFT JOIN app_records pr ON pr.model = 'practice' AND pr.id = rs.surgery_id::text
+       LEFT JOIN app_records pr ON pr.model IN ('practice', 'Practice') AND pr.id::text = rs.surgery_id::text
+       LEFT JOIN app_records cl ON cl.model IN ('Client', 'client') AND cl.id::text = rs.surgery_id::text
        LEFT JOIN pcns pc ON pc.id = p.pcn_id
       WHERE (
               (rs.rota_month = $1 AND rs.rota_year = $2)
@@ -1217,14 +1227,16 @@ const fetchRotaShiftsFromShiftsTable = async ({ clinicianId, range }) => {
 
   const result = await query(
     `SELECT s.*,
-            COALESCE(c.full_name, cr.data->>'fullName', cr.data->>'name', s.clinician_id::text) AS clinician_name,
-            COALESCE(p.name, pr.data->>'name', s.practice_id::text) AS practice_name,
+            COALESCE(c.full_name, cr.data->>'fullName', cr.data->>'name') AS clinician_name,
+            NULLIF(TRIM(COALESCE(p.name, pr.data->>'name', pr.data->>'practiceName', cl.data->>'name')), '') AS practice_name,
+            NULLIF(TRIM(COALESCE(s.clinical_system, pr.data->>'clinicalSystem', pr.data->>'system', cl.data->>'clinicalSystem')), '') AS clinical_system,
             pc.name AS pcn_name
        FROM shifts s
        LEFT JOIN clinicians c ON c.id::text = s.clinician_id::text
        LEFT JOIN app_records cr ON cr.model = 'Clinician' AND cr.id = s.clinician_id::text
        LEFT JOIN practices p ON p.id::text = s.practice_id::text
-       LEFT JOIN app_records pr ON pr.model = 'practice' AND pr.id = s.practice_id::text
+       LEFT JOIN app_records pr ON pr.model IN ('practice', 'Practice') AND pr.id = s.practice_id::text
+       LEFT JOIN app_records cl ON cl.model IN ('Client', 'client') AND cl.id = s.practice_id::text
        LEFT JOIN pcns pc ON pc.id = p.pcn_id
       WHERE s.date >= $1::date
         AND s.date < $2::date
@@ -1254,14 +1266,16 @@ const fetchAllRotaShiftsFromRotaTable = async (clinicianId) => {
   }
   const result = await query(
     `SELECT rs.*,
-            COALESCE(c.full_name, cr.data->>'fullName', cr.data->>'name', c.email, rs.clinician_id::text) AS clinician_name,
-            COALESCE(p.name, pr.data->>'name', rs.surgery_id::text) AS surgery_name,
+            COALESCE(c.full_name, cr.data->>'fullName', cr.data->>'name', c.email) AS clinician_name,
+            NULLIF(TRIM(COALESCE(p.name, pr.data->>'name', pr.data->>'practiceName', cl.data->>'name')), '') AS surgery_name,
+            NULLIF(TRIM(COALESCE(pr.data->>'clinicalSystem', pr.data->>'system', cl.data->>'clinicalSystem')), '') AS clinical_system,
             pc.name AS pcn_name
        FROM rota_shifts rs
        LEFT JOIN clinicians c ON c.id::text = rs.clinician_id::text
        LEFT JOIN app_records cr ON cr.model = 'Clinician' AND cr.id = rs.clinician_id::text
        LEFT JOIN practices p ON p.id::text = rs.surgery_id::text
-       LEFT JOIN app_records pr ON pr.model = 'practice' AND pr.id = rs.surgery_id::text
+       LEFT JOIN app_records pr ON pr.model IN ('practice', 'Practice') AND pr.id = rs.surgery_id::text
+       LEFT JOIN app_records cl ON cl.model IN ('Client', 'client') AND cl.id::text = rs.surgery_id::text
        LEFT JOIN pcns pc ON pc.id = p.pcn_id
       WHERE 1=1${clinicianFilter}
       ORDER BY rs.shift_date ASC`,
@@ -1281,14 +1295,16 @@ const fetchAllRotaShiftsFromShiftsTable = async (clinicianId) => {
   }
   const result = await query(
     `SELECT s.*,
-            COALESCE(c.full_name, cr.data->>'fullName', cr.data->>'name', s.clinician_id::text) AS clinician_name,
-            COALESCE(p.name, pr.data->>'name', s.practice_id::text) AS practice_name,
+            COALESCE(c.full_name, cr.data->>'fullName', cr.data->>'name') AS clinician_name,
+            NULLIF(TRIM(COALESCE(p.name, pr.data->>'name', pr.data->>'practiceName', cl.data->>'name')), '') AS practice_name,
+            NULLIF(TRIM(COALESCE(s.clinical_system, pr.data->>'clinicalSystem', cl.data->>'clinicalSystem')), '') AS clinical_system,
             pc.name AS pcn_name
        FROM shifts s
        LEFT JOIN clinicians c ON c.id::text = s.clinician_id::text
        LEFT JOIN app_records cr ON cr.model = 'Clinician' AND cr.id = s.clinician_id::text
        LEFT JOIN practices p ON p.id::text = s.practice_id::text
-       LEFT JOIN app_records pr ON pr.model = 'practice' AND pr.id = s.practice_id::text
+       LEFT JOIN app_records pr ON pr.model IN ('practice', 'Practice') AND pr.id = s.practice_id::text
+       LEFT JOIN app_records cl ON cl.model IN ('Client', 'client') AND cl.id = s.practice_id::text
        LEFT JOIN pcns pc ON pc.id = p.pcn_id
       WHERE s.status <> 'cancelled'${clinicianFilter}
       ORDER BY s.date ASC`,
@@ -1391,12 +1407,14 @@ async function mirrorShiftToRotaShifts(shift) {
 const getTimesheetEntries = async (timesheetId) => {
   const result = await query(
     `SELECT te.*,
-            COALESCE(p.name, te.surgery_id::text) AS surgery_name,
+            NULLIF(TRIM(COALESCE(p.name, pr.data->>'name', cl.data->>'name')), '') AS surgery_name,
             CASE WHEN te.actual_hours IS NULL OR te.expected_hours IS NULL
               THEN NULL ELSE ROUND((te.actual_hours - te.expected_hours)::numeric, 2)
             END AS difference
        FROM timesheet_entries te
-       LEFT JOIN practices p ON p.id = te.surgery_id
+       LEFT JOIN practices p ON p.id::text = te.surgery_id::text
+       LEFT JOIN app_records pr ON pr.model IN ('practice', 'Practice') AND pr.id::text = te.surgery_id::text
+       LEFT JOIN app_records cl ON cl.model IN ('Client', 'client') AND cl.id::text = te.surgery_id::text
       WHERE te.timesheet_id = $1
       ORDER BY te.shift_date ASC`,
     [timesheetId]
@@ -1669,6 +1687,119 @@ export const getTimesheetForMonth = async (req, res, next) => {
     const entries = await getTimesheetEntries(timesheet.id);
     const shifts = await fetchRotaShifts({ month, year, clinicianId });
     return ok(res, { scope: "month", month, year, timesheet, entries, shifts });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/** Clinician saves hours for a rota shift → ensure timesheet + entry, then update. */
+export const upsertTimesheetEntryForShift = async (req, res, next) => {
+  try {
+    const clinicianId = await resolveRequestClinicianId(req);
+    if (!clinicianId) return fail(res, 403, "Clinician profile is not linked to this user");
+
+    const shiftId = toUUID(req.params.shiftId);
+    if (!shiftId) return fail(res, 400, "Invalid shift id");
+
+    let shiftRow = null;
+    const fromShifts = await query(`SELECT * FROM shifts WHERE id = $1 LIMIT 1`, [shiftId]);
+    if (fromShifts.rows[0]) {
+      const s = fromShifts.rows[0];
+      shiftRow = {
+        clinician_id: s.clinician_id,
+        surgery_id: s.practice_id,
+        shift_date: s.date?.toISOString?.().slice(0, 10) || s.date,
+        expected_hours: s.hours,
+        is_cover: s.is_cover,
+        start_time: s.start_time,
+        end_time: s.end_time,
+      };
+    } else {
+      const fromRota = await query(`SELECT * FROM rota_shifts WHERE id = $1 LIMIT 1`, [shiftId]);
+      const r = fromRota.rows[0];
+      if (r) {
+        shiftRow = {
+          clinician_id: r.clinician_id,
+          surgery_id: r.surgery_id,
+          shift_date: r.shift_date?.toISOString?.().slice(0, 10) || r.shift_date,
+          expected_hours: r.expected_hours,
+          is_cover: r.is_cover,
+          start_time: r.start_time,
+          end_time: r.end_time,
+        };
+      }
+    }
+
+    if (!shiftRow) return fail(res, 404, "Shift not found");
+    if (String(shiftRow.clinician_id) !== String(clinicianId)) {
+      return fail(res, 403, "Cannot update another clinician's shift");
+    }
+
+    const dateStr = String(shiftRow.shift_date).slice(0, 10);
+    const [y, m] = dateStr.split("-").map(Number);
+    const month = parseIntStrict(req.body?.month) || m;
+    const year = parseIntStrict(req.body?.year) || y;
+    if (!monthRange(month, year)) return fail(res, 400, "Invalid month/year");
+
+    const tsResult = await query(
+      `INSERT INTO timesheets (clinician_id, month, year)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (clinician_id, month, year) DO UPDATE SET updated_at = timesheets.updated_at
+       RETURNING *`,
+      [toUUID(clinicianId) || clinicianId, month, year]
+    );
+    const timesheet = tsResult.rows[0];
+
+    const existingEntry = await query(
+      `SELECT id FROM timesheet_entries
+        WHERE timesheet_id = $1
+          AND TRIM(clinician_id::text) = TRIM($2::text)
+          AND shift_date = $3::date
+          AND COALESCE(surgery_id::text, '') = COALESCE($4::text, '')
+        LIMIT 1`,
+      [timesheet.id, clinicianId, dateStr, shiftRow.surgery_id || null]
+    );
+
+    let entryId = existingEntry.rows[0]?.id;
+    if (!entryId) {
+      const inserted = await query(
+        `INSERT INTO timesheet_entries (
+           timesheet_id, clinician_id, surgery_id, shift_date, expected_hours,
+           is_cover, project_code, service_code, start_time, end_time
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING id`,
+        [
+          timesheet.id,
+          clinicianId,
+          shiftRow.surgery_id || null,
+          dateStr,
+          shiftRow.expected_hours,
+          !!shiftRow.is_cover,
+          shiftRow.is_cover ? "COVER" : null,
+          null,
+          shiftRow.start_time || null,
+          shiftRow.end_time || null,
+        ]
+      );
+      entryId = inserted.rows[0].id;
+    }
+
+    const start = normalizeTime(req.body?.start_time ?? shiftRow.start_time);
+    const end = normalizeTime(req.body?.end_time ?? shiftRow.end_time);
+    const updated = await query(
+      `UPDATE timesheet_entries
+          SET start_time = $1, end_time = $2, notes = $3,
+              actual_hours = $4, updated_at = NOW()
+        WHERE id = $5 RETURNING *`,
+      [start, end, req.body?.notes || null, computeHours(start, end), entryId]
+    );
+    await refreshTimesheetTotal(timesheet.id);
+    const refreshed = await query(`SELECT * FROM timesheets WHERE id = $1`, [timesheet.id]);
+
+    return ok(res, {
+      entry: updated.rows[0],
+      timesheet: refreshed.rows[0],
+    }, "Hours saved for shift");
   } catch (err) {
     next(err);
   }

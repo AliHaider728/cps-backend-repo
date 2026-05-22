@@ -13,6 +13,7 @@ import Clinician           from "../models/Clinician.js";
 import { logAudit }        from "../middleware/auditLogger.js";
 import { normalizeId }     from "../lib/ids.js";
 import { calcAllBalances, calcOtherLeave, dayCount } from "../lib/leaveCalc.js";
+import { validateAnnualLeaveBalance } from "../lib/leaveValidation.js";
 import { query } from "../config/db.js";
 import ClinicianSupervisionLog from "../models/ClinicianSupervisionLog.js";
 
@@ -31,15 +32,39 @@ const eachDateISO = (startDate, endDate) => {
 };
 
 const syncLeaveToRota = async ({ clinicianId, leaveType, startDate, endDate, actorId, sourceLeaveId }) => {
-  const rotaStatus = leaveType === "annual" ? "annual_leave" : leaveType === "sick" ? "sick" : leaveType === "cppe" ? "cppe" : null;
+  const rotaStatus =
+    leaveType === "annual" ? "annual_leave"
+    : leaveType === "sick" ? "sick"
+    : leaveType === "cppe" ? "cppe_training"
+    : null;
   if (!rotaStatus) return;
   const dates = eachDateISO(startDate, endDate);
+  const cid = String(clinicianId);
   for (const date of dates) {
     await query(
       `UPDATE shifts
-       SET status = $1, source = $2, source_leave_id = $3, updated_at = NOW()
-       WHERE clinician_id = $4 AND date = $5`,
-      [rotaStatus, `${leaveType}_log`, sourceLeaveId || null, clinicianId, date]
+       SET status = $1, hours = 0, source = $2, source_leave_id = $3, updated_at = NOW()
+       WHERE TRIM(clinician_id::text) = TRIM($4) AND date = $5::date`,
+      [rotaStatus, `${leaveType}_log`, sourceLeaveId || null, cid, date]
+    );
+    await query(
+      `UPDATE rota_shifts
+       SET shift_type = $1, expected_hours = 0, is_filled = false, updated_at = NOW()
+       WHERE TRIM(clinician_id::text) = TRIM($2) AND shift_date = $3::date`,
+      [rotaStatus, cid, date]
+    );
+    await query(
+      `UPDATE timesheet_entries te
+          SET expected_hours = 0,
+              actual_hours = 0,
+              notes = COALESCE(NULLIF(TRIM(te.notes), ''), '') || CASE WHEN TRIM(COALESCE(te.notes, '')) = '' THEN $1 ELSE ' | ' || $1 END,
+              updated_at = NOW()
+        FROM timesheets ts
+       WHERE te.timesheet_id = ts.id
+         AND TRIM(te.clinician_id::text) = TRIM($2)
+         AND te.shift_date = $3::date
+         AND ts.status IN ('draft', 'rejected')`,
+      [`On ${leaveType} leave`, cid, date]
     );
   }
   if (leaveType === "annual") {
@@ -98,10 +123,32 @@ export const addLeave = async (req, res, next) => {
       ? Number(body.days)
       : dayCount(startDate, endDate);
 
+    const leaveType = body.leaveType || "annual";
+    const contract = body.contract || clinician.contractType || "ARRS";
+
+    if (leaveType === "annual") {
+      const existing = await ClinicianLeaveEntry.find({ clinician: id }).lean();
+      const block = validateAnnualLeaveBalance(existing, {
+        contract,
+        startDate,
+        endDate,
+        days,
+      });
+      if (block.blocked) {
+        return res.status(400).json({
+          code: block.code,
+          message: block.message,
+          contractType: block.contractType,
+          requestedDays: block.requestedDays,
+          remainingDays: block.remainingDays,
+        });
+      }
+    }
+
     const entry = await ClinicianLeaveEntry.create({
       clinician:  id,
-      leaveType:  body.leaveType  || "annual",
-      contract:   body.contract   || clinician.contractType || "ARRS",
+      leaveType,
+      contract,
       startDate,
       endDate,
       days,
@@ -160,6 +207,28 @@ export const updateLeave = async (req, res, next) => {
       const s = body.startDate || before.startDate;
       const e = body.endDate   || before.endDate;
       if (body.days == null || body.days === "") body.days = dayCount(s, e);
+    }
+
+    const leaveType = body.leaveType || before.leaveType || "annual";
+    const contract = body.contract || before.contract || "ARRS";
+    if (leaveType === "annual" && (body.days != null || body.startDate || body.endDate)) {
+      const all = await ClinicianLeaveEntry.find({ clinician: id }).lean();
+      const others = all.filter((e) => String(e._id) !== String(entryId));
+      const block = validateAnnualLeaveBalance(others, {
+        contract,
+        startDate: body.startDate || before.startDate,
+        endDate: body.endDate || before.endDate,
+        days: body.days != null ? body.days : before.days,
+      });
+      if (block.blocked) {
+        return res.status(400).json({
+          code: block.code,
+          message: block.message,
+          contractType: block.contractType,
+          requestedDays: block.requestedDays,
+          remainingDays: block.remainingDays,
+        });
+      }
     }
 
     const isApproving = (body.approved === true || body.approved === "true") && !before.approved;

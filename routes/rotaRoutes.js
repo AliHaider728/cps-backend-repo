@@ -20,6 +20,7 @@ import {
   sendRotaToClients,
   getCoverRequests,
   getTimesheetForMonth,
+  upsertTimesheetEntryForShift,
   updateTimesheetEntry,
   submitTimesheet,
   getPendingTimesheets,
@@ -52,6 +53,7 @@ router.post("/send-to-clients", ...generator, sendRotaToClients);
 
 router.get("/my", ...clinicianOnly, getMyRota);
 router.get("/timesheet/my", ...clinicianOnly, getTimesheetForMonth);
+router.put("/timesheet/shift/:shiftId", ...clinicianOnly, upsertTimesheetEntryForShift);
 router.put("/timesheet/entry/:id", ...clinicianOnly, updateTimesheetEntry);
 router.post("/timesheet/:id/submit", ...clinicianOnly, submitTimesheet);
 

@@ -14,6 +14,7 @@ import {
   createClinician,
   getClinicianById,
   updateClinician,
+  linkClinicianUser,
   deleteClinician,
   getClientHistory,
   addClientHistory,
@@ -61,6 +62,7 @@ router.post("/", ...writer, createClinician);
 /* ── Detail CRUD ───────────────────────────────────────────── */
 router.get(   "/:id", ...reader, getClinicianById);
 router.put(   "/:id", ...writer, updateClinician);
+router.patch( "/:id/link-user", ...admin, linkClinicianUser);
 router.delete("/:id", ...admin,  deleteClinician);
 
 /* ── Tab 3 — Compliance docs ───────────────────────────────── */

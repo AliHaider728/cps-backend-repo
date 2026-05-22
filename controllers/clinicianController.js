@@ -15,7 +15,9 @@ import User                    from "../models/User.js";
 import { logAudit }            from "../middleware/auditLogger.js";
 import { normalizeId }         from "../lib/ids.js";
 import { calcAllBalances }     from "../lib/leaveCalc.js";
+import { linkUserToClinician, unlinkUserFromClinician } from "../lib/clinicianLink.js";
 import { sendWelcomeEmail }    from "../utils/sendEmail.js";
+import { query }               from "../config/db.js";
 
 /* ─── helpers ────────────────────────────────────────────── */
 const safeJson = (v) => JSON.parse(JSON.stringify(v ?? null));
@@ -224,6 +226,55 @@ export const getClinicianById = async (req, res, next) => {
   }
 };
 
+/* ─── LINK USER ACCOUNT (super admin) ───────────────────── */
+export const linkClinicianUser = async (req, res, next) => {
+  try {
+    const id = validateId(req.params.id);
+    const userId = req.body?.userId ?? req.body?.user_id ?? null;
+
+    if (!userId) {
+      const before = await Clinician.findById(id).lean();
+      const uid = before?.user?._id || before?.user || before?.userId;
+      if (uid) await unlinkUserFromClinician(String(uid));
+      const clinician = await Clinician.findById(id)
+        .populate("opsLead", "fullName email role")
+        .populate("supervisor", "fullName email role")
+        .populate("user", "fullName email role")
+        .lean();
+      return res.json({ clinician, linked: false });
+    }
+
+    const userRow = await query(
+      `SELECT id, data FROM app_records WHERE model = 'user' AND id = $1 LIMIT 1`,
+      [String(userId)]
+    );
+    const role = String(userRow.rows[0]?.data?.role || "").toLowerCase();
+    if (!userRow.rows[0]) return res.status(404).json({ message: "User not found" });
+    if (role && role !== "clinician") {
+      return res.status(400).json({ message: "Selected user must have the clinician role" });
+    }
+
+    await linkUserToClinician(String(userId), id);
+
+    const clinician = await Clinician.findById(id)
+      .populate("opsLead", "fullName email role")
+      .populate("supervisor", "fullName email role")
+      .populate("user", "fullName email role")
+      .lean();
+
+    await logAudit(req, "CLINICIAN_USER_RELINKED", "Clinician", {
+      resourceId: id,
+      detail: `Linked clinician to user ${userId}`,
+      after: { userId, clinicianId: id },
+    });
+
+    res.json({ clinician, linked: true, userId: String(userId) });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ message: err.message });
+    next(err);
+  }
+};
+
 /* ─── UPDATE ─────────────────────────────────────────────── */
 export const updateClinician = async (req, res, next) => {
   try {
@@ -234,20 +285,41 @@ export const updateClinician = async (req, res, next) => {
     const body = { ...req.body };
     delete body._id;
     delete body.createdAt;
-    // Strip login-only fields if accidentally sent on update
     delete body.createLogin;
     delete body.loginPassword;
 
-    const updated = await Clinician.findByIdAndUpdate(id, body, { new: true });
+    if ("startDate" in body) {
+      body.startDate = body.startDate ? new Date(body.startDate).toISOString() : null;
+    }
+    if ("endDate" in body) {
+      body.endDate = body.endDate ? new Date(body.endDate).toISOString() : null;
+    }
+    if ("opsLead" in body) {
+      body.opsLead = body.opsLead ? String(body.opsLead) : null;
+    }
+    if ("supervisor" in body) {
+      body.supervisor = body.supervisor ? String(body.supervisor) : null;
+    }
+    if ("workingHours" in body) {
+      body.workingHours = Number(body.workingHours) || 0;
+    }
+
+    await Clinician.findByIdAndUpdate(id, body, { new: true });
+
+    const clinician = await Clinician.findById(id)
+      .populate("opsLead", "fullName email role")
+      .populate("supervisor", "fullName email role")
+      .populate("user", "fullName email role")
+      .lean();
 
     await logAudit(req, "UPDATE_CLINICIAN", "Clinician", {
       resourceId: id,
-      detail: `Updated clinician "${updated?.fullName || id}"`,
+      detail: `Updated clinician "${clinician?.fullName || id}"`,
       before: safeJson(before),
-      after:  safeJson(updated),
+      after:  safeJson(clinician),
     });
 
-    res.json({ clinician: updated });
+    res.json({ clinician });
   } catch (err) {
     next(err);
   }
