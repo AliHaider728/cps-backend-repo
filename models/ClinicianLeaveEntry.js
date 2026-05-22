@@ -22,6 +22,8 @@ const ClinicianLeaveEntry = createModel({
     endDate:    null,
     days:       0,          // numeric, supports half-days (e.g. 3.5)
     approved:   false,
+    rejected:   false,
+    rejectionNote: "",
     approvedBy: null,
     approvedAt: null,
     notes:      "",

@@ -16,8 +16,11 @@ import { logAudit }            from "../middleware/auditLogger.js";
 import { normalizeId }         from "../lib/ids.js";
 import { calcAllBalances }     from "../lib/leaveCalc.js";
 import { linkUserToClinician, unlinkUserFromClinician } from "../lib/clinicianLink.js";
+import { syncClinicianStub } from "../lib/syncClinicianStub.js";
 import { sendWelcomeEmail }    from "../utils/sendEmail.js";
 import { query }               from "../config/db.js";
+import { fetchShiftCountsByClinician } from "../lib/shiftCounts.js";
+import crypto from "crypto";
 
 /* ─── helpers ────────────────────────────────────────────── */
 const safeJson = (v) => JSON.parse(JSON.stringify(v ?? null));
@@ -91,15 +94,19 @@ export const getClinicians = async (req, res, next) => {
       leaveByClinician.get(cid).push(entry);
     }
 
+    const shiftCounts = await fetchShiftCountsByClinician();
+
     const enriched = docs.map((d) => {
       const balances = calcAllBalances(leaveByClinician.get(String(d._id)) || []);
       const primaryBalance = balances.find((b) => b.contract === d.contractType) || balances[0];
+      const shiftCount = shiftCounts.get(String(d._id)) || 0;
       return {
         ...d,
-        opsLeadName:    userMap.get(String(d.opsLead))?.fullName || "",
-        supervisorName: userMap.get(String(d.supervisor))?.fullName || "",
+        opsLeadName:    userMap.get(String(d.opsLead))?.fullName || userMap.get(String(d.opsLead))?.name || "",
+        supervisorName: userMap.get(String(d.supervisor))?.fullName || userMap.get(String(d.supervisor))?.name || "",
         alBalance:      primaryBalance,
         leaveBalances:  balances,
+        shiftCount,
       };
     });
 
@@ -262,6 +269,8 @@ export const linkClinicianUser = async (req, res, next) => {
       .populate("user", "fullName email role")
       .lean();
 
+    await syncClinicianStub(clinician);
+
     await logAudit(req, "CLINICIAN_USER_RELINKED", "Clinician", {
       resourceId: id,
       detail: `Linked clinician to user ${userId}`,
@@ -311,6 +320,8 @@ export const updateClinician = async (req, res, next) => {
       .populate("supervisor", "fullName email role")
       .populate("user", "fullName email role")
       .lean();
+
+    await syncClinicianStub(clinician);
 
     await logAudit(req, "UPDATE_CLINICIAN", "Clinician", {
       resourceId: id,
@@ -507,6 +518,89 @@ export const unrestrictClinician = async (req, res, next) => {
     });
 
     res.json({ clinician: updated });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/* ─── Login account (super_admin) ─────────────────────────── */
+export const updateClinicianUserLogin = async (req, res, next) => {
+  try {
+    const id = validateId(req.params.id);
+    const clinician = await Clinician.findById(id).lean();
+    if (!clinician) return res.status(404).json({ message: "Clinician not found" });
+
+    const userId = toId(clinician.user || clinician.userId);
+    if (!userId) return res.status(400).json({ message: "No login account linked to this clinician" });
+
+    const newEmail = String(req.body?.email || "").trim().toLowerCase();
+    if (!newEmail) return res.status(400).json({ message: "email is required" });
+
+    const dup = await User.findOne({ email: newEmail }).lean();
+    if (dup && String(dup._id) !== String(userId)) {
+      return res.status(409).json({ message: "Email already in use by another account" });
+    }
+
+    const before = await User.findById(userId).lean();
+    const updated = await User.findByIdAndUpdate(userId, { email: newEmail }, { new: true });
+
+    await Clinician.findByIdAndUpdate(id, { email: newEmail });
+
+    await logAudit(req, "UPDATE_CLINICIAN_LOGIN_EMAIL", "User", {
+      resourceId: userId,
+      detail: `Updated login email for clinician ${clinician.fullName || id}`,
+      before: { email: before?.email },
+      after: { email: newEmail },
+    });
+
+    res.json({
+      user: { id: updated._id, email: updated.email },
+      loginEmail: updated.email,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const resetClinicianUserPassword = async (req, res, next) => {
+  try {
+    const id = validateId(req.params.id);
+    const clinician = await Clinician.findById(id).lean();
+    if (!clinician) return res.status(404).json({ message: "Clinician not found" });
+
+    const userId = toId(clinician.user || clinician.userId);
+    if (!userId) return res.status(400).json({ message: "No login account linked to this clinician" });
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const tempPassword = crypto.randomBytes(6).toString("base64url").slice(0, 10);
+    await User.findByIdAndUpdate(userId, {
+      password: tempPassword,
+      mustChangePassword: true,
+    });
+
+    try {
+      await sendWelcomeEmail({
+        name: user.name || user.fullName || clinician.fullName,
+        email: user.email,
+        password: tempPassword,
+        role: user.role,
+      });
+    } catch (mailErr) {
+      console.warn("[resetClinicianUserPassword] email failed:", mailErr.message);
+    }
+
+    await logAudit(req, "RESET_CLINICIAN_LOGIN_PASSWORD", "User", {
+      resourceId: userId,
+      detail: `Reset password for clinician ${clinician.fullName || id}`,
+    });
+
+    res.json({
+      success: true,
+      message: "Temporary password sent to clinician email.",
+      email: user.email,
+    });
   } catch (err) {
     next(err);
   }

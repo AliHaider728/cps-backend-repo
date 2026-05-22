@@ -13,6 +13,7 @@ import ClinicianComplianceDoc    from "../models/ClinicianComplianceDoc.js";
 import Clinician                 from "../models/Clinician.js";
 import { logAudit }              from "../middleware/auditLogger.js";
 import { normalizeId }           from "../lib/ids.js";
+import { assertClinicianAccess } from "../lib/clinicianAccess.js";
 import { uploadBufferToStorage } from "../lib/supabase.js";
 
 /* ─── helpers */
@@ -42,8 +43,7 @@ const calcProgress = (docs) => {
 /* ─── LIST */
 export const getCompliance = async (req, res, next) => {
   try {
-    const id = toId(req.params.id);
-    if (!id) return res.status(400).json({ message: "Invalid clinician id" });
+    const id = await assertClinicianAccess(req, req.params.id);
 
     const clinician = await Clinician.findById(id).lean();
     if (!clinician) return res.status(404).json({ message: "Clinician not found" });

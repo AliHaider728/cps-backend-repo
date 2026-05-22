@@ -260,14 +260,6 @@ async function getEntityDocumentContext(entityType, entityId) {
   let entity;
   try {
     entity = await query.lean();
-    console.log("[documents] getEntityDocumentContext QUERY_RESULT", {
-      entityType: normalizedType,
-      entityId,
-      found: !!entity,
-      hasComplianceGroup: !!entity?.complianceGroup,
-      complianceGroupsCount: Array.isArray(entity?.complianceGroups) ? entity.complianceGroups.length : 0,
-      groupDocumentsCount:   Array.isArray(entity?.groupDocuments)   ? entity.groupDocuments.length   : 0,
-    });
   } catch (err) {
     console.error("getEntityDocumentContext populate ERROR:", {
       message: err.message, stack: err.stack, entityType: normalizedType, entityId,
@@ -361,10 +353,8 @@ function buildEntityDocumentsPayload(entity, documents, options = {}) {
 export const getEntityDocuments = async (req, res) => {
   try {
     const { entityType, entityId } = req.params;
-    console.log("[documents] getEntityDocuments INCOMING", { entityType, entityId });
 
     if (!isValidId(String(entityId || ""))) {
-      console.warn("[documents] getEntityDocuments INVALID_ID", { entityType, entityId });
       return res.status(400).json({ message: "Invalid ID" });
     }
 
@@ -374,20 +364,6 @@ export const getEntityDocuments = async (req, res) => {
     if (!entity) {
       return res.status(404).json({ message: `${normalizedType} not found` });
     }
-
-    const groupInfo = buildSelectedGroups(entity).map((group) => ({
-      _id: String(group._id), name: group.name,
-      documentCount: Array.isArray(group.documents) ? group.documents.length : 0,
-    }));
-    const groupDocuments = Array.isArray(entity.groupDocuments) ? entity.groupDocuments : [];
-    console.log("[documents] getEntityDocuments GROUP_STATE", {
-      entityType: normalizedType, entityId,
-      complianceGroup: entity.complianceGroup ? String(entity.complianceGroup._id || entity.complianceGroup) : null,
-      complianceGroupsCount: Array.isArray(entity.complianceGroups) ? entity.complianceGroups.length : 0,
-      selectedGroups: groupInfo,
-      groupDocumentsCount: groupDocuments.length,
-      resolvedDocumentCount: Array.isArray(documents) ? documents.length : 0,
-    });
 
     res.json({
       entityType: normalizedType,

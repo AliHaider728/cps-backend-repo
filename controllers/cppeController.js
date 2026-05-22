@@ -12,6 +12,7 @@
 import Clinician     from "../models/Clinician.js";
 import { logAudit }  from "../middleware/auditLogger.js";
 import { normalizeId } from "../lib/ids.js";
+import { assertClinicianAccess } from "../lib/clinicianAccess.js";
 
 const safeJson = (v) => JSON.parse(JSON.stringify(v ?? null));
 const toId = (v) => normalizeId(v);
@@ -36,8 +37,7 @@ const calcProgress = (modules = []) => {
 /* ─── GET ────────────────────────────────────────────────── */
 export const getCPPE = async (req, res, next) => {
   try {
-    const id = toId(req.params.id);
-    if (!id) return res.status(400).json({ message: "Invalid clinician id" });
+    const id = await assertClinicianAccess(req, req.params.id);
 
     const clinician = await Clinician.findById(id).lean();
     if (!clinician) return res.status(404).json({ message: "Clinician not found" });

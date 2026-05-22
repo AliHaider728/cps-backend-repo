@@ -18,6 +18,13 @@ import {
   resolveClinicianIdForUser,
 } from "../lib/clinicianLink.js";
 import { applyCoverShiftDefaults } from "../lib/rotaPracticeEnrich.js";
+import {
+  SQL_PRACTICE_NAME,
+  SQL_CLINICAL_SYSTEM,
+  SQL_ROTA_CLINICAL_SYSTEM,
+  SQL_PRACTICE_JOINS,
+  SQL_ROTA_PRACTICE_JOINS,
+} from "../lib/sqlJoins.js";
 import { v4 as uuidv4 } from "uuid";
 import { readFile } from "fs/promises";
 import { join, dirname } from "path";
@@ -1134,6 +1141,12 @@ const mapRotaShiftRow = (row = {}) => ({
     row.hourly_rate != null && row.hourly_rate !== ""
       ? Number(row.hourly_rate)
       : null,
+  rate:
+    row.hourly_rate != null && row.hourly_rate !== ""
+      ? Number(row.hourly_rate)
+      : row.rate != null
+      ? Number(row.rate)
+      : null,
   total_hours: row.expected_hours != null ? Number(row.expected_hours) : row.hours != null ? Number(row.hours) : null,
   hours: row.expected_hours != null ? Number(row.expected_hours) : row.hours != null ? Number(row.hours) : null,
 });
@@ -1267,15 +1280,13 @@ const fetchAllRotaShiftsFromRotaTable = async (clinicianId) => {
   const result = await query(
     `SELECT rs.*,
             COALESCE(c.full_name, cr.data->>'fullName', cr.data->>'name', c.email) AS clinician_name,
-            NULLIF(TRIM(COALESCE(p.name, pr.data->>'name', pr.data->>'practiceName', cl.data->>'name')), '') AS surgery_name,
-            NULLIF(TRIM(COALESCE(pr.data->>'clinicalSystem', pr.data->>'system', cl.data->>'clinicalSystem')), '') AS clinical_system,
+            ${SQL_PRACTICE_NAME} AS surgery_name,
+            ${SQL_ROTA_CLINICAL_SYSTEM} AS clinical_system,
             pc.name AS pcn_name
        FROM rota_shifts rs
        LEFT JOIN clinicians c ON c.id::text = rs.clinician_id::text
        LEFT JOIN app_records cr ON cr.model = 'Clinician' AND cr.id = rs.clinician_id::text
-       LEFT JOIN practices p ON p.id::text = rs.surgery_id::text
-       LEFT JOIN app_records pr ON pr.model IN ('practice', 'Practice') AND pr.id = rs.surgery_id::text
-       LEFT JOIN app_records cl ON cl.model IN ('Client', 'client') AND cl.id::text = rs.surgery_id::text
+       ${SQL_ROTA_PRACTICE_JOINS("rs.surgery_id")}
        LEFT JOIN pcns pc ON pc.id = p.pcn_id
       WHERE 1=1${clinicianFilter}
       ORDER BY rs.shift_date ASC`,

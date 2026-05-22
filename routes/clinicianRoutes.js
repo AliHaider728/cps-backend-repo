@@ -22,6 +22,8 @@ import {
   updateSystemAccess,
   restrictClinician,
   unrestrictClinician,
+  updateClinicianUserLogin,
+  resetClinicianUserPassword,
 } from "../controllers/clinicianController.js";
 
 import {
@@ -33,10 +35,17 @@ import {
 
 import {
   getLeave,
+  getMyLeave,
   addLeave,
   updateLeave,
   deleteLeave,
 } from "../controllers/leaveController.js";
+
+import {
+  getProjectMappings,
+  createProjectMapping,
+  deleteProjectMapping,
+} from "../controllers/projectMappingController.js";
 
 import {
   getLogs    as getSupervisionLogs,
@@ -54,19 +63,38 @@ const router = Router();
 const reader = [verifyToken, allowRoles("super_admin", "director", "ops_manager", "finance", "training_manager", "workforce_manager")];
 const writer = [verifyToken, allowRoles("super_admin", "director", "ops_manager")];
 const admin  = [verifyToken, allowRoles("super_admin", "ops_manager")];
+const clinicianSelf = [verifyToken, allowRoles("clinician", "super_admin")];
+const leaveReader = [
+  verifyToken,
+  allowRoles(
+    "super_admin",
+    "director",
+    "ops_manager",
+    "finance",
+    "training_manager",
+    "workforce_manager",
+    "clinician"
+  ),
+];
+const clinicianLeaveWriter = [verifyToken, allowRoles("clinician", "super_admin", "director", "ops_manager")];
 
 /* ── List + create ─────────────────────────────────────────── */
 router.get( "/", ...reader, getClinicians);
 router.post("/", ...writer, createClinician);
 
+/* ── Clinician portal (self) — before /:id ─────────────────── */
+router.get("/me/leave", ...clinicianSelf, getMyLeave);
+
 /* ── Detail CRUD ───────────────────────────────────────────── */
 router.get(   "/:id", ...reader, getClinicianById);
 router.put(   "/:id", ...writer, updateClinician);
 router.patch( "/:id/link-user", ...admin, linkClinicianUser);
+router.patch( "/:id/user-login", ...admin, updateClinicianUserLogin);
+router.post(  "/:id/reset-login-password", ...admin, resetClinicianUserPassword);
 router.delete("/:id", ...admin,  deleteClinician);
 
 /* ── Tab 3 — Compliance docs ───────────────────────────────── */
-router.get(   "/:id/compliance",                ...reader, getCompliance);
+router.get(   "/:id/compliance",                ...leaveReader, getCompliance);
 router.patch( "/:id/compliance/:docId",         ...writer, upload.single("file"), upsertDoc);
 router.post(  "/:id/compliance/:docId/approve", ...admin,  approveDoc);
 router.post(  "/:id/compliance/:docId/reject",  ...admin,  rejectDoc);
@@ -78,19 +106,24 @@ router.put( "/:id/client-history/:recordId",                        ...writer, u
 router.patch("/:id/client-history/:recordId/system-access",         ...writer, updateSystemAccess);
 
 /* ── Tab 5 — Leave ─────────────────────────────────────────── */
-router.get(   "/:id/leave",          ...reader, getLeave);
-router.post(  "/:id/leave",          ...writer, addLeave);
+router.get(   "/:id/leave",          ...leaveReader, getLeave);
+router.post(  "/:id/leave",          ...clinicianLeaveWriter, addLeave);
 router.put(   "/:id/leave/:entryId", ...writer, updateLeave);
 router.delete("/:id/leave/:entryId", ...writer, deleteLeave);
 
+/* ── Project mapping (finance / admin) ─────────────────────── */
+router.get(   "/:id/project-mappings", ...reader, getProjectMappings);
+router.post(  "/:id/project-mappings", ...writer, createProjectMapping);
+router.delete("/:id/project-mappings/:mappingId", ...writer, deleteProjectMapping);
+
 /* ── Tab 6 — Supervision ───────────────────────────────────── */
-router.get(   "/:id/supervision",         ...reader, getSupervisionLogs);
+router.get(   "/:id/supervision",         ...leaveReader, getSupervisionLogs);
 router.post(  "/:id/supervision",         ...writer, addSupervisionLog);
-router.put(   "/:id/supervision/:logId",  ...writer, updateSupervisionLog);
+router.put(   "/:id/supervision/:logId",  ...clinicianLeaveWriter, updateSupervisionLog);
 router.delete("/:id/supervision/:logId",  ...admin,  deleteSupervisionLog);
 
 /* ── Tab 7 — CPPE ──────────────────────────────────────────── */
-router.get("/:id/cppe", ...reader, getCPPE);
+router.get("/:id/cppe", ...leaveReader, getCPPE);
 router.put("/:id/cppe", ...writer, updateCPPE);
 
 /* ── Tab 8 — Onboarding ────────────────────────────────────── */

@@ -10,8 +10,10 @@
 
 import ClinicianSupervisionLog from "../models/ClinicianSupervisionLog.js";
 import Clinician               from "../models/Clinician.js";
+import User                    from "../models/User.js";
 import { logAudit }            from "../middleware/auditLogger.js";
 import { normalizeId }         from "../lib/ids.js";
+import { assertClinicianAccess } from "../lib/clinicianAccess.js";
 
 const safeJson = (v) => JSON.parse(JSON.stringify(v ?? null));
 const toId = (v) => normalizeId(v);
@@ -19,12 +21,25 @@ const toId = (v) => normalizeId(v);
 /* ─── LIST ───────────────────────────────────────────────── */
 export const getLogs = async (req, res, next) => {
   try {
-    const id = toId(req.params.id);
-    if (!id) return res.status(400).json({ message: "Invalid clinician id" });
+    const id = await assertClinicianAccess(req, req.params.id);
 
-    const logs = await ClinicianSupervisionLog.find({ clinician: id })
-      .populate("supervisor", "fullName email")
-      .lean();
+    const logs = await ClinicianSupervisionLog.find({ clinician: id }).lean();
+
+    const supervisorIds = new Set(
+      logs.map((l) => String(l.supervisor || "")).filter(Boolean)
+    );
+    const users = supervisorIds.size ? await User.find({}).lean() : [];
+    const userMap = new Map(users.map((u) => [String(u._id), u]));
+
+    for (const log of logs) {
+      const sup = userMap.get(String(log.supervisor));
+      if (sup) {
+        log.supervisor = {
+          email: sup.email,
+          fullName: sup.fullName || sup.name,
+        };
+      }
+    }
 
     logs.sort((a, b) => new Date(b.sessionDate || 0) - new Date(a.sessionDate || 0));
 
@@ -72,17 +87,29 @@ export const addLog = async (req, res, next) => {
 /* ─── UPDATE ─────────────────────────────────────────────── */
 export const updateLog = async (req, res, next) => {
   try {
-    const id    = toId(req.params.id);
+    const id    = await assertClinicianAccess(req, req.params.id);
     const logId = toId(req.params.logId);
-    if (!id || !logId) return res.status(400).json({ message: "Invalid id" });
+    if (!logId) return res.status(400).json({ message: "Invalid id" });
 
     const before = await ClinicianSupervisionLog.findById(logId).lean();
     if (!before) return res.status(404).json({ message: "Log not found" });
     if (String(before.clinician) !== String(id))
       return res.status(403).json({ message: "Log does not belong to this clinician" });
 
-    const body = { ...req.body };
+    const isClinician = req.user?.role === "clinician";
+    let body = { ...req.body };
     delete body._id;
+
+    if (isClinician) {
+      if (before.reflectionSubmittedAt || before.reflection) {
+        return res.status(400).json({ message: "Reflection already submitted and locked" });
+      }
+      body = {
+        reflection: body.reflection,
+        reflectionSubmittedAt: body.reflectionSubmittedAt || new Date().toISOString(),
+        type: before.type || body.type || "remote",
+      };
+    }
 
     const updated = await ClinicianSupervisionLog.findByIdAndUpdate(logId, body, { new: true });
 

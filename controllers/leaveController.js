@@ -16,6 +16,8 @@ import { calcAllBalances, calcOtherLeave, dayCount } from "../lib/leaveCalc.js";
 import { validateAnnualLeaveBalance } from "../lib/leaveValidation.js";
 import { query } from "../config/db.js";
 import ClinicianSupervisionLog from "../models/ClinicianSupervisionLog.js";
+import { resolveClinicianIdForUser } from "../lib/clinicianLink.js";
+import { assertClinicianAccess } from "../lib/clinicianAccess.js";
 
 const safeJson = (v) => JSON.parse(JSON.stringify(v ?? null));
 const toId = (v) => normalizeId(v);
@@ -31,7 +33,7 @@ const eachDateISO = (startDate, endDate) => {
   return out;
 };
 
-const syncLeaveToRota = async ({ clinicianId, leaveType, startDate, endDate, actorId, sourceLeaveId }) => {
+export const syncLeaveToRota = async ({ clinicianId, leaveType, startDate, endDate, actorId, sourceLeaveId }) => {
   const rotaStatus =
     leaveType === "annual" ? "annual_leave"
     : leaveType === "sick" ? "sick"
@@ -81,23 +83,59 @@ const syncLeaveToRota = async ({ clinicianId, leaveType, startDate, endDate, act
   }
 };
 
+const loadLeavePayload = async (id) => {
+  const clinician = await Clinician.findById(id).lean();
+  if (!clinician) return null;
+  const entries = await ClinicianLeaveEntry.find({ clinician: id }).lean();
+  entries.sort((a, b) => new Date(b.startDate || 0) - new Date(a.startDate || 0));
+  return {
+    entries,
+    balances: calcAllBalances(entries),
+    other: calcOtherLeave(entries),
+  };
+};
+
+const rangesOverlap = (aStart, aEnd, bStart, bEnd) => {
+  const a0 = String(aStart || "").slice(0, 10);
+  const a1 = String(aEnd || aStart || "").slice(0, 10);
+  const b0 = String(bStart || "").slice(0, 10);
+  const b1 = String(bEnd || bStart || "").slice(0, 10);
+  return a0 <= b1 && b0 <= a1;
+};
+
+const hasApprovedLeaveClash = async (clinicianId, startDate, endDate) => {
+  const all = await ClinicianLeaveEntry.find({ approved: true, leaveType: "annual" }).lean();
+  return all.some(
+    (e) =>
+      String(e.clinician) !== String(clinicianId) &&
+      rangesOverlap(e.startDate, e.endDate, startDate, endDate)
+  );
+};
+
+/* ─── SELF (clinician portal) ────────────────────────────── */
+export const getMyLeave = async (req, res, next) => {
+  try {
+    const id = await resolveClinicianIdForUser(req.user);
+    if (!id) {
+      return res.status(404).json({
+        message: "No clinician profile linked to your account. Contact admin.",
+      });
+    }
+    const payload = await loadLeavePayload(id);
+    if (!payload) return res.status(404).json({ message: "Clinician not found" });
+    res.json({ ...payload, clinicianId: id });
+  } catch (err) {
+    next(err);
+  }
+};
+
 /* ─── LIST ───────────────────────────────────────────────── */
 export const getLeave = async (req, res, next) => {
   try {
-    const id = toId(req.params.id);
-    if (!id) return res.status(400).json({ message: "Invalid clinician id" });
-
-    const clinician = await Clinician.findById(id).lean();
-    if (!clinician) return res.status(404).json({ message: "Clinician not found" });
-
-    const entries = await ClinicianLeaveEntry.find({ clinician: id }).lean();
-    entries.sort((a, b) => new Date(b.startDate || 0) - new Date(a.startDate || 0));
-
-    res.json({
-      entries,
-      balances: calcAllBalances(entries),
-      other:    calcOtherLeave(entries),
-    });
+    const id = await assertClinicianAccess(req, req.params.id);
+    const payload = await loadLeavePayload(id);
+    if (!payload) return res.status(404).json({ message: "Clinician not found" });
+    res.json(payload);
   } catch (err) {
     next(err);
   }
@@ -106,8 +144,7 @@ export const getLeave = async (req, res, next) => {
 /* ─── ADD ────────────────────────────────────────────────── */
 export const addLeave = async (req, res, next) => {
   try {
-    const id = toId(req.params.id);
-    if (!id) return res.status(400).json({ message: "Invalid clinician id" });
+    const id = await assertClinicianAccess(req, req.params.id);
 
     const clinician = await Clinician.findById(id).lean();
     if (!clinician) return res.status(404).json({ message: "Clinician not found" });
@@ -123,8 +160,18 @@ export const addLeave = async (req, res, next) => {
       ? Number(body.days)
       : dayCount(startDate, endDate);
 
-    const leaveType = body.leaveType || "annual";
-    const contract = body.contract || clinician.contractType || "ARRS";
+    const leaveTypeMap = {
+      "Annual Leave": "annual",
+      annual: "annual",
+      Sick: "sick",
+      sick: "sick",
+      CPPE: "cppe",
+      cppe: "cppe",
+      "Training Leave": "other",
+      other: "other",
+    };
+    const leaveType = leaveTypeMap[body.leaveType] || body.leaveType || "annual";
+    const contract = body.contract || body.contractType || clinician.contractType || "ARRS";
 
     if (leaveType === "annual") {
       const existing = await ClinicianLeaveEntry.find({ clinician: id }).lean();
@@ -145,6 +192,20 @@ export const addLeave = async (req, res, next) => {
       }
     }
 
+    const adminApproved =
+      body.approved === true ||
+      body.approved === "true" ||
+      ["super_admin", "director", "ops_manager"].includes(req.user?.role);
+
+    const twoWeeksDays = 10;
+    const autoApprove =
+      !adminApproved &&
+      leaveType === "annual" &&
+      days <= twoWeeksDays &&
+      !(await hasApprovedLeaveClash(id, startDate, endDate));
+
+    const approved = adminApproved || autoApprove;
+
     const entry = await ClinicianLeaveEntry.create({
       clinician:  id,
       leaveType,
@@ -152,9 +213,10 @@ export const addLeave = async (req, res, next) => {
       startDate,
       endDate,
       days,
-      approved:   body.approved === true || body.approved === "true",
-      approvedBy: (body.approved === true || body.approved === "true") ? (req.user?._id || null) : null,
-      approvedAt: (body.approved === true || body.approved === "true") ? new Date().toISOString() : null,
+      approved,
+      rejected: false,
+      approvedBy: approved ? (req.user?._id || null) : null,
+      approvedAt: approved ? new Date().toISOString() : null,
       notes:      body.notes || "",
       createdBy:  req.user?._id || null,
     });
@@ -180,6 +242,7 @@ export const addLeave = async (req, res, next) => {
 
     res.status(201).json({
       entry,
+      autoApproved: autoApprove,
       balances: calcAllBalances(all),
       other:    calcOtherLeave(all),
     });

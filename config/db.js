@@ -184,6 +184,37 @@ async function runMigrations() {
   await addColIfMissing("shifts", "compliance_override_reason", "TEXT");
   await addColIfMissing("shifts", "source",                     "VARCHAR(20) DEFAULT 'manual'");
   await addColIfMissing("shifts", "source_leave_id",            "UUID");
+
+  await addColIfMissing("practices", "clinical_system", "VARCHAR(50)");
+  await addColIfMissing("practices", "type",            "VARCHAR(20)");
+
+  await addColIfMissing("clinicians", "user_id",         "UUID");
+  await addColIfMissing("clinicians", "smartcard",       "TEXT");
+  await addColIfMissing("clinicians", "start_date",      "DATE");
+  await addColIfMissing("clinicians", "end_date",        "DATE");
+  await addColIfMissing("clinicians", "ops_lead_id",     "TEXT");
+  await addColIfMissing("clinicians", "supervisor_id",   "TEXT");
+  await addColIfMissing("clinicians", "leave_balances",  "JSONB DEFAULT '[]'::jsonb");
+}
+
+async function ensureProjectMappingsTable() {
+  await rawQuery(`
+    CREATE TABLE IF NOT EXISTS project_mappings (
+      id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      clinician_id   TEXT NOT NULL,
+      project        TEXT,
+      practice_id    TEXT,
+      type           TEXT CHECK (type IN ('Locums Contractor','Employed','Limited Company')),
+      rate           NUMERIC,
+      rate_type      TEXT CHECK (rate_type IN ('Per Hour','Fixed')),
+      vat_percentage NUMERIC DEFAULT 0.00,
+      created_at     TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+  await createIndexSafe(
+    "idx_project_mappings_clinician",
+    `CREATE INDEX idx_project_mappings_clinician ON project_mappings(clinician_id);`
+  );
 }
 
 // ─── Main schema setup ────────────────────────────────────────────────────────
@@ -217,6 +248,41 @@ export async function ensureSchema() {
     await rawQuery(`CREATE TABLE IF NOT EXISTS pcns (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT
     );`);
+    await rawQuery(`CREATE TABLE IF NOT EXISTS clients (
+      id UUID PRIMARY KEY,
+      name TEXT NOT NULL,
+      type TEXT CHECK (type IN ('icb','federation','pcn','practice','ea')),
+      clinical_system VARCHAR(50)
+    );`);
+
+    try {
+      await rawQuery(`
+        INSERT INTO clients (id, name, type, clinical_system)
+        SELECT p.id, p.name, COALESCE(p.type, 'practice'), p.clinical_system
+          FROM practices p
+         WHERE p.name IS NOT NULL
+        ON CONFLICT (id) DO UPDATE SET
+          name = EXCLUDED.name,
+          type = COALESCE(EXCLUDED.type, clients.type),
+          clinical_system = COALESCE(EXCLUDED.clinical_system, clients.clinical_system)
+      `);
+      await rawQuery(`
+        INSERT INTO clients (id, name, type, clinical_system)
+        SELECT pr.id,
+               COALESCE(pr.data->>'name', pr.data->>'practiceName'),
+               COALESCE(pr.data->>'type', 'practice'),
+               COALESCE(pr.data->>'clinicalSystem', pr.data->>'system')
+          FROM app_records pr
+         WHERE pr.model IN ('practice', 'Practice', 'Client', 'client')
+           AND COALESCE(pr.data->>'name', pr.data->>'practiceName') IS NOT NULL
+        ON CONFLICT (id) DO UPDATE SET
+          name = EXCLUDED.name,
+          type = COALESCE(EXCLUDED.type, clients.type),
+          clinical_system = COALESCE(EXCLUDED.clinical_system, clients.clinical_system)
+      `);
+    } catch (backfillErr) {
+      console.warn("[DB] clients backfill skipped:", backfillErr.message);
+    }
     await rawQuery(`CREATE TABLE IF NOT EXISTS users (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(), email TEXT, role TEXT
     );`);
@@ -366,6 +432,8 @@ export async function ensureSchema() {
          ON time_entries(clinician_id) WHERE status = 'active';`);
     await createIndexSafe("idx_time_entries_clinician", `CREATE INDEX idx_time_entries_clinician ON time_entries(clinician_id);`);
     await createIndexSafe("idx_time_entries_shift",     `CREATE INDEX idx_time_entries_shift     ON time_entries(shift_id);`);
+
+    await ensureProjectMappingsTable();
 
     console.log("[DB] Schema ensured — all tables ready");
   } catch (err) {
