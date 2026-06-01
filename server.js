@@ -19,6 +19,7 @@ import timeEntryRoutes from "./routes/timeEntryRoutes.js";
 import timesheetRoutes from "./routes/timesheetRoutes.js";
 import basePatternRoutes from "./routes/basePatternRoutes.js";
 import coverRoutes from "./routes/coverRoutes.js";
+import enterMyHoursRoutes from "./routes/enterMyHoursRoutes.js";
 import { startGapDetectionScheduler } from "./services/rotaGapService.js";
 
 dotenv.config();
@@ -141,6 +142,7 @@ app.use("/api/restricted-clinicians", restrictedClinicianRoutes);
 app.use("/api/rota", rotaRoutes);
 app.use("/api/time-entries", timeEntryRoutes);
 app.use("/api/timesheets", timesheetRoutes);
+app.use("/api/enter-my-hours", enterMyHoursRoutes);
 app.use("/api/base-patterns", basePatternRoutes);
 app.use("/api/cover", coverRoutes);
 

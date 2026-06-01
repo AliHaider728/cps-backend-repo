@@ -18,6 +18,8 @@ import { query } from "../config/db.js";
 import ClinicianSupervisionLog from "../models/ClinicianSupervisionLog.js";
 import { resolveClinicianIdForUser } from "../lib/clinicianLink.js";
 import { assertClinicianAccess } from "../lib/clinicianAccess.js";
+import User from "../models/User.js";
+import { v4 as uuidv4 } from "uuid";
 
 const safeJson = (v) => JSON.parse(JSON.stringify(v ?? null));
 const toId = (v) => normalizeId(v);
@@ -32,6 +34,77 @@ const eachDateISO = (startDate, endDate) => {
   }
   return out;
 };
+
+const inDateRange = (iso, from, to) => {
+  const d = String(iso || "").slice(0, 10);
+  return d >= from && d <= to;
+};
+
+async function createNotificationAndActionItems({
+  clinician,
+  stakeholders,
+  dates,
+  meetings,
+  leaveType,
+  actorId,
+  sourceLeaveId,
+}) {
+  if (!stakeholders.length) return;
+  const clinicianName = clinician?.fullName || clinician?.email || "Clinician";
+  const dateSummary = dates.join(", ");
+  const actionText =
+    leaveType === "sick"
+      ? `Absence cover/reschedule needed for ${clinicianName} (${dateSummary}).`
+      : `Leave impact review needed for ${clinicianName} (${dateSummary}).`;
+
+  for (const user of stakeholders) {
+    await query(
+      `INSERT INTO app_records (model, id, data, created_at, updated_at)
+       VALUES ($1, $2, $3::jsonb, NOW(), NOW())`,
+      [
+        "notification",
+        uuidv4(),
+        JSON.stringify({
+          type: "absence_alert",
+          userId: user._id,
+          clinicianId: clinician?._id || null,
+          clinicianName,
+          leaveType,
+          dates,
+          meetingCount: meetings.length,
+          message: `${clinicianName} marked ${leaveType} absent. Please review supervision/ops schedule.`,
+          sourceLeaveId: sourceLeaveId || null,
+          read: false,
+          createdBy: actorId || null,
+          createdAt: new Date().toISOString(),
+        }),
+      ]
+    );
+
+    await query(
+      `INSERT INTO app_records (model, id, data, created_at, updated_at)
+       VALUES ($1, $2, $3::jsonb, NOW(), NOW())`,
+      [
+        "action_item",
+        uuidv4(),
+        JSON.stringify({
+          ownerId: user._id,
+          ownerRole: user.role || "",
+          clinicianId: clinician?._id || null,
+          title: "Absence follow-up required",
+          detail: actionText,
+          dueDate: dates[0] || null,
+          status: "open",
+          source: "leave_absence_workflow",
+          sourceLeaveId: sourceLeaveId || null,
+          meetingCount: meetings.length,
+          createdBy: actorId || null,
+          createdAt: new Date().toISOString(),
+        }),
+      ]
+    );
+  }
+}
 
 export const syncLeaveToRota = async ({ clinicianId, leaveType, startDate, endDate, actorId, sourceLeaveId }) => {
   const rotaStatus =
@@ -80,6 +153,59 @@ export const syncLeaveToRota = async ({ clinicianId, leaveType, startDate, endDa
         after: { clinicianId, clashes, notifyTo: ["Stacey", "Sonia"] },
       });
     }
+  }
+
+  // CPS rule: when clinician is absent (especially sickness), notify relevant SLT hosts
+  if (leaveType === "sick") {
+    const rangeDates = eachDateISO(startDate, endDate);
+    const from = rangeDates[0];
+    const to = rangeDates[rangeDates.length - 1];
+
+    const clinician = await Clinician.findById(clinicianId).lean();
+    const meetings = await ClinicianSupervisionLog.find({ clinician: clinicianId }).lean();
+    const impactedMeetings = (meetings || []).filter((m) =>
+      inDateRange(m.sessionDate, from, to)
+    );
+
+    const stakeholderIds = new Set();
+    impactedMeetings.forEach((m) => {
+      if (m.supervisor) stakeholderIds.add(String(m.supervisor));
+    });
+    if (clinician?.supervisor) stakeholderIds.add(String(clinician.supervisor));
+    if (clinician?.opsLead) stakeholderIds.add(String(clinician.opsLead));
+
+    const roleStakeholders = await User.find({}).lean();
+    roleStakeholders
+      .filter((u) => ["ops_manager", "training", "super_admin"].includes(String(u.role || "")))
+      .forEach((u) => stakeholderIds.add(String(u._id)));
+
+    const stakeholders = roleStakeholders.filter((u) => stakeholderIds.has(String(u._id)));
+    await createNotificationAndActionItems({
+      clinician,
+      stakeholders,
+      dates: rangeDates,
+      meetings: impactedMeetings,
+      leaveType,
+      actorId,
+      sourceLeaveId,
+    });
+
+    await logAudit({ user: { _id: actorId, role: "system" } }, "ABSENCE_NOTIFICATION_TRIGGERED", "ClinicianLeaveEntry", {
+      resourceId: sourceLeaveId || null,
+      detail: `Absence workflow triggered for clinician ${clinicianId}`,
+      after: {
+        clinicianId,
+        leaveType,
+        startDate,
+        endDate,
+        notifiedUsers: stakeholders.map((u) => ({ id: u._id, role: u.role, email: u.email })),
+        impactedMeetings: impactedMeetings.map((m) => ({
+          id: m._id,
+          sessionDate: m.sessionDate,
+          supervisor: m.supervisor || null,
+        })),
+      },
+    });
   }
 };
 
