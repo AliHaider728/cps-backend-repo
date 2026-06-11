@@ -60,10 +60,47 @@ export const createProjectMapping = async (req, res, next) => {
   }
 };
 
+// ── NEW: Update project mapping ──────────────────────────────────────────────
+export const updateProjectMapping = async (req, res, next) => {
+  try {
+    const clinicianId = await assertClinicianAccess(req, req.params.id);
+    const mappingId   = toId(req.params.mappingId);
+    if (!mappingId) return res.status(400).json({ message: "Invalid mapping id" });
+
+    const body = req.body || {};
+    const { rows, rowCount } = await query(
+      `UPDATE project_mappings
+          SET project        = COALESCE($1, project),
+              practice_id    = COALESCE($2, practice_id),
+              type           = COALESCE($3, type),
+              rate           = COALESCE($4, rate),
+              rate_type      = COALESCE($5, rate_type),
+              vat_percentage = COALESCE($6, vat_percentage)
+        WHERE id = $7
+          AND TRIM(clinician_id::text) = TRIM($8)
+       RETURNING *`,
+      [
+        body.project || null,
+        toId(body.practice_id || body.practiceId) || null,
+        body.type || null,
+        body.rate != null ? Number(body.rate) : null,
+        body.rate_type || body.rateType || null,
+        body.vat_percentage != null ? Number(body.vat_percentage) : null,
+        mappingId,
+        clinicianId,
+      ]
+    );
+    if (!rowCount) return res.status(404).json({ message: "Mapping not found" });
+    res.json({ mapping: rows[0] });
+  } catch (err) {
+    next(err);
+  }
+};
+
 export const deleteProjectMapping = async (req, res, next) => {
   try {
     const clinicianId = await assertClinicianAccess(req, req.params.id);
-    const mappingId = toId(req.params.mappingId);
+    const mappingId   = toId(req.params.mappingId);
     if (!mappingId) return res.status(400).json({ message: "Invalid mapping id" });
 
     const { rowCount } = await query(

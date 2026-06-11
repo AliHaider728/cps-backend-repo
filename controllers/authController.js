@@ -4,6 +4,9 @@
  * UPDATED (Apr 2026) — Spec: CPS_Controller_Update_Spec.docx
  * FIXED:  insertAuditRecord now saves userName + userRole
  *         so LOGIN_FAILED logs show correctly in audit trail.
+ * NEW:    adminChangeUserPassword — super_admin can change any user's password
+ *         Called from Clinicians list → Change Password modal
+ *         Route: PUT /api/auth/users/:id/password
  */
 
 import jwt     from "jsonwebtoken";
@@ -532,7 +535,7 @@ export const anonymiseUser = async (req, res) => {
   }
 };
 
-/* ── changePassword ───────────────────────────────────────────────── */
+/* ── changePassword (self) ────────────────────────────────────────── */
 export const changePassword = async (req, res) => {
   try {
     const { newPassword } = req.body;
@@ -554,6 +557,44 @@ export const changePassword = async (req, res) => {
     return res.json({ success: true, message: "Password changed successfully" });
   } catch (error) {
     console.error("[changePassword ERROR]", error.message);
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+/* ── adminChangeUserPassword (NEW) ───────────────────────────────────
+   PUT /api/auth/users/:id/password
+   Super admin changes password for any user (e.g. from Clinicians list).
+   Body: { password: string }
+─────────────────────────────────────────────────────────────────── */
+export const adminChangeUserPassword = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { password } = req.body;
+
+    if (!password || String(password).length < 6)
+      return res.status(400).json({ message: "Password must be at least 6 characters" });
+
+    const existingUser = await findUserById(id);
+    if (!existingUser) return res.status(404).json({ message: "User not found" });
+
+    const hashedPassword = await bcrypt.hash(String(password), PASSWORD_ROUNDS);
+
+    const updatedUser = await updateUserRecord(id, {
+      password:           hashedPassword,
+      mustChangePassword: false,
+      updatedAt:          new Date().toISOString(),
+    });
+
+    if (!updatedUser) return res.status(404).json({ message: "User not found after update" });
+
+    await logAudit(req, "ADMIN_CHANGE_PASSWORD", "User", {
+      resourceId: id,
+      detail:     `Admin (${req.user?.name}) changed password for user ${existingUser.name} (${existingUser.email})`,
+    });
+
+    return res.json({ success: true, message: "Password updated successfully" });
+  } catch (error) {
+    console.error("[adminChangeUserPassword ERROR]", error.message);
     return res.status(500).json({ message: error.message });
   }
 };

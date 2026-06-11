@@ -2,6 +2,11 @@
  * routes/clinicianRoutes.js — Module 3 (Clinician Management)
  *
  * Mounted at /api/clinicians by server.js.
+ *
+ * UPDATED:
+ *   + GET  /:id/compliance-groups        — fetch assigned compliance groups with doc status
+ *   + PUT  /:id/compliance-groups        — assign compliance groups to clinician
+ *   + PUT  /:id/project-mappings/:mappingId — edit existing project mapping (was missing)
  */
 
 import { Router } from "express";
@@ -31,6 +36,8 @@ import {
   upsertDoc,
   approveDoc,
   rejectDoc,
+  getClinicianComplianceGroups,   // ← NEW
+  assignComplianceGroups,          // ← NEW
 } from "../controllers/clinicianComplianceController.js";
 
 import {
@@ -44,6 +51,7 @@ import {
 import {
   getProjectMappings,
   createProjectMapping,
+  updateProjectMapping,   // ← NEW
   deleteProjectMapping,
 } from "../controllers/projectMappingController.js";
 
@@ -99,6 +107,10 @@ router.patch( "/:id/compliance/:docId",         ...writer, upload.single("file")
 router.post(  "/:id/compliance/:docId/approve", ...admin,  approveDoc);
 router.post(  "/:id/compliance/:docId/reject",  ...admin,  rejectDoc);
 
+// ✅ NEW: Compliance groups — assign groups & fetch group-based docs
+router.get(   "/:id/compliance-groups",         ...leaveReader, getClinicianComplianceGroups);
+router.put(   "/:id/compliance-groups",         ...admin,       assignComplianceGroups);
+
 /* ── Tab 4 — Client history ────────────────────────────────── */
 router.get( "/:id/client-history",                                  ...reader, getClientHistory);
 router.post("/:id/client-history",                                  ...writer, addClientHistory);
@@ -112,9 +124,10 @@ router.put(   "/:id/leave/:entryId", ...writer, updateLeave);
 router.delete("/:id/leave/:entryId", ...writer, deleteLeave);
 
 /* ── Project mapping (finance / admin) ─────────────────────── */
-router.get(   "/:id/project-mappings", ...reader, getProjectMappings);
-router.post(  "/:id/project-mappings", ...writer, createProjectMapping);
-router.delete("/:id/project-mappings/:mappingId", ...writer, deleteProjectMapping);
+router.get(   "/:id/project-mappings",                    ...reader, getProjectMappings);
+router.post(  "/:id/project-mappings",                    ...writer, createProjectMapping);
+router.put(   "/:id/project-mappings/:mappingId",         ...writer, updateProjectMapping);   // ✅ NEW: edit
+router.delete("/:id/project-mappings/:mappingId",         ...writer, deleteProjectMapping);
 
 /* ── Tab 6 — Supervision ───────────────────────────────────── */
 router.get(   "/:id/supervision",         ...leaveReader, getSupervisionLogs);

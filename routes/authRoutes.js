@@ -2,9 +2,9 @@
  * authRoutes.js
  *
  * UPDATED (Apr 2026):
- *   +GET  /users/:id   — getUserById  (spec §4)
+ *   +GET  /users/:id        — getUserById  (spec §4)
+ *   +PUT  /users/:id/password — admin password change for any user (NEW FIX)
  *   getAllUsers now supports ?role= ?isActive= ?department= filters (spec §5)
- *     — no route change needed, handled in controller via query params
  */
 
 import { Router } from "express";
@@ -14,10 +14,11 @@ import {
   login, loginLimiter,
   getMe, logout,
   getAllUsers,
-  getUserById,       // ── NEW (spec §4)
+  getUserById,
   createUser, updateUser, deleteUser,
   anonymiseUser,
   changePassword,
+  adminChangeUserPassword,   // ← NEW
 } from "../controllers/authController.js";
 
 const router = Router();
@@ -31,16 +32,15 @@ router.post("/logout",          verifyToken, logout);
 router.put ("/change-password", verifyToken, changePassword);
 
 /* ── Super Admin only ────────────────────────────────────────── */
-// ⚠️ /users/stats or any future static routes MUST come before /users/:id
-router.get   ("/users",          verifyToken, allowRoles("super_admin"), getAllUsers);
-router.post  ("/users",          verifyToken, allowRoles("super_admin"), createUser);
+router.get   ("/users",               verifyToken, allowRoles("super_admin"), getAllUsers);
+router.post  ("/users",               verifyToken, allowRoles("super_admin"), createUser);
+router.get   ("/users/:id",           verifyToken, allowRoles("super_admin"), getUserById);
+router.put   ("/users/:id",           verifyToken, allowRoles("super_admin"), updateUser);
 
-// NEW (spec §4): GET single user by id
-// ⚠️ Must be AFTER /users (GET list) but BEFORE any /users/:id sub-routes
-router.get   ("/users/:id",      verifyToken, allowRoles("super_admin"), getUserById);
+// ✅ NEW: Admin changes password for any user (used from Clinicians list)
+router.put   ("/users/:id/password",  verifyToken, allowRoles("super_admin"), adminChangeUserPassword);
 
-router.put   ("/users/:id",      verifyToken, allowRoles("super_admin"), updateUser);
-router.delete("/users/:id",      verifyToken, allowRoles("super_admin"), deleteUser);
-router.post  ("/users/:id/gdpr", verifyToken, allowRoles("super_admin"), anonymiseUser);
+router.delete("/users/:id",           verifyToken, allowRoles("super_admin"), deleteUser);
+router.post  ("/users/:id/gdpr",      verifyToken, allowRoles("super_admin"), anonymiseUser);
 
 export default router;

@@ -161,6 +161,9 @@ async function runMigrations() {
   await addColIfMissing("rota_shifts", "sent_to_client", "BOOLEAN DEFAULT false");
   await addColIfMissing("rota_shifts", "created_by",     "UUID");
 
+  // timesheets: seed.js and Supabase client inserts expect created_by
+  await addColIfMissing("timesheets", "created_by", "UUID REFERENCES users(id)");
+
   // timesheet_entries: old schema may have used "entry_date"
   await renameColIfNeeded("timesheet_entries", "entry_date", "shift_date");
   await addColIfMissing("timesheet_entries", "shift_date", "DATE NOT NULL DEFAULT CURRENT_DATE");
