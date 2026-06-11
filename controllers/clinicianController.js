@@ -1,16 +1,16 @@
 /**
  * controllers/clinicianController.js — Module 3
  *
- * UPDATED: createClinician now also creates a user login account
- * when createLogin: true + email + password are passed in the body.
- * The user record uses role: "clinician" and links back to the
- * clinician record via clinicianId.
+ * UPDATED: getClinicians now embeds complianceSummary per clinician
+ * so the list page can show compliance progress without extra API calls.
  */
 
 import bcrypt                  from "bcryptjs";
 import Clinician               from "../models/Clinician.js";
 import ClinicianClientHistory  from "../models/ClinicianClientHistory.js";
 import ClinicianLeaveEntry     from "../models/ClinicianLeaveEntry.js";
+import ClinicianComplianceDoc  from "../models/ClinicianComplianceDoc.js";
+import DocumentGroup           from "../models/DocumentGroup.js";
 import User                    from "../models/User.js";
 import { logAudit }            from "../middleware/auditLogger.js";
 import { normalizeId }         from "../lib/ids.js";
@@ -46,6 +46,11 @@ const matchesSearch = (clin, q) => {
     clin.smartCard,
   ].filter(Boolean).join(" ").toLowerCase();
   return hay.includes(String(q).toLowerCase());
+};
+
+const isExpired = (doc) => {
+  if (!doc?.expiryDate) return false;
+  return new Date(doc.expiryDate).getTime() < Date.now();
 };
 
 /* ─── LIST ───────────────────────────────────────────────── */
@@ -96,17 +101,88 @@ export const getClinicians = async (req, res, next) => {
 
     const shiftCounts = await fetchShiftCountsByClinician();
 
+    /* ── Compliance summary for all clinicians ── */
+    // 1. Fetch all compliance docs in one query
+    const allCompDocs = await ClinicianComplianceDoc.find({}).lean();
+    const compDocsByClinician = new Map();
+    for (const d of allCompDocs) {
+      const cid = String(d.clinician || "");
+      if (!cid) continue;
+      if (!compDocsByClinician.has(cid)) compDocsByClinician.set(cid, []);
+      compDocsByClinician.get(cid).push(d);
+    }
+
+    // 2. Fetch all active document groups with their documents
+    const allGroups = await DocumentGroup.find({ active: { $ne: false } })
+      .populate({
+        path:  "documents",
+        select: "name mandatory active",
+        match:  { active: { $ne: false } },
+      })
+      .lean();
+
+    const groupMap = new Map(allGroups.map((g) => [String(g._id), g]));
+
+    /* ── Build complianceSummary per clinician ── */
+    const buildComplianceSummary = (clinician) => {
+      const assignedGroupIds = clinician.complianceGroups || [];
+      if (assignedGroupIds.length === 0) return null;
+
+      const clinDocs     = compDocsByClinician.get(String(clinician._id)) || [];
+      const docByKey     = new Map(clinDocs.map((d) => [String(d.docKey  || ""), d]));
+      const docByName    = new Map(clinDocs.map((d) => [String(d.docName || "").toLowerCase(), d]));
+
+      let total    = 0;
+      let uploaded = 0;
+      let missing  = 0;
+
+      for (const gid of assignedGroupIds) {
+        const group = groupMap.get(String(gid));
+        if (!group) continue;
+
+        const groupDocs = (group.documents || []).filter((d) => d && d.active !== false);
+        for (const doc of groupDocs) {
+          total++;
+          const existing =
+            docByKey.get(String(doc._id)) ||
+            docByName.get(String(doc.name || "").toLowerCase()) ||
+            null;
+
+          const rawStatus  = existing?.status || "missing";
+          const expired    = existing ? isExpired(existing) : false;
+          const status     = rawStatus === "approved" && expired ? "expired" : rawStatus;
+
+          if (status === "approved" || status === "uploaded") {
+            uploaded++;
+          } else {
+            missing++;
+          }
+        }
+      }
+
+      return {
+        groups:   assignedGroupIds.length,
+        total,
+        uploaded,
+        missing,
+        remaining: total - uploaded,
+      };
+    };
+
     const enriched = docs.map((d) => {
       const balances = calcAllBalances(leaveByClinician.get(String(d._id)) || []);
       const primaryBalance = balances.find((b) => b.contract === d.contractType) || balances[0];
       const shiftCount = shiftCounts.get(String(d._id)) || 0;
+      const complianceSummary = buildComplianceSummary(d);
+
       return {
         ...d,
-        opsLeadName:    userMap.get(String(d.opsLead))?.fullName || userMap.get(String(d.opsLead))?.name || "",
-        supervisorName: userMap.get(String(d.supervisor))?.fullName || userMap.get(String(d.supervisor))?.name || "",
-        alBalance:      primaryBalance,
-        leaveBalances:  balances,
+        opsLeadName:       userMap.get(String(d.opsLead))?.fullName || userMap.get(String(d.opsLead))?.name || "",
+        supervisorName:    userMap.get(String(d.supervisor))?.fullName || userMap.get(String(d.supervisor))?.name || "",
+        alBalance:         primaryBalance,
+        leaveBalances:     balances,
         shiftCount,
+        complianceSummary, // ← NEW: null if no groups assigned, object otherwise
       };
     });
 
@@ -122,17 +198,14 @@ export const getClinicians = async (req, res, next) => {
 export const createClinician = async (req, res, next) => {
   try {
     const {
-      // Login account fields (optional) — stripped before clinician save
       createLogin,
       loginPassword,
-      // Everything else goes to Clinician model
       ...clinicianData
     } = req.body;
 
     const payload = { ...clinicianData, createdBy: req.user?._id || null };
     const created = await Clinician.create(payload);
 
-    // ── Optionally create a linked user login account ──────────────
     let userCreated = null;
     let userError   = null;
 
@@ -145,7 +218,6 @@ export const createClinician = async (req, res, next) => {
       try {
         const normalizedEmail = String(created.email).trim().toLowerCase();
 
-        // Check for duplicate email in users
         const existing = await User.findOne({ email: normalizedEmail }).lean();
         if (existing) {
           userError = `A login account with email ${normalizedEmail} already exists`;
@@ -160,7 +232,7 @@ export const createClinician = async (req, res, next) => {
             isActive:           true,
             mustChangePassword: false,
             isAnonymised:       false,
-            clinicianId:        created._id,   // link back to Clinician record
+            clinicianId:        created._id,
             createdBy:          req.user?._id || null,
             lastLogin:          null,
             phone:              created.phone  || "",
@@ -170,7 +242,6 @@ export const createClinician = async (req, res, next) => {
             emergencyContact:   { name: "", relationship: "", phone: "", email: "" },
           });
 
-          // Send welcome email (non-blocking)
           try {
             await sendWelcomeEmail({
               name:     userCreated.name,
@@ -182,7 +253,6 @@ export const createClinician = async (req, res, next) => {
             console.error("[createClinician EMAIL ERROR]", emailErr.message);
           }
 
-          // Update clinician record with user link
           await Clinician.findByIdAndUpdate(created._id, { user: userCreated._id });
         }
       } catch (err) {
