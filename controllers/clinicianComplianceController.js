@@ -5,18 +5,15 @@
  *
  * UPDATED:
  *   + getClinicianComplianceGroups — GET /:id/compliance-groups
- *     Returns assigned document groups with per-doc upload status
- *     (assigned count, uploaded count, remaining count)
- *   + assignComplianceGroups       — PUT /:id/compliance-groups
- *     Assign one or more DocumentGroups to a clinician
+ *   + assignComplianceGroups       — PUT /:id/compliance-groups (FIXED: string ID mismatch)
  *
  * Endpoints (mounted under /api/clinicians):
  *   GET    /:id/compliance                       → list docs + progress
  *   PATCH  /:id/compliance/:docId                → upsert (with optional file upload)
  *   POST   /:id/compliance/:docId/approve        → admin approves
  *   POST   /:id/compliance/:docId/reject         → admin rejects with reason
- *   GET    /:id/compliance-groups                → groups with doc status (NEW)
- *   PUT    /:id/compliance-groups                → assign groups (NEW)
+ *   GET    /:id/compliance-groups                → groups with doc status
+ *   PUT    /:id/compliance-groups                → assign groups
  */
 
 import ClinicianComplianceDoc    from "../models/ClinicianComplianceDoc.js";
@@ -66,9 +63,9 @@ export const getCompliance = async (req, res, next) => {
 
     res.json({
       docs,
-      progress: calcProgress(docs),
-      progressPct: calcProgress(docs),
-      total: docs.length,
+      progress:     calcProgress(docs),
+      progressPct:  calcProgress(docs),
+      total:        docs.length,
       expiringSoon: docs.filter((d) => {
         if (!d.expiryDate) return false;
         const ms = new Date(d.expiryDate).getTime() - Date.now();
@@ -118,7 +115,7 @@ export const upsertDoc = async (req, res, next) => {
     const body = { ...req.body };
 
     const docData = {
-      clinician: id,
+      clinician:  id,
       docName:    body.docName    ?? existing?.docName    ?? "",
       docKey:     body.docKey     ?? existing?.docKey     ?? "",
       mandatory:  typeof body.mandatory !== "undefined"
@@ -245,20 +242,8 @@ export const rejectDoc = async (req, res, next) => {
   }
 };
 
-/* ─── GET COMPLIANCE GROUPS (NEW) ─────────────────────────────────────────
+/* ─── GET COMPLIANCE GROUPS ───────────────────────────────────────────────
    GET /api/clinicians/:id/compliance-groups
-   Returns all assigned document groups with per-doc upload status.
-   Response shape:
-   {
-     groups: [
-       {
-         _id, name,
-         docs: [{ _id, name, mandatory, expirable, status, fileUrl, uploadedAt, expiryDate, docId }],
-         summary: { total, uploaded, missing, remaining }
-       }
-     ],
-     totalGroups, totalDocs, totalUploaded, totalMissing
-   }
 ─────────────────────────────────────────────────────────────────────────── */
 export const getClinicianComplianceGroups = async (req, res, next) => {
   try {
@@ -268,7 +253,6 @@ export const getClinicianComplianceGroups = async (req, res, next) => {
     const clinician = await Clinician.findById(id).lean();
     if (!clinician) return res.status(404).json({ message: "Clinician not found" });
 
-    // Assigned group IDs on the clinician record
     const assignedGroupIds = clinician.complianceGroups || [];
 
     if (assignedGroupIds.length === 0) {
@@ -281,7 +265,6 @@ export const getClinicianComplianceGroups = async (req, res, next) => {
       });
     }
 
-    // Fetch the groups with their documents populated
     const groups = await DocumentGroup.find({
       _id:    { $in: assignedGroupIds },
       active: { $ne: false },
@@ -293,18 +276,15 @@ export const getClinicianComplianceGroups = async (req, res, next) => {
       })
       .lean();
 
-    // All existing compliance docs for this clinician
     const existingDocs = await ClinicianComplianceDoc.find({ clinician: id }).lean();
 
-    // Build lookup: docKey or docName → compliance doc record
-    const docByDocId  = new Map(existingDocs.map(d => [String(d.docKey || ""), d]));
-    const docByName   = new Map(existingDocs.map(d => [String(d.docName || "").toLowerCase(), d]));
+    const docByDocId = new Map(existingDocs.map(d => [String(d.docKey || ""), d]));
+    const docByName  = new Map(existingDocs.map(d => [String(d.docName || "").toLowerCase(), d]));
 
     const result = groups.map((group) => {
       const docs = (group.documents || [])
         .filter(doc => doc && doc.active !== false)
         .map((doc) => {
-          // Try matching by doc ID first, then by name
           const existing =
             docByDocId.get(String(doc._id)) ||
             docByName.get(String(doc.name || "").toLowerCase()) ||
@@ -315,20 +295,19 @@ export const getClinicianComplianceGroups = async (req, res, next) => {
           const status     = rawStatus === "approved" && docExpired ? "expired" : rawStatus;
 
           return {
-            _id:        doc._id,
-            name:       doc.name,
-            mandatory:  doc.mandatory ?? true,
-            expirable:  doc.expirable ?? false,
+            _id:                doc._id,
+            name:               doc.name,
+            mandatory:          doc.mandatory ?? true,
+            expirable:          doc.expirable ?? false,
             clinicianCanUpload: doc.clinicianCanUpload ?? false,
             visibleToClinician: doc.visibleToClinician !== false,
             status,
-            fileUrl:    existing?.fileUrl    || null,
-            fileName:   existing?.fileName   || null,
-            uploadedAt: existing?.uploadedAt || null,
-            expiryDate: existing?.expiryDate || null,
+            fileUrl:      existing?.fileUrl      || null,
+            fileName:     existing?.fileName     || null,
+            uploadedAt:   existing?.uploadedAt   || null,
+            expiryDate:   existing?.expiryDate   || null,
             rejectReason: existing?.rejectReason || null,
-            // docId used by frontend to upsert the correct record
-            docId: existing?._id ? String(existing._id) : null,
+            docId:        existing?._id ? String(existing._id) : null,
           };
         });
 
@@ -360,10 +339,10 @@ export const getClinicianComplianceGroups = async (req, res, next) => {
   }
 };
 
-/* ─── ASSIGN COMPLIANCE GROUPS (NEW) ──────────────────────────────────────
+/* ─── ASSIGN COMPLIANCE GROUPS ────────────────────────────────────────────
    PUT /api/clinicians/:id/compliance-groups
    Body: { groupIds: string[] }
-   Assigns document groups to a clinician. Replaces existing assignment.
+   FIXED: string vs ObjectId mismatch — ab String comparison se validate hota hai
 ─────────────────────────────────────────────────────────────────────────── */
 export const assignComplianceGroups = async (req, res, next) => {
   try {
@@ -379,27 +358,35 @@ export const assignComplianceGroups = async (req, res, next) => {
 
     const previousGroups = clinician.complianceGroups || [];
 
-    // Validate that all groupIds actually exist
-    if (groupIds.length > 0) {
-      const validGroups = await DocumentGroup.find({ _id: { $in: groupIds } }).select("_id").lean();
-      if (validGroups.length !== groupIds.length) {
-        return res.status(400).json({ message: "One or more group IDs are invalid" });
+    // ✅ FIX: normalize all incoming IDs to string first
+    const normalizedIds = groupIds.map((gid) => String(gid));
+
+    // Validate — fetch all groups and compare as strings (avoids ObjectId cast issues)
+    if (normalizedIds.length > 0) {
+      const allGroups  = await DocumentGroup.find({}).select("_id").lean();
+      const validIdSet = new Set(allGroups.map((g) => String(g._id)));
+      const invalid    = normalizedIds.filter((gid) => !validIdSet.has(gid));
+
+      if (invalid.length > 0) {
+        return res.status(400).json({
+          message: `Invalid group IDs: ${invalid.join(", ")}`,
+        });
       }
     }
 
-    await Clinician.findByIdAndUpdate(id, { complianceGroups: groupIds });
+    await Clinician.findByIdAndUpdate(id, { complianceGroups: normalizedIds });
 
     await logAudit(req, "ASSIGN_COMPLIANCE_GROUPS", "Clinician", {
       resourceId: id,
-      detail:     `Assigned ${groupIds.length} compliance group(s) to clinician`,
+      detail:     `Assigned ${normalizedIds.length} compliance group(s) to clinician`,
       before:     { complianceGroups: previousGroups },
-      after:      { complianceGroups: groupIds },
+      after:      { complianceGroups: normalizedIds },
     });
 
     res.json({
       success:  true,
-      message:  `${groupIds.length} compliance group(s) assigned`,
-      groupIds,
+      message:  `${normalizedIds.length} compliance group(s) assigned`,
+      groupIds: normalizedIds,
     });
   } catch (err) {
     next(err);
