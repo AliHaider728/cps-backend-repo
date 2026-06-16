@@ -145,6 +145,11 @@ const swaggerUiOptions = {
     "https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.11.0/swagger-ui-bundle.min.js",
     "https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.11.0/swagger-ui-standalone-preset.min.js",
   ],
+  swaggerOptions: {
+    // Hides the bottom "Schemas" list (Shift, ShiftInput, RotaGap, etc.)
+    // without breaking any $ref references used inside route responses.
+    defaultModelsExpandDepth: -1,
+  },
 };
 
 app.use(
