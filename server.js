@@ -3,9 +3,11 @@ import cors from "cors";
 import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
+import swaggerUi from "swagger-ui-express";
 
 import { initDB, query } from "./config/db.js";
 import { asyncHandler } from "./lib/asyncHandler.js";
+import swaggerSpec from "./swagger.js";
 
 import authRoutes from "./routes/authRoutes.js";
 import auditRoutes from "./routes/auditRoutes.js";
@@ -131,6 +133,9 @@ app.use(
   })
 );
 
+/*   SWAGGER DOCS   */
+app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+
 /*   ROUTES   */
 app.use("/api/auth", authRoutes);
 app.use("/api/audit", auditRoutes);
@@ -204,6 +209,7 @@ async function startServer() {
 
     app.listen(PORT, () => {
       log.ok(`Server running on http://localhost:${PORT}`);
+      log.ok(`Swagger docs available at http://localhost:${PORT}/api-docs`);
     });
   } catch (err) {
     log.error("Startup failed:", err.message);
