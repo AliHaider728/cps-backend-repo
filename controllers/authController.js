@@ -7,6 +7,8 @@
  * NEW:    adminChangeUserPassword — super_admin can change any user's password
  *         Called from Clinicians list → Change Password modal
  *         Route: PUT /api/auth/users/:id/password
+ * NEW:    Google reCAPTCHA v2 verification added to login endpoint
+ *         Set RECAPTCHA_ENABLED=false in .env to skip during local dev
  */
 
 import jwt     from "jsonwebtoken";
@@ -35,6 +37,41 @@ const ROLE_REDIRECTS = {
   workforce:    "/dashboard/workforce",
   clinician:    "/portal/clinician",
 };
+
+/* ── reCAPTCHA verification ────────────────────────────────────────
+   Set RECAPTCHA_ENABLED=false in .env to bypass during local dev.
+   In production always keep RECAPTCHA_ENABLED=true.
+─────────────────────────────────────────────────────────────────── */
+const RECAPTCHA_VERIFY_URL = "https://www.google.com/recaptcha/api/siteverify";
+
+async function verifyRecaptcha(token) {
+  // Allow bypass in development if explicitly disabled
+  if (process.env.RECAPTCHA_ENABLED === "false") {
+    console.warn("[reCAPTCHA] Verification DISABLED — not for production use");
+    return true;
+  }
+
+  if (!token) return false;
+
+  try {
+    const params = new URLSearchParams({
+      secret:   process.env.RECAPTCHA_SECRET_KEY,
+      response: token,
+    });
+
+    const res  = await fetch(`${RECAPTCHA_VERIFY_URL}?${params}`, { method: "POST" });
+    const data = await res.json();
+
+    if (!data.success) {
+      console.warn("[reCAPTCHA] Verification failed:", data["error-codes"]);
+    }
+
+    return data.success === true;
+  } catch (err) {
+    console.error("[reCAPTCHA] Network error during verification:", err.message);
+    return false;
+  }
+}
 
 /* ── Data helpers ──────────────────────────────────────────────────── */
 function mapUserRow(row) {
@@ -188,9 +225,23 @@ export const loginLimiter = rateLimit({
 /* ── Auth ─────────────────────────────────────────────────────────── */
 export const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, recaptchaToken } = req.body;
+
     if (!email || !password)
       return res.status(400).json({ message: "Email and password are required" });
+
+    // ── Google reCAPTCHA verification ────────────────────────────
+    const recaptchaValid = await verifyRecaptcha(recaptchaToken);
+    if (!recaptchaValid) {
+      await insertAuditRecord(req, {
+        action:   "LOGIN_RECAPTCHA_FAILED",
+        resource: "User",
+        detail:   `reCAPTCHA failed for: ${String(email).trim().toLowerCase()}`,
+        status:   "fail",
+      });
+      return res.status(400).json({ message: "reCAPTCHA verification failed. Please try again." });
+    }
+    // ─────────────────────────────────────────────────────────────
 
     const normalizedEmail  = String(email).trim().toLowerCase();
     const user             = await findUserByEmail(normalizedEmail);
