@@ -23,6 +23,7 @@
     "multer": "^2.1.1",
     "nodemailer": "^8.0.4",
     "pg": "^8.20.0",
+    "react-google-recaptcha-v3": "^1.11.0",
     "swagger-jsdoc": "^6.3.0",
     "swagger-ui-express": "^5.0.1",
     "uuid": "^13.0.0"

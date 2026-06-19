@@ -7,8 +7,11 @@
  * NEW:    adminChangeUserPassword — super_admin can change any user's password
  *         Called from Clinicians list → Change Password modal
  *         Route: PUT /api/auth/users/:id/password
- * NEW:    Google reCAPTCHA v2 verification added to login endpoint
- *         Set RECAPTCHA_ENABLED=false in .env to skip during local dev
+ * UPDATED (Jun 2026): Migrated reCAPTCHA from v2 (checkbox) to v3 (invisible,
+ *         score-based). Verification now checks data.score and data.action
+ *         in addition to data.success. Set RECAPTCHA_ENABLED=false in .env
+ *         to skip during local dev. Tune sensitivity with
+ *         RECAPTCHA_SCORE_THRESHOLD (default 0.5).
  */
 
 import jwt     from "jsonwebtoken";
@@ -38,13 +41,22 @@ const ROLE_REDIRECTS = {
   clinician:    "/portal/clinician",
 };
 
-/* ── reCAPTCHA verification ────────────────────────────────────────
+/* ── reCAPTCHA v3 verification ───────────────────────────────────────
    Set RECAPTCHA_ENABLED=false in .env to bypass during local dev.
    In production always keep RECAPTCHA_ENABLED=true.
-─────────────────────────────────────────────────────────────────── */
-const RECAPTCHA_VERIFY_URL = "https://www.google.com/recaptcha/api/siteverify";
 
-async function verifyRecaptcha(token) {
+   v3 differs from v2:
+   - No checkbox widget; token is generated invisibly per user action.
+   - siteverify response includes a "score" (0.0 = bot, 1.0 = human)
+     instead of a plain pass/fail. We must apply our own threshold.
+   - siteverify also echoes back "action" — verify it matches what the
+     frontend declared (e.g. "login") to prevent token reuse across
+     different actions/forms.
+─────────────────────────────────────────────────────────────────────── */
+const RECAPTCHA_VERIFY_URL      = "https://www.google.com/recaptcha/api/siteverify";
+const RECAPTCHA_SCORE_THRESHOLD = parseFloat(process.env.RECAPTCHA_SCORE_THRESHOLD || "0.5");
+
+async function verifyRecaptcha(token, expectedAction = "login") {
   // Allow bypass in development if explicitly disabled
   if (process.env.RECAPTCHA_ENABLED === "false") {
     console.warn("[reCAPTCHA] Verification DISABLED — not for production use");
@@ -64,9 +76,23 @@ async function verifyRecaptcha(token) {
 
     if (!data.success) {
       console.warn("[reCAPTCHA] Verification failed:", data["error-codes"]);
+      return false;
     }
 
-    return data.success === true;
+    // v3-specific: confirm the action matches (prevents replaying a token
+    // generated for a different form/action against this endpoint)
+    if (expectedAction && data.action && data.action !== expectedAction) {
+      console.warn(`[reCAPTCHA] Action mismatch: expected "${expectedAction}", got "${data.action}"`);
+      return false;
+    }
+
+    // v3-specific: enforce minimum score
+    if (typeof data.score === "number" && data.score < RECAPTCHA_SCORE_THRESHOLD) {
+      console.warn(`[reCAPTCHA] Score too low: ${data.score} (threshold ${RECAPTCHA_SCORE_THRESHOLD})`);
+      return false;
+    }
+
+    return true;
   } catch (err) {
     console.error("[reCAPTCHA] Network error during verification:", err.message);
     return false;
@@ -230,8 +256,8 @@ export const login = async (req, res) => {
     if (!email || !password)
       return res.status(400).json({ message: "Email and password are required" });
 
-    // ── Google reCAPTCHA verification ────────────────────────────
-    const recaptchaValid = await verifyRecaptcha(recaptchaToken);
+    // ── Google reCAPTCHA v3 verification ───────────────────────────
+    const recaptchaValid = await verifyRecaptcha(recaptchaToken, "login");
     if (!recaptchaValid) {
       await insertAuditRecord(req, {
         action:   "LOGIN_RECAPTCHA_FAILED",
