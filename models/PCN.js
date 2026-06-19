@@ -11,6 +11,10 @@ import { createModel } from "../lib/model.js";
  *   - Added: contractDocuments  (blueprint: "document repository")
  *   - Added: tags, priority     (ops wishlist — filtering & sorting)
  *   - Kept:  all existing fields unchanged
+ *
+ * UPDATED (Jun 2026):
+ *   - Removed: annualSpend
+ *   - Added:   hourlyRate, contractStartDate
  */
 
 const PCN = createModel({
@@ -40,9 +44,9 @@ const PCN = createModel({
     financeContacts: [],   // NEW: [{ name, role, email, phone }]
 
     // ── Contract ───────────────────────────────────────────
-    annualSpend:          0,
-    contractType:         "",   // ARRS | EA | Direct
-    contractStartDate:    null,
+    hourlyRate:           null,   // replaces annualSpend
+    contractType:         "",     // ARRS | EA | Direct
+    contractStartDate:    null,   // NEW (was in model already but now explicit default)
     contractRenewalDate:  null,
     contractExpiryDate:   null,
     xeroCode:             "",

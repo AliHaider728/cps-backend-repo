@@ -43,6 +43,11 @@
  *   — getContactHistory: findById().lean() for entity check (not exists({_id}))
  *   — All CH functions store/query entityId as plain String (UUID-safe)
  *   — Response normalized: notes/detail alias, date/contactDate alias
+ *
+ * UPDATED (Jun 2026):
+ *   — annualSpend removed from PCN; replaced with hourlyRate + contractStartDate
+ *   — getICBById: updated .select() to use hourlyRate + contractStartDate
+ *   — getPCNRollup: rollup response now returns hourlyRate + contractStartDate
  */
 
 import ICB            from "../models/ICB.js";
@@ -571,7 +576,8 @@ export const getICBById = async (req, res) => {
       Federation.find({ icb: req.params.id, isActive: true }).select("name type notes").sort({ name: 1 }).lean(),
       PCN.find({ icb: req.params.id, isActive: true })
         .populate("federation", "name type")
-        .select("name contractType annualSpend federation xeroCode")
+        // ✅ UPDATED (Jun 2026): annualSpend → hourlyRate + contractStartDate
+        .select("name contractType hourlyRate contractStartDate federation xeroCode")
         .sort({ name: 1 }).lean(),
     ]);
 
@@ -903,7 +909,8 @@ export const getPCNRollup = async (req, res) => {
     });
     const avgCompliance = complianceByPractice.length
       ? Math.round(complianceByPractice.reduce((s, p) => s + p.score, 0) / complianceByPractice.length) : 0;
-    res.json({ pcn, practices, rollup: { practiceCount: practices.length, avgCompliance, complianceByPractice, annualSpend: pcn.annualSpend } });
+    // ✅ UPDATED (Jun 2026): annualSpend → hourlyRate + contractStartDate
+    res.json({ pcn, practices, rollup: { practiceCount: practices.length, avgCompliance, complianceByPractice, hourlyRate: pcn.hourlyRate, contractStartDate: pcn.contractStartDate } });
   } catch (err) {
     res.status(500).json({ message: "Failed to generate rollup report" });
   }

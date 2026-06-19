@@ -1,24 +1,32 @@
 -- =============================================================================
--- sql/rota/002_add_hourly_rate_total_value.sql
--- Adds hourly_rate and total_value columns to shifts table.
--- Required by CPS Rota Spec: shifts.hourly_rate + shifts.total_value
--- Run AFTER 001_create_shifts.sql
+-- sql/rota/003_pcn_replace_annual_spend.sql
+--
+-- PCN table: remove annual_spend, add hourly_rate + contract_start_date
+--
+-- NOTE: 002_add_hourly_rate_total_value.sql was for the SHIFTS table.
+--       This file is specifically for the PCN table.
+--
+-- Run AFTER any existing migrations.
 -- =============================================================================
 
-ALTER TABLE shifts
-  ADD COLUMN IF NOT EXISTS hourly_rate  NUMERIC(8,2),   -- Clinician's rate for this shift (£)
-  ADD COLUMN IF NOT EXISTS total_value  NUMERIC(10,2);  -- hours × hourly_rate (auto or stored)
+-- Drop old column
+ALTER TABLE pcns
+  DROP COLUMN IF EXISTS annual_spend;
 
--- Optional: add a generated column so total_value is always consistent
--- (comment out if you prefer to store it manually from app)
--- ALTER TABLE shifts
---   ADD COLUMN IF NOT EXISTS total_value NUMERIC(10,2)
---   GENERATED ALWAYS AS (COALESCE(hours, 0) * COALESCE(hourly_rate, 0)) STORED;
+-- Add new columns
+ALTER TABLE pcns
+  ADD COLUMN IF NOT EXISTS hourly_rate         NUMERIC(8,2)  DEFAULT NULL,
+  ADD COLUMN IF NOT EXISTS contract_start_date DATE          DEFAULT NULL;
 
--- Index for finance queries (filter by rate, sum by period)
-CREATE INDEX IF NOT EXISTS idx_shifts_clinician_rate
-  ON shifts(clinician_id, hourly_rate)
+-- Optional indexes for finance/reporting queries
+CREATE INDEX IF NOT EXISTS idx_pcns_hourly_rate
+  ON pcns(hourly_rate)
   WHERE hourly_rate IS NOT NULL;
 
-COMMENT ON COLUMN shifts.hourly_rate IS 'Clinician hourly pay rate (£) for this specific shift';
-COMMENT ON COLUMN shifts.total_value IS 'Computed total: hours × hourly_rate. Stored for invoice generation.';
+CREATE INDEX IF NOT EXISTS idx_pcns_contract_start_date
+  ON pcns(contract_start_date)
+  WHERE contract_start_date IS NOT NULL;
+
+-- Column comments
+COMMENT ON COLUMN pcns.hourly_rate         IS 'Clinician hourly rate (£) for this PCN contract — replaces annual_spend';
+COMMENT ON COLUMN pcns.contract_start_date IS 'Date the PCN contract started';p
