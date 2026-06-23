@@ -32,7 +32,7 @@
  *
  * BUG FIX #2 (Apr 2026):
  *   getPractices — now populates pcn with icb + federation (nested), and maps
- *                  pcn → client so PracticeListPage.jsx can render correctly.
+ *                  pcn -> client so PracticeListPage.jsx can render correctly.
  *
  * BUG FIX #3 (Apr 2026):
  *   getPracticeById — nested populate pcn.icb + pcn.federation so frontend
@@ -48,6 +48,10 @@
  *   — annualSpend removed from PCN; replaced with hourlyRate + contractStartDate
  *   — getICBById: updated .select() to use hourlyRate + contractStartDate
  *   — getPCNRollup: rollup response now returns hourlyRate + contractStartDate
+ *
+ * UPDATED (Jun 2026 — ICB optional):
+ *   — createFederation: ICB no longer required; icb passed only if provided
+ *   — createPCN: ICB no longer required; removed "ICB is required" check
  */
 
 import ICB            from "../models/ICB.js";
@@ -576,7 +580,7 @@ export const getICBById = async (req, res) => {
       Federation.find({ icb: req.params.id, isActive: true }).select("name type notes").sort({ name: 1 }).lean(),
       PCN.find({ icb: req.params.id, isActive: true })
         .populate("federation", "name type")
-        // ✅ UPDATED (Jun 2026): annualSpend → hourlyRate + contractStartDate
+        // UPDATED (Jun 2026): annualSpend -> hourlyRate + contractStartDate
         .select("name contractType hourlyRate contractStartDate federation xeroCode")
         .sort({ name: 1 }).lean(),
     ]);
@@ -654,12 +658,13 @@ export const getFederations = async (req, res) => {
   }
 };
 
+// ✅ PATCH 1: createFederation — ICB no longer required
 export const createFederation = async (req, res) => {
   try {
     const { name, icb, type, notes } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: "Federation name is required" });
-    if (!icb)          return res.status(400).json({ message: "ICB is required" });
-    const fed = await Federation.create({ name: name.trim(), icb, type: type || "federation", notes: notes || "", createdBy: req.user._id });
+    // UPDATED (Jun 2026): ICB no longer required for federation creation
+    const fed = await Federation.create({ name: name.trim(), ...(icb && { icb }), type: type || "federation", notes: notes || "", createdBy: req.user._id });
     const populated = await fed.populate("icb", "name");
     res.status(201).json({ federation: populated, message: "Federation created" });
   } catch (err) {
@@ -734,11 +739,12 @@ export const getPCNById = async (req, res) => {
   }
 };
 
+// ✅ PATCH 2: createPCN — ICB no longer required
 export const createPCN = async (req, res) => {
   try {
     const { name, icb, decisionMakers, financeContacts, tags, priority, clientFacingData } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: "PCN name is required" });
-    if (!icb)          return res.status(400).json({ message: "ICB is required" });
+    // UPDATED (Jun 2026): ICB no longer required for PCN creation
 
     const payload = normalizeComplianceGroup({
       ...req.body,
@@ -909,7 +915,7 @@ export const getPCNRollup = async (req, res) => {
     });
     const avgCompliance = complianceByPractice.length
       ? Math.round(complianceByPractice.reduce((s, p) => s + p.score, 0) / complianceByPractice.length) : 0;
-    // ✅ UPDATED (Jun 2026): annualSpend → hourlyRate + contractStartDate
+    // UPDATED (Jun 2026): annualSpend -> hourlyRate + contractStartDate
     res.json({ pcn, practices, rollup: { practiceCount: practices.length, avgCompliance, complianceByPractice, hourlyRate: pcn.hourlyRate, contractStartDate: pcn.contractStartDate } });
   } catch (err) {
     res.status(500).json({ message: "Failed to generate rollup report" });
@@ -938,7 +944,7 @@ export const getPractices = async (req, res) => {
       .sort({ name: 1 })
       .lean();
 
-    // FIX: alias pcn → client so PracticeListPage.jsx works without changes
+    // FIX: alias pcn -> client so PracticeListPage.jsx works without changes
     const normalized = practices.map((p) => ({
       ...p,
       client: p.pcn ?? null,
@@ -954,7 +960,7 @@ export const getPractices = async (req, res) => {
 export const getPracticeById = async (req, res) => {
   try {
     const practice = await Practice.findById(req.params.id)
-      // ✅ FIX: nested populate so pcn.icb and pcn.federation are
+      // FIX: nested populate so pcn.icb and pcn.federation are
       // available on the frontend for breadcrumb + header rendering
       .populate({
         path:   "pcn",
@@ -977,7 +983,6 @@ export const getPracticeById = async (req, res) => {
       .lean();
     if (!practice) return res.status(404).json({ message: "Practice not found" });
 
-    // Sort reportingArchive newest-first, return last 3 only
     if (Array.isArray(practice.reportingArchive)) {
       practice.reportingArchive = [...practice.reportingArchive]
         .sort((a, b) => {
@@ -1076,21 +1081,13 @@ export const updatePracticeRestricted = async (req, res) => {
 
 /* ══════════════════════════════════════════════════════════════════
    CONTACT HISTORY — FIXED (Apr 2026)
-   ROOT CAUSE FIXES APPLIED:
-    1. resolveEntityId() — plain string, no toObjectId() cast (UUID-safe)
-    2. getContactHistory — findById().lean() for entity check (not exists({_id}))
-    3. All functions store/query entityId as plain String
-    4. Response normalized: notes/detail alias, date/contactDate alias
-    5. toggleStarred uses .lean() for read, then separate update
 ══════════════════════════════════════════════════════════════════ */
 
-/* ── Shared helper — validates & normalizes entityId as plain string */
 const resolveEntityId = (rawId) => {
   if (!rawId || typeof rawId !== "string" || !rawId.trim()) return null;
   return String(rawId).trim();
 };
 
-/* ── GET contact history ───────────────────────────────────────── */
 export const getContactHistory = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
@@ -1100,20 +1097,17 @@ export const getContactHistory = async (req, res) => {
 
     const { type, starred, page = 1, limit = 100 } = req.query;
 
-    // Verify entity exists using findById (more reliable than exists({_id}))
     const EntityModel = getEntityModelByType(entityType);
     let entityExists = false;
     try {
       const entity = await EntityModel.findById(entityId).select("name").lean();
       entityExists = !!entity;
     } catch (lookupErr) {
-      // Don't block history fetch if entity lookup itself errors
       console.warn(`getContactHistory entity check failed: ${lookupErr.message}`);
       entityExists = true;
     }
     if (!entityExists) return res.status(404).json({ message: `${entityType} not found` });
 
-    // Build filter — entityId as plain string (no ObjectId cast)
     const filter = { entityType, entityId };
     if (type && type !== "all") filter.type    = type;
     if (starred === "true")     filter.starred = true;
@@ -1132,7 +1126,6 @@ export const getContactHistory = async (req, res) => {
       ContactHistory.countDocuments(filter),
     ]);
 
-    // Normalize response — alias legacy fields so frontend always gets consistent shape
     const normalizedLogs = (logs || []).map((log) => ({
       ...log,
       notes:   log.notes  || log.detail       || "",
@@ -1155,7 +1148,6 @@ export const getContactHistory = async (req, res) => {
   }
 };
 
-/* ── POST add contact history ──────────────────────────────────── */
 export const addContactHistory = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
@@ -1171,14 +1163,13 @@ export const addContactHistory = async (req, res) => {
     if (!subject?.trim()) return res.status(400).json({ message: "Subject is required" });
     if (!type)            return res.status(400).json({ message: "Type is required" });
 
-    // Verify entity exists
     const EntityModel = getEntityModelByType(entityType);
     const entity = await EntityModel.findById(entityId).select("name").lean();
     if (!entity) return res.status(404).json({ message: `${entityType} not found` });
 
     const log = await ContactHistory.create({
       entityType,
-      entityId,                           // plain string — no ObjectId cast
+      entityId,
       type,
       subject:      subject.trim(),
       notes:        notes || "",
@@ -1204,7 +1195,6 @@ export const addContactHistory = async (req, res) => {
   }
 };
 
-/* ── PUT update contact history ────────────────────────────────── */
 export const updateContactHistory = async (req, res) => {
   try {
     const {
@@ -1235,7 +1225,6 @@ export const updateContactHistory = async (req, res) => {
   }
 };
 
-/* ── PATCH toggle starred ──────────────────────────────────────── */
 export const toggleStarred = async (req, res) => {
   try {
     const existing = await ContactHistory.findById(req.params.logId).lean();
@@ -1254,7 +1243,6 @@ export const toggleStarred = async (req, res) => {
   }
 };
 
-/* ── DELETE contact history ────────────────────────────────────── */
 export const deleteContactHistory = async (req, res) => {
   try {
     const log = await ContactHistory.findByIdAndDelete(req.params.logId);
@@ -1265,7 +1253,6 @@ export const deleteContactHistory = async (req, res) => {
   }
 };
 
-/* ── POST system access request ────────────────────────────────── */
 export const requestSystemAccess = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
@@ -1282,7 +1269,7 @@ export const requestSystemAccess = async (req, res) => {
 
     const log = await ContactHistory.create({
       entityType,
-      entityId,                           // plain string
+      entityId,
       type:      "system_access",
       subject:   `System Access Request — ${clinicianDetails.name} — ${systemList}`,
       notes:     emailBody,
@@ -1297,7 +1284,6 @@ export const requestSystemAccess = async (req, res) => {
   }
 };
 
-/* ── POST mass email ───────────────────────────────────────────── */
 export const sendMassEmail = async (req, res) => {
   try {
     const entityType = normalizeEntityType(req.params.entityType);
@@ -1333,7 +1319,7 @@ export const sendMassEmail = async (req, res) => {
 
     await ContactHistory.create({
       entityType,
-      entityId,                           // plain string
+      entityId,
       type:         "email",
       subject:      `[Mass Email] ${subject}`,
       notes:        body.replace(/<[^>]+>/g, "").slice(0, 500),
@@ -1363,7 +1349,6 @@ export const trackEmailOpen = async (req, res) => {
   res.end(pixel);
 };
 
-/* ── Search ───────────────────────────────────────────────────────── */
 export const searchClients = async (req, res) => {
   try {
     const q = req.query.q?.trim();
@@ -1384,4 +1369,4 @@ export const searchClients = async (req, res) => {
   } catch (err) {
     res.status(500).json({ message: "Search failed" });
   }
-};
+};  
