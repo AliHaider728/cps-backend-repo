@@ -15,6 +15,9 @@ import { createModel } from "../lib/model.js";
  * UPDATED (Jun 2026):
  *   - Removed: annualSpend
  *   - Added:   hourlyRate, contractStartDate
+ *
+ * UPDATED (Jun 2026 — Rate History):
+ *   - Added: hourlyRateHistory  (array of rate change log entries)
  */
 
 const PCN = createModel({
@@ -36,21 +39,22 @@ const PCN = createModel({
     federationName: "",
 
     // ── Contacts ───────────────────────────────────────────
-    // General contacts array (type: decision_maker | finance | general | operations)
     contacts: [],
-
-    // Blueprint: dedicated decision maker + finance contact fields
-    decisionMakers: [],    // NEW: [{ name, role, email, phone, isPrimary }]
-    financeContacts: [],   // NEW: [{ name, role, email, phone }]
+    decisionMakers: [],
+    financeContacts: [],
 
     // ── Contract ───────────────────────────────────────────
-    hourlyRate:           null,   // replaces annualSpend
-    contractType:         "",     // ARRS | EA | Direct
-    contractStartDate:    null,   // NEW (was in model already but now explicit default)
+    hourlyRate:           null,
+    contractType:         "",
+    contractStartDate:    null,
     contractRenewalDate:  null,
     contractExpiryDate:   null,
     xeroCode:             "",
     xeroCategory:         "",
+
+    // ── Hourly Rate History ────────────────────────────────
+    // Tracks every rate change: [{ rate, effectiveDate, changedBy (User ref), notes }]
+    hourlyRateHistory: [],
 
     // ── Clinicians ─────────────────────────────────────────
     activeClinicians:     [],
@@ -58,22 +62,18 @@ const PCN = createModel({
 
     // ── Documents ──────────────────────────────────────────
     documents: [],
+    contractDocuments: [],
 
-    // NEW: document repository — stores PCN-level docs (MOUs, contracts, etc.)
-    contractDocuments: [], // [{ name, fileUrl, fileName, uploadedAt, uploadedBy, notes }]
-
-    // NEW: monthly reporting archive
-    // Blueprint: "monthly reporting archive" per PCN record
-    reportingArchive: [],  // [{ month, year, reportUrl, fileName, uploadedAt, uploadedBy, notes, starred }]
+    // ── Reporting archive ──────────────────────────────────
+    reportingArchive: [],
 
     // ── Email ──────────────────────────────────────────────
     emailTemplates: [],
 
     // ── Meetings ───────────────────────────────────────────
-    monthlyMeetings: [],   // [{ month, date, type, attendees, notes, status }]
+    monthlyMeetings: [],
 
-    // NEW: client-facing front screen data
-    // Blueprint: "Client-facing front screen showing monthly meetings and clinician meetings"
+    // ── Client-facing front screen ─────────────────────────
     clientFacingData: {
       showMonthlyMeetings:   true,
       showClinicianMeetings: true,
@@ -109,8 +109,8 @@ const PCN = createModel({
     groupDocuments:   [],
 
     // ── Ops metadata ───────────────────────────────────────
-    tags:     [],           // NEW: ["urgent", "renewal-due", etc.]
-    priority: "normal",     // NEW: "low" | "normal" | "high"
+    tags:     [],
+    priority: "normal",
     notes:    "",
     isActive: true,
     createdBy: null,

@@ -28,6 +28,10 @@ import {
   updateFinanceContacts,
   getClientFacingData,
   updateClientFacingData,
+
+  // ✅ NEW — Rate & Contract History (Jun 2026)
+  getPCNRateHistory,
+  getAllPCNRateSummary,
 } from "../controllers/clientController.js";
 
 import {
@@ -216,6 +220,30 @@ router.get("/pcn", ...adminFin, getPCNs);
 
 /**
  * @swagger
+ * /api/clients/pcn/rate-history/summary:
+ *   get:
+ *     summary: Get rate & contract history summary for ALL active PCN clients
+ *     tags: [Client - GET]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: >
+ *           Array of all active PCNs — each with current hourlyRate,
+ *           contract dates, last change entry, and total history count.
+ *           Use this to power the PCN list page rate history column.
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *
+ * ⚠️  MUST be declared BEFORE /pcn/:id so Express does not treat
+ *     "rate-history" as an :id param value.
+ */
+router.get("/pcn/rate-history/summary", ...adminFin, getAllPCNRateSummary);
+
+/**
+ * @swagger
  * /api/clients/pcn/{id}:
  *   get:
  *     summary: Get a single PCN by ID
@@ -321,6 +349,37 @@ router.get("/pcn/:id/meetings", ...admin, getMonthlyMeetings);
  *         description: PCN not found
  */
 router.get("/pcn/:id/client-facing", ...adminFin, getClientFacingData);
+
+/**
+ * @swagger
+ * /api/clients/pcn/{id}/rate-history:
+ *   get:
+ *     summary: Get full rate & contract-date history for a single PCN client
+ *     tags: [Client - GET]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: PCN ID
+ *     responses:
+ *       200:
+ *         description: >
+ *           { entityName, current: { hourlyRate, contractType,
+ *             contractStartDate, contractRenewalDate, contractExpiryDate },
+ *             history: [{ field, fieldLabel, oldValue, newValue,
+ *             changedAt, changedBy }] }
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: PCN not found
+ */
+router.get("/pcn/:id/rate-history", ...adminFin, getPCNRateHistory);
 
 /**
  * @swagger

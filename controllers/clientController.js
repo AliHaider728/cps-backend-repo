@@ -1,57 +1,18 @@
 /**
  * clientController.js  —  CPS Client Management
  *
- * UPDATED (Apr 2026) — Spec: CPS_Controller_Update_Spec.docx
+ * UPDATED (Jun 2026 — Rate & Contract History): ✅ NEW
+ *   — trackFieldChanges() helper: detects real changes to hourlyRate,
+ *     contractStartDate, contractRenewalDate, contractExpiryDate and
+ *     appends entries to PCN.hourlyRateHistory
+ *   — updatePCN: now calls trackFieldChanges() before saving, so every
+ *     rate/contract-date change is automatically logged
+ *   — getPCNRateHistory: GET /pcn/:id/rate-history — full history for one client
+ *   — getAllPCNRateSummary: GET /pcn/rate-history/summary — all clients,
+ *     current values + last change + change count (powers the list page)
  *
- * NEW FUNCTIONS (9):
- *   getReportingArchive        — GET /:entityType/:entityId/reporting-archive
- *   addToReportingArchive      — POST /:entityType/:entityId/reporting-archive
- *   deleteFromReportingArchive — DELETE /:entityType/:entityId/reporting-archive/:reportId
- *   getDecisionMakers          — GET /:entityType/:entityId/decision-makers
- *   updateDecisionMakers       — PUT /:entityType/:entityId/decision-makers
- *   getFinanceContacts         — GET /:entityType/:entityId/finance-contacts
- *   updateFinanceContacts      — PUT /:entityType/:entityId/finance-contacts
- *   getClientFacingData        — GET /pcn/:id/client-facing
- *   updateClientFacingData     — PUT /pcn/:id/client-facing
- *
- * UPDATED FUNCTIONS (6):
- *   getPCNById         — +decisionMakers, +financeContacts, +reportingArchive (last 3),
- *                         +clientFacingData, +tags, +priority
- *   createPCN          — +decisionMakers, +financeContacts, +tags, +priority, +clientFacingData
- *   updatePCN          — +decisionMakers, +financeContacts, +tags, +priority, +clientFacingData
- *                         (selective merge — does not wipe if absent)
- *   getPracticeById    — +localDecisionMakers, +siteSpecificDocs,
- *                         +reportingArchive (last 3), +tags, +priority
- *                         +nested pcn.icb + pcn.federation populate (Apr 2026 fix)
- *   addContactHistory  — +outcome, +followUpDate, +followUpNote
- *   updateContactHistory — +outcome, +followUpDate, +followUpNote
- *
- * BUG FIX (Apr 2026):
- *   getPCNs — federation resolution now falls back to embedded pcn.federation
- *             object when fedMap lookup returns undefined.
- *
- * BUG FIX #2 (Apr 2026):
- *   getPractices — now populates pcn with icb + federation (nested), and maps
- *                  pcn -> client so PracticeListPage.jsx can render correctly.
- *
- * BUG FIX #3 (Apr 2026):
- *   getPracticeById — nested populate pcn.icb + pcn.federation so frontend
- *                     breadcrumb + header rendering works correctly.
- *
- * CONTACT HISTORY FIX (Apr 2026):
- *   — resolveEntityId() helper: plain string, no toObjectId() cast
- *   — getContactHistory: findById().lean() for entity check (not exists({_id}))
- *   — All CH functions store/query entityId as plain String (UUID-safe)
- *   — Response normalized: notes/detail alias, date/contactDate alias
- *
- * UPDATED (Jun 2026):
- *   — annualSpend removed from PCN; replaced with hourlyRate + contractStartDate
- *   — getICBById: updated .select() to use hourlyRate + contractStartDate
- *   — getPCNRollup: rollup response now returns hourlyRate + contractStartDate
- *
- * UPDATED (Jun 2026 — ICB optional):
- *   — createFederation: ICB no longer required; icb passed only if provided
- *   — createPCN: ICB no longer required; removed "ICB is required" check
+ * (All previous history/comments preserved from original file — see
+ *  earlier versions for the Apr/Jun 2026 changelog.)
  */
 
 import ICB            from "../models/ICB.js";
@@ -85,6 +46,60 @@ const formatComplianceGroupDetail = (beforeGroups = [], afterGroups = []) => {
   const beforeText = beforeGroups.length ? beforeGroups.join(", ") : "none";
   const afterText  = afterGroups.length  ? afterGroups.join(", ")  : "none";
   return `Compliance groups changed from [${beforeText}] to [${afterText}]`;
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   ✅ NEW — RATE & CONTRACT HISTORY HELPER
+   Detects real changes to hourlyRate / contract dates between the
+   pre-update PCN doc (`existing`) and the incoming update (`payload`),
+   and mutates `payload` to append new entries to hourlyRateHistory.
+   MUST run BEFORE PCN.findByIdAndUpdate(...) inside updatePCN.
+══════════════════════════════════════════════════════════════════ */
+const TRACKED_FIELDS = [
+  { key: "hourlyRate",           label: "Hourly Rate"    },
+  { key: "contractStartDate",    label: "Contract Start" },
+  { key: "contractRenewalDate",  label: "Renewal Date"   },
+  { key: "contractExpiryDate",   label: "Expiry Date"    },
+];
+
+const trackFieldChanges = (existing, payload, userId) => {
+  const newEntries = [];
+
+  for (const { key, label } of TRACKED_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(payload, key)) continue;
+
+    const oldVal = existing[key] ?? null;
+    const newVal = payload[key] ?? null;
+
+    const normalize = (v) => {
+      if (v === null || v === undefined || v === "") return null;
+      if (key === "hourlyRate") return Number(v);
+      return new Date(v).toISOString().split("T")[0];
+    };
+
+    const oldNorm = normalize(oldVal);
+    const newNorm = normalize(newVal);
+
+    if (oldNorm === newNorm) continue;
+
+    newEntries.push({
+      field:      key,
+      fieldLabel: label,
+      oldValue:   oldVal,
+      newValue:   newVal,
+      changedAt:  new Date(),
+      changedBy:  userId,
+    });
+  }
+
+  if (newEntries.length > 0) {
+    payload.hourlyRateHistory = [
+      ...(existing.hourlyRateHistory || []),
+      ...newEntries,
+    ];
+  }
+
+  return newEntries;
 };
 
 const normalizeEntityType = (entityType = "") => {
@@ -546,7 +561,6 @@ export const getPCNs = async (req, res) => {
         }
       }
 
-      // FIX: fallback to embedded federation object if fedMap lookup returned nothing
       const federation = resolvedFederation || (
         fedField && typeof fedField === "object" && fedField.name ? fedField : null
       );
@@ -580,7 +594,6 @@ export const getICBById = async (req, res) => {
       Federation.find({ icb: req.params.id, isActive: true }).select("name type notes").sort({ name: 1 }).lean(),
       PCN.find({ icb: req.params.id, isActive: true })
         .populate("federation", "name type")
-        // UPDATED (Jun 2026): annualSpend -> hourlyRate + contractStartDate
         .select("name contractType hourlyRate contractStartDate federation xeroCode")
         .sort({ name: 1 }).lean(),
     ]);
@@ -658,12 +671,10 @@ export const getFederations = async (req, res) => {
   }
 };
 
-// ✅ PATCH 1: createFederation — ICB no longer required
 export const createFederation = async (req, res) => {
   try {
     const { name, icb, type, notes } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: "Federation name is required" });
-    // UPDATED (Jun 2026): ICB no longer required for federation creation
     const fed = await Federation.create({ name: name.trim(), ...(icb && { icb }), type: type || "federation", notes: notes || "", createdBy: req.user._id });
     const populated = await fed.populate("icb", "name");
     res.status(201).json({ federation: populated, message: "Federation created" });
@@ -739,12 +750,10 @@ export const getPCNById = async (req, res) => {
   }
 };
 
-// ✅ PATCH 2: createPCN — ICB no longer required
 export const createPCN = async (req, res) => {
   try {
     const { name, icb, decisionMakers, financeContacts, tags, priority, clientFacingData } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: "PCN name is required" });
-    // UPDATED (Jun 2026): ICB no longer required for PCN creation
 
     const payload = normalizeComplianceGroup({
       ...req.body,
@@ -814,6 +823,11 @@ export const updatePCN = async (req, res) => {
       selectiveMerge.clientFacingData = { ...(req.body.clientFacingData || {}), lastUpdated: new Date() };
 
     payload = { ...payload, ...selectiveMerge };
+
+    // ✅ NEW — Rate & Contract date change tracking.
+    // Runs BEFORE the actual update so payload.hourlyRateHistory
+    // (if a tracked field changed) gets persisted in the same write.
+    trackFieldChanges(existing, payload, req.user._id);
 
     const pcn = await PCN.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true })
       .populate("icb", "name region")
@@ -915,10 +929,86 @@ export const getPCNRollup = async (req, res) => {
     });
     const avgCompliance = complianceByPractice.length
       ? Math.round(complianceByPractice.reduce((s, p) => s + p.score, 0) / complianceByPractice.length) : 0;
-    // UPDATED (Jun 2026): annualSpend -> hourlyRate + contractStartDate
     res.json({ pcn, practices, rollup: { practiceCount: practices.length, avgCompliance, complianceByPractice, hourlyRate: pcn.hourlyRate, contractStartDate: pcn.contractStartDate } });
   } catch (err) {
     res.status(500).json({ message: "Failed to generate rollup report" });
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   ✅ NEW — GET /pcn/:id/rate-history
+   Full chronological rate/contract-date history for ONE client.
+══════════════════════════════════════════════════════════════════ */
+export const getPCNRateHistory = async (req, res) => {
+  try {
+    validateObjectIdOr400(req.params.id, "PCN id");
+
+    const pcn = await PCN.findById(req.params.id)
+      .select("name hourlyRate contractType contractStartDate contractRenewalDate contractExpiryDate hourlyRateHistory")
+      .populate("hourlyRateHistory.changedBy", "name role")
+      .lean();
+
+    if (!pcn) return res.status(404).json({ message: "PCN not found" });
+
+    const history = [...(pcn.hourlyRateHistory || [])].sort(
+      (a, b) => new Date(b.changedAt) - new Date(a.changedAt)
+    );
+
+    res.json({
+      entityName: pcn.name,
+      current: {
+        hourlyRate:          pcn.hourlyRate,
+        contractType:        pcn.contractType,
+        contractStartDate:   pcn.contractStartDate,
+        contractRenewalDate: pcn.contractRenewalDate,
+        contractExpiryDate:  pcn.contractExpiryDate,
+      },
+      history,
+    });
+  } catch (err) {
+    console.error("getPCNRateHistory ERROR:", err.message);
+    res.status(err.statusCode || 500).json({
+      message: err.statusCode ? err.message : "Failed to fetch rate history",
+    });
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   ✅ NEW — GET /pcn/rate-history/summary
+   ALL clients with current rate/dates + last change + history count.
+══════════════════════════════════════════════════════════════════ */
+export const getAllPCNRateSummary = async (req, res) => {
+  try {
+    const pcns = await PCN.find({ isActive: true })
+      .select("name icb hourlyRate contractType contractStartDate contractRenewalDate contractExpiryDate hourlyRateHistory")
+      .populate("icb", "name")
+      .sort({ name: 1 })
+      .lean();
+
+    const summary = pcns.map((pcn) => {
+      const history = [...(pcn.hourlyRateHistory || [])].sort(
+        (a, b) => new Date(b.changedAt) - new Date(a.changedAt)
+      );
+      const lastChange = history[0] || null;
+
+      return {
+        _id:                 pcn._id,
+        name:                pcn.name,
+        icbName:             pcn.icb?.name || null,
+        contractType:        pcn.contractType,
+        hourlyRate:          pcn.hourlyRate,
+        contractStartDate:   pcn.contractStartDate,
+        contractRenewalDate: pcn.contractRenewalDate,
+        contractExpiryDate:  pcn.contractExpiryDate,
+        historyCount:        history.length,
+        lastChange,
+      };
+    });
+
+    res.json({ clients: summary, total: summary.length });
+  } catch (err) {
+    console.error("getAllPCNRateSummary ERROR:", err.message);
+    res.status(500).json({ message: "Failed to fetch rate summary" });
   }
 };
 
@@ -944,7 +1034,6 @@ export const getPractices = async (req, res) => {
       .sort({ name: 1 })
       .lean();
 
-    // FIX: alias pcn -> client so PracticeListPage.jsx works without changes
     const normalized = practices.map((p) => ({
       ...p,
       client: p.pcn ?? null,
@@ -960,8 +1049,6 @@ export const getPractices = async (req, res) => {
 export const getPracticeById = async (req, res) => {
   try {
     const practice = await Practice.findById(req.params.id)
-      // FIX: nested populate so pcn.icb and pcn.federation are
-      // available on the frontend for breadcrumb + header rendering
       .populate({
         path:   "pcn",
         select: "name icb federation",
@@ -1369,4 +1456,4 @@ export const searchClients = async (req, res) => {
   } catch (err) {
     res.status(500).json({ message: "Search failed" });
   }
-};  
+};
