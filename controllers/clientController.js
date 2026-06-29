@@ -1,7 +1,7 @@
 /**
  * clientController.js  —  CPS Client Management
  *
- * UPDATED (Jun 2026 — Rate & Contract History): ✅ NEW
+ * UPDATED (Jun 2026 — Rate & Contract History):   NEW
  *   — trackFieldChanges() helper: detects real changes to hourlyRate,
  *     contractStartDate, contractRenewalDate, contractExpiryDate and
  *     appends entries to PCN.hourlyRateHistory
@@ -824,9 +824,10 @@ export const updatePCN = async (req, res) => {
 
     payload = { ...payload, ...selectiveMerge };
 
-    // ✅ NEW — Rate & Contract date change tracking.
-    // Runs BEFORE the actual update so payload.hourlyRateHistory
-    // (if a tracked field changed) gets persisted in the same write.
+    // ✅ Contract start date kabhi update nahi hoti — sirf creation pe set hoti hai
+    delete payload.contractStartDate;
+
+    // ✅ NEW — Rate & Contract date change tracking
     trackFieldChanges(existing, payload, req.user._id);
 
     const pcn = await PCN.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true })

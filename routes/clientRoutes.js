@@ -29,7 +29,7 @@ import {
   getClientFacingData,
   updateClientFacingData,
 
-  // ✅ NEW — Rate & Contract History (Jun 2026)
+  //   NEW — Rate & Contract History (Jun 2026)
   getPCNRateHistory,
   getAllPCNRateSummary,
 } from "../controllers/clientController.js";
@@ -222,23 +222,25 @@ router.get("/pcn", ...adminFin, getPCNs);
  * @swagger
  * /api/clients/pcn/rate-history/summary:
  *   get:
- *     summary: Get rate & contract history summary for ALL active PCN clients
+ *     summary: Get rate and contract history summary for all active PCN clients
  *     tags: [Client - GET]
  *     security:
  *       - bearerAuth: []
+ *     description: >
+ *       Returns an array of all active PCNs, each with current hourlyRate,
+ *       contract dates, last change entry, and total history count.
+ *       Use this to power the PCN list page rate history column.
+ *       This route must be declared before /pcn/:id so Express does not
+ *       treat rate-history as an :id param value.
  *     responses:
  *       200:
  *         description: >
- *           Array of all active PCNs — each with current hourlyRate,
+ *           Array of all active PCNs each with current hourlyRate,
  *           contract dates, last change entry, and total history count.
- *           Use this to power the PCN list page rate history column.
  *       401:
  *         description: Unauthorized
  *       403:
  *         description: Forbidden
- *
- * ⚠️  MUST be declared BEFORE /pcn/:id so Express does not treat
- *     "rate-history" as an :id param value.
  */
 router.get("/pcn/rate-history/summary", ...adminFin, getAllPCNRateSummary);
 
@@ -354,7 +356,7 @@ router.get("/pcn/:id/client-facing", ...adminFin, getClientFacingData);
  * @swagger
  * /api/clients/pcn/{id}/rate-history:
  *   get:
- *     summary: Get full rate & contract-date history for a single PCN client
+ *     summary: Get full rate and contract date history for a single PCN client
  *     tags: [Client - GET]
  *     security:
  *       - bearerAuth: []
@@ -368,10 +370,9 @@ router.get("/pcn/:id/client-facing", ...adminFin, getClientFacingData);
  *     responses:
  *       200:
  *         description: >
- *           { entityName, current: { hourlyRate, contractType,
- *             contractStartDate, contractRenewalDate, contractExpiryDate },
- *             history: [{ field, fieldLabel, oldValue, newValue,
- *             changedAt, changedBy }] }
+ *           Returns entityName, current hourlyRate, contractType,
+ *           contractStartDate, contractRenewalDate, contractExpiryDate,
+ *           and history array of field changes with changedAt and changedBy.
  *       401:
  *         description: Unauthorized
  *       403:
@@ -881,7 +882,7 @@ router.post("/compliance/run-expiry", ...admin, runExpiryCheck);
 router.post(
   "/:entityType/:entityId/reporting-archive",
   ...admin,
-  addToReportingArchiveV2   // JSON only — no multer
+  addToReportingArchiveV2
 );
 
 /**
@@ -943,7 +944,7 @@ router.post(
 router.post(
   "/:entityType/:entityId/documents/:groupId/:documentId/uploads",
   ...admin,
-  addEntityDocumentUploads   // JSON uploads[]
+  addEntityDocumentUploads
 );
 
 /**
@@ -1700,7 +1701,7 @@ router.patch(
 router.patch(
   "/:entityType/:entityId/compliance/:docKey",
   ...admin,
-  upload.single("file"),   // ONLY place multer is used
+  upload.single("file"),
   upsertComplianceDoc
 );
 
