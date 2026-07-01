@@ -600,8 +600,19 @@ export function createModel(config: ModelConfig): any {
       return rows;
     }
 
-    static async populateRecord(record: any, spec: PopulateSpec): Promise<any> {
-      if (!record || !spec?.path) return record;
+    static async populateRecord(record: any, spec: PopulateSpec | PopulateSpec[]): Promise<any> {
+      if (!record || !spec) return record;
+      
+      // Support array of populate specs (e.g. populate: [{ path: 'icb' }, { path: 'federation' }])
+      if (Array.isArray(spec)) {
+        let current = record;
+        for (const s of spec) {
+          current = await this.populateRecord(current, s);
+        }
+        return current;
+      }
+
+      if (!spec.path) return record;
       const next = clone(record);
       const ref = this.refs[spec.path];
       if (!ref) return next;

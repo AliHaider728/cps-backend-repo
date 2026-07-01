@@ -1216,7 +1216,17 @@ export const createPractice = async (req: Request, res: Response) => {
     const payload  = normalizeComplianceGroup(req.body);
     // @ts-ignore
     const practice = await Practice.create({ ...payload, name: name.trim(), createdBy: req.user._id });
-    const populated = await Practice.findById(practice._id).populate("pcn", "name").populate("complianceGroup", "name").lean();
+    const populated = await Practice.findById(practice._id)
+      .populate({
+        path:   "pcn",
+        select: "name icb federation",
+        populate: [
+          { path: "icb",        select: "name region code" },
+          { path: "federation", select: "name type"        },
+        ],
+      })
+      .populate("complianceGroup", "name")
+      .lean();
     await logAudit(req, "CREATE_CLIENT", "Practice", { resourceId: practice._id, detail: `Practice created: ${practice.name}`, after: safeJson(populated) });
     res.status(201).json({ practice: populated, message: "Practice created" });
   } catch (err) {
