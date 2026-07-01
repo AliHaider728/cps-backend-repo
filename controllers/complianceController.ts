@@ -1,0 +1,1112 @@
+/**
+ * complianceController.ts
+ *
+ * UPDATED (Apr 2026) — Spec: CPS_Controller_Update_Spec.docx
+ *
+ * ✅ ARCHITECTURE CHANGE: File uploads now use "frontend-to-Supabase" pattern.
+ *    - addEntityDocumentUploads: reads JSON body { uploads[], expiryDate, notes, reference }
+ *      instead of multer req.files. multer middleware removed from this route.
+ *    - uploadBufferToStorage (Supabase backend upload) is NO LONGER called here.
+ *      Files are already in Supabase; backend only persists metadata.
+ *
+ * Other updates kept from previous version:
+ *   getEntityDocumentContext   — populate select includes clinicianCanUpload,
+ *                                visibleToClinician, notes (spec §1)
+ *   normalizePopulatedDoc      — returns clinicianCanUpload, visibleToClinician,
+ *                                notes in normalized output (spec §2)
+ *   buildEntityDocumentsPayload — each doc row includes clinicianCanUpload +
+ *                                visibleToClinician (spec §3)
+ *   getExpiringDocs            — also checks groupDocuments[].uploads[] for expiry,
+ *                                uses doc.defaultReminderDays as threshold (spec §4)
+ *   runExpiryCheck             — second loop for groupDocuments uploads (spec §5)
+ *   getComplianceStatus        — groupDocumentsSummary added, combined overallPct (spec §6)
+ */
+
+import PCN           from "../models/PCN.js";
+import Practice      from "../models/Practice.js";
+import DocumentGroup from "../models/DocumentGroup.js";
+import ComplianceDocument from "../models/ComplianceDocument.js";
+import nodemailer    from "nodemailer";
+import { logAudit }  from "../middleware/auditLogger.js";
+import { createId, isValidId } from "../lib/ids.js";
+// ✅ uploadBufferToStorage is no longer called in addEntityDocumentUploads
+//    (kept in import in case other functions like upsertComplianceDoc still use it)
+import { uploadBufferToStorage } from "../lib/supabase.js";
+import { Request, Response, NextFunction } from "express";
+
+const transporter = nodemailer.createTransport({
+  host:   process.env.EMAIL_HOST,
+  port:   Number(process.env.EMAIL_PORT) || 587,
+  secure: false,
+  auth:   { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+});
+
+/* ── Doc type definitions ─────────────────────────────────────────── */
+const PRACTICE_DOC_TYPES = [
+  { key: "cqcRating",                 label: "CQC Rating",                 mandatory: true  },
+  { key: "indemnityInsurance",        label: "Indemnity Insurance",        mandatory: true,  hasExpiry: true },
+  { key: "healthSafety",              label: "Health & Safety Certificate",mandatory: true,  hasExpiry: true },
+  { key: "gdprPolicy",               label: "GDPR Policy",                mandatory: true  },
+  { key: "informationGovernance",     label: "Information Governance",     mandatory: true  },
+  { key: "ndaSigned",                 label: "NDA Signed",                 mandatory: true  },
+  { key: "dsaSigned",                 label: "DSA Signed",                 mandatory: true  },
+  { key: "mouReceived",               label: "MOU Received",               mandatory: false },
+  { key: "welcomePackSent",           label: "Welcome Pack Sent",          mandatory: false },
+  { key: "mobilisationPlanSent",      label: "Mobilisation Plan Sent",     mandatory: false },
+  { key: "confidentialityFormSigned", label: "Confidentiality Form",       mandatory: true  },
+  { key: "prescribingPoliciesShared", label: "Prescribing Policies",       mandatory: false },
+  { key: "remoteAccessSetup",         label: "Remote Access Setup",        mandatory: false },
+  { key: "templateInstalled",         label: "Template Installed",         mandatory: false },
+  { key: "reportsImported",           label: "Reports Imported",           mandatory: false },
+];
+
+const PCN_DOC_TYPES = [
+  { key: "ndaSigned",       label: "NDA Signed",            mandatory: true  },
+  { key: "dsaSigned",       label: "DSA Signed",            mandatory: true  },
+  { key: "mouReceived",     label: "MOU Received",          mandatory: true  },
+  { key: "gdprAgreement",   label: "GDPR Agreement",        mandatory: true  },
+  { key: "welcomePackSent", label: "Welcome Pack Sent",     mandatory: false },
+  { key: "insuranceCert",   label: "Insurance Certificate", mandatory: true, hasExpiry: true },
+  { key: "govChecklist",    label: "Governance Checklist",  mandatory: true  },
+];
+
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+
+/* ── Error helpers ─────────────────────────────────────────────────── */
+function createHttpError(statusCode: number, message: string, details = {}) {
+  const error: any = new Error(message);
+  error.statusCode = statusCode;
+  error.details = details;
+  return error;
+}
+
+function isDatabaseUnavailableError(err: any) {
+  if (!err) return false;
+  const knownNames = new Set(["DatabaseConnectionError", "PostgresError"]);
+  if (knownNames.has(err.name)) return true;
+  const msg = String(err.message || "").toLowerCase();
+  return msg.includes("buffering timed out") || msg.includes("topology was destroyed");
+}
+
+function toHttpError(err: any, fallbackMessage: string) {
+  if (err?.statusCode) return err;
+  if (isDatabaseUnavailableError(err)) return createHttpError(503, "Database connection unavailable");
+  return createHttpError(500, fallbackMessage);
+}
+
+function isValidObjectId(value: any) {
+  return isValidId(String(value || ""));
+}
+
+function ensureValidObjectId(value: any, label: string) {
+  if (!isValidObjectId(value)) throw createHttpError(400, `Invalid ${label}`);
+}
+
+function getModel(entityType: string) {
+  if (entityType === "PCN") return PCN;
+  if (entityType === "Practice") return Practice;
+  throw new Error("Invalid entityType");
+}
+
+function getDocTypes(entityType: string) {
+  return entityType === "PCN" ? PCN_DOC_TYPES : PRACTICE_DOC_TYPES;
+}
+
+function calcScore(complianceDocs: any = {}, docTypes: any[]) {
+  const mandatory = docTypes.filter(d => d.mandatory);
+  const mandatoryDone = mandatory.filter(d => complianceDocs[d.key]?.status === "verified").length;
+  const allDone = docTypes.filter(d => complianceDocs[d.key]?.status === "verified").length;
+  const overallPct = Math.round((allDone / docTypes.length) * 100);
+  const mandatoryPct = mandatory.length ? Math.round((mandatoryDone / mandatory.length) * 100) : 100;
+
+  const expiring = Object.entries(complianceDocs)
+    .filter(([, meta]: [string, any]) => {
+      if (!meta?.expiryDate) return false;
+      const diff = new Date(meta.expiryDate).getTime() - Date.now();
+      return diff > 0 && diff < THIRTY_DAYS_MS;
+    }).length;
+
+  const expired = Object.entries(complianceDocs)
+    .filter(([, meta]: [string, any]) => meta?.expiryDate && new Date(meta.expiryDate) < new Date()).length;
+
+  const missing = docTypes.filter(d => d.mandatory && !complianceDocs[d.key]?.status).map(d => d.label);
+
+  return { overallPct, mandatoryPct, allDone, total: docTypes.length, expiring, expired, missing };
+}
+
+function normalizeEntityType(entityType: string = "") {
+  const normalized = String(entityType).toLowerCase();
+  if (normalized === "pcn") return "PCN";
+  if (normalized === "practice") return "Practice";
+  throw createHttpError(400, "Invalid entityType");
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   normalizePopulatedDoc  (spec §2)
+───────────────────────────────────────────────────────────────────── */
+function normalizePopulatedDoc(doc: any) {
+  if (!doc || typeof doc !== "object") return null;
+  const docId = doc._id || doc.id;
+  if (!docId) return null;
+  return {
+    _id:                docId,
+    name:               doc.name || "Unnamed document",
+    displayOrder:       doc.displayOrder ?? 0,
+    mandatory:          !!doc.mandatory,
+    expirable:          !!doc.expirable,
+    active:             doc.active !== false,
+    defaultExpiryDays:  doc.defaultExpiryDays ?? null,
+    defaultReminderDays: doc.defaultReminderDays ?? null,
+    clinicianCanUpload: !!doc.clinicianCanUpload,
+    visibleToClinician: doc.visibleToClinician !== false,
+    notes:              doc.notes || "",
+  };
+}
+
+function normalizePopulatedGroup(group: any) {
+  if (!group || typeof group !== "object") return null;
+  const groupId = group._id || group.id;
+  if (!groupId) return null;
+  return {
+    _id:          groupId,
+    name:         group.name || "Unknown group",
+    active:       group.active ?? false,
+    displayOrder: group.displayOrder ?? 0,
+    documents:    Array.isArray(group.documents)
+      ? group.documents.map(normalizePopulatedDoc).filter(Boolean)
+      : [],
+  };
+}
+
+function computeDocumentStatus(record: any, docDef: any) {
+  if (!record?.fileUrl) return "pending";
+  if (docDef?.expirable && record.expiryDate && new Date(record.expiryDate) < new Date()) return "expired";
+  return record.status === "expired" ? "expired" : "uploaded";
+}
+
+function buildRecordKey(groupId: any, documentId: any) {
+  return `${String(groupId)}:${String(documentId)}`;
+}
+
+function computeUploadStatus(upload: any, docDef: any) {
+  if (!upload?.fileUrl) return "pending";
+  if (docDef?.expirable && upload.expiryDate && new Date(upload.expiryDate) < new Date()) return "expired";
+  return upload.status === "expired" ? "expired" : "uploaded";
+}
+
+function normalizeUploadForDocument(upload: any, docDef: any) {
+  if (!upload || typeof upload !== "object") return upload;
+  return {
+    ...upload,
+    expiryDate: docDef?.expirable ? (upload.expiryDate || null) : null,
+  };
+}
+
+function getRecordUploads(record: any, docDef: any) {
+  record = record ?? {};
+
+  const uploads = Array.isArray(record.uploads) && record.uploads.length > 0
+    ? record.uploads
+    : (record.fileUrl
+        ? [{
+            uploadId:   record.uploadId || `legacy-${String(record.group || "nogroup")}-${String(record.document || "nodoc")}`,
+            fileName:   record.fileName   || "",
+            fileUrl:    record.fileUrl    || "",
+            mimeType:   record.mimeType   || "",
+            fileSize:   record.fileSize   || 0,
+            uploadedAt: record.uploadedAt || null,
+            expiryDate: record.expiryDate || null,
+            renewalDate:record.renewalDate|| null,
+            notes:      record.notes      || "",
+            reference:  record.reference  || "",
+            uploadedBy: record.uploadedBy || null,
+            status:     computeUploadStatus(record, docDef),
+          }]
+        : []);
+
+  return uploads
+    .map((upload: any) => {
+      const normalized = normalizeUploadForDocument(upload, docDef);
+      return { ...normalized, status: computeUploadStatus(normalized, docDef) };
+    })
+    .sort((a: any, b: any) => new Date(b.uploadedAt || 0).getTime() - new Date(a.uploadedAt || 0).getTime());
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   getEntityDocumentContext  (spec §1)
+───────────────────────────────────────────────────────────────────── */
+async function getEntityDocumentContext(entityType: string, entityId: string) {
+  const normalizedType = normalizeEntityType(entityType);
+  ensureValidObjectId(entityId, `${normalizedType} id`);
+  void DocumentGroup;
+  void ComplianceDocument;
+  const Model = getModel(normalizedType);
+
+  const DOC_SELECT = "name displayOrder mandatory expirable active defaultExpiryDays defaultReminderDays clinicianCanUpload visibleToClinician notes";
+
+  let query = Model.findById(entityId).populate({
+    path:   "complianceGroup",
+    select: "name active displayOrder documents",
+    populate: { path: "documents", select: DOC_SELECT },
+  });
+
+  if (normalizedType === "PCN") {
+    query = query.populate({
+      path:   "complianceGroups",
+      select: "name active displayOrder documents",
+      populate: { path: "documents", select: DOC_SELECT },
+    });
+  }
+
+  let entity: any;
+  try {
+    entity = await query.lean();
+  } catch (err: any) {
+    console.error("getEntityDocumentContext populate ERROR:", {
+      message: err.message, stack: err.stack, entityType: normalizedType, entityId,
+    });
+    throw toHttpError(err, "Failed to fetch documents");
+  }
+
+  if (!entity) return { normalizedType, entity: null, documents: [], usedDefaultDocuments: false };
+
+  const selectedGroups = buildSelectedGroups(entity);
+  const groupDocMap = new Map();
+  for (const group of selectedGroups) {
+    for (const doc of group?.documents || []) {
+      if (!doc || doc.active === false) continue;
+      groupDocMap.set(String(doc._id), doc);
+    }
+  }
+
+  const groupDocs = Array.from(groupDocMap.values())
+    .sort((a: any, b: any) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0) || a.name.localeCompare(b.name));
+
+  return { normalizedType, entity, documents: groupDocs, usedDefaultDocuments: false };
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   buildEntityDocumentsPayload  (spec §3)
+───────────────────────────────────────────────────────────────────── */
+function buildEntityDocumentsPayload(entity: any, documents: any[], options: any = {}) {
+  const recordMap = new Map(
+    (entity.groupDocuments || []).map((record: any) => [buildRecordKey(record.group, record.document), record])
+  );
+  const groupList    = buildSelectedGroups(entity);
+  const primaryGroup = normalizePopulatedGroup(entity.complianceGroup);
+
+  // @ts-ignore
+  const groups = groupList.map((group) => {
+    const docsForGroup = (group.documents || [])
+      .filter((doc: any) => doc && doc.active !== false)
+      .sort((a: any, b: any) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0) || a.name.localeCompare(b.name))
+      .map((doc: any) => {
+        const record      = recordMap.get(buildRecordKey(group._id, doc._id)) || undefined;
+        const uploads     = getRecordUploads(record, doc);
+        const latestUpload= uploads[0] || null;
+        const status      = latestUpload ? latestUpload.status : "pending";
+        return {
+          groupId:            String(group._id),
+          groupName:          group.name,
+          documentId:         String(doc._id),
+          name:               doc.name,
+          mandatory:          !!doc.mandatory,
+          expirable:          !!doc.expirable,
+          defaultExpiryDays:  doc.defaultExpiryDays ?? null,
+          defaultReminderDays:doc.defaultReminderDays ?? null,
+          clinicianCanUpload: !!doc.clinicianCanUpload,
+          visibleToClinician: doc.visibleToClinician !== false,
+          uploadCount:        uploads.length,
+          latestUpload,
+          status,
+          uploads,
+        };
+      });
+
+    return {
+      groupId:      String(group._id),
+      groupName:    group.name,
+      displayOrder: group.displayOrder ?? 0,
+      documents:    docsForGroup,
+    };
+  });
+
+  // @ts-ignore
+  const rows = groups.flatMap((group) => group.documents);
+
+  return {
+    complianceGroup: primaryGroup
+      ? { _id: primaryGroup._id, name: primaryGroup.name, active: primaryGroup.active, displayOrder: primaryGroup.displayOrder }
+      : null,
+    // @ts-ignore
+    complianceGroups: groupList.map((group) => ({
+      _id: group._id, name: group.name, active: group.active, displayOrder: group.displayOrder,
+    })),
+    usedDefaultDocuments: !!options.usedDefaultDocuments,
+    groups,
+    documents: rows,
+    summary: {
+      total:    rows.length,
+      uploaded: rows.filter((doc: any) => doc.status === "uploaded").length,
+      pending:  rows.filter((doc: any) => doc.status === "pending").length,
+      expired:  rows.filter((doc: any) => doc.status === "expired").length,
+    },
+  };
+}
+
+export const getEntityDocuments = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { entityType, entityId } = req.params;
+
+    if (!isValidId(String(entityId || ""))) {
+      return res.status(400).json({ message: "Invalid ID" });
+    }
+
+    const { normalizedType, entity, documents, usedDefaultDocuments } =
+      // @ts-ignore
+      await getEntityDocumentContext(entityType, entityId);
+
+    if (!entity) {
+      return res.status(404).json({ message: `${normalizedType} not found` });
+    }
+
+    res.json({
+      entityType: normalizedType,
+      entityId:   entity._id,
+      entityName: entity.name,
+      ...buildEntityDocumentsPayload(entity, documents, { usedDefaultDocuments }),
+    });
+  } catch (err: any) {
+    const httpErr = toHttpError(err, "Failed to fetch documents");
+    console.error("getEntityDocuments ERROR:", { message: httpErr.message, stack: err.stack });
+    res.status(httpErr.statusCode).json({ message: httpErr.message });
+  }
+};
+
+function buildSelectedGroups(entity: any) {
+  const fromArray = (entity?.complianceGroups && entity.complianceGroups.length > 0)
+    ? entity.complianceGroups
+    : [];
+
+  const normalizedFromArray = fromArray.map(normalizePopulatedGroup).filter(Boolean);
+  if (normalizedFromArray.length > 0) return normalizedFromArray;
+
+  const normalizedSingle = entity?.complianceGroup
+    ? normalizePopulatedGroup(entity.complianceGroup)
+    : null;
+  return normalizedSingle ? [normalizedSingle] : [];
+}
+
+function findGroupAndDocument(entity: any, groupId: string, documentId: string) {
+  ensureValidObjectId(groupId, "group id");
+  ensureValidObjectId(documentId, "document id");
+  const selectedGroups = buildSelectedGroups(entity);
+  // @ts-ignore
+  const targetGroup = selectedGroups.find((group) => String(group._id) === String(groupId));
+  if (!targetGroup) return { targetGroup: null, targetDoc: null };
+  const targetDoc = (targetGroup.documents || []).find((doc: any) => String(doc._id) === String(documentId));
+  return { targetGroup, targetDoc };
+}
+
+function makeUploadEntry(payload: any, userId: string, docDef: any) {
+  const entry = {
+    uploadId:    createId(),
+    fileName:    payload.fileName  || "",
+    fileUrl:     payload.fileUrl   || "",
+    mimeType:    payload.mimeType  || "",
+    fileSize:    payload.fileSize  || 0,
+    uploadedAt:  new Date(),
+    expiryDate:  docDef?.expirable && payload.expiryDate ? new Date(payload.expiryDate) : null,
+    renewalDate: payload.renewalDate ? new Date(payload.renewalDate) : null,
+    notes:       payload.notes     || "",
+    reference:   payload.reference || "",
+    uploadedBy:  userId,
+  };
+  if (!entry.expiryDate && docDef?.expirable && docDef.defaultExpiryDays) {
+    entry.expiryDate = new Date(Date.now() + docDef.defaultExpiryDays * 24 * 60 * 60 * 1000);
+  }
+  const normalized = normalizeUploadForDocument(entry, docDef);
+  normalized.status = computeUploadStatus(normalized, docDef);
+  return normalized;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   ✅ NEW: getJsonUploads
+   Replaces getMultipartUploads.
+   Reads upload metadata from req.body.uploads[] (JSON array).
+   Files are already in Supabase — frontend sent { fileUrl, fileName, mimeType, fileSize }.
+   Shared expiryDate / notes / reference also come from req.body.
+───────────────────────────────────────────────────────────────────── */
+function getJsonUploads(req: Request) {
+  const { uploads, expiryDate, renewalDate, notes, reference } = req.body;
+
+  if (!Array.isArray(uploads) || uploads.length === 0) return [];
+
+  return uploads.map((u: any) => ({
+    fileName:    u.fileName   || "",
+    fileUrl:     u.fileUrl    || "",
+    mimeType:    u.mimeType   || "",
+    fileSize:    u.fileSize   || 0,
+    expiryDate:  expiryDate   || null,
+    renewalDate: renewalDate  || null,
+    notes:       notes        || "",
+    reference:   reference    || "",
+  }));
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   addEntityDocumentUploads
+   ✅ UPDATED: uses getJsonUploads instead of getMultipartUploads.
+              No multer middleware needed on this route.
+───────────────────────────────────────────────────────────────────── */
+export const addEntityDocumentUploads = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    // @ts-ignore
+    const { normalizedType, entity } = await getEntityDocumentContext(req.params.entityType, req.params.entityId);
+    if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
+    if (!buildSelectedGroups(entity).length)
+      return res.status(400).json({ message: "Select a compliance group before uploading documents" });
+
+    const { groupId, documentId } = req.params;
+    // @ts-ignore
+    const { targetGroup, targetDoc } = findGroupAndDocument(entity, groupId, documentId);
+    if (!targetGroup) return res.status(404).json({ message: "Document group is not assigned to this entity" });
+    if (!targetDoc)   return res.status(404).json({ message: "Document is not part of the selected group" });
+
+    // ✅ Read JSON uploads (files already in Supabase)
+    const uploadsPayload = getJsonUploads(req);
+    if (!uploadsPayload.length) return res.status(400).json({ message: "At least one upload is required" });
+
+    const records     = [...(entity.groupDocuments || [])];
+    const recordIndex = records.findIndex(
+      (r: any) => String(r.group) === String(groupId) && String(r.document) === String(documentId)
+    );
+    const existing   = recordIndex >= 0 ? records[recordIndex] : { group: groupId, document: documentId };
+    const nextUploads = [
+      ...getRecordUploads(existing, targetDoc),
+      ...uploadsPayload.map((u) => makeUploadEntry(u, (req as any).user._id, targetDoc)),
+    ];
+    const latestUpload = nextUploads[0] || null;
+    const nextRecord   = {
+      ...existing, group: groupId, document: documentId,
+      uploads:     nextUploads,
+      fileName:    latestUpload?.fileName  || "",
+      fileUrl:     latestUpload?.fileUrl   || "",
+      mimeType:    latestUpload?.mimeType  || "",
+      fileSize:    latestUpload?.fileSize  || 0,
+      uploadedAt:  latestUpload?.uploadedAt || null,
+      expiryDate:  latestUpload?.expiryDate || null,
+      renewalDate: latestUpload?.renewalDate|| null,
+      notes:       latestUpload?.notes     || "",
+      reference:   latestUpload?.reference || "",
+      uploadedBy:  latestUpload?.uploadedBy|| null,
+      lastUpdatedBy: (req as any).user._id,
+      status:      latestUpload?.status || "pending",
+    };
+    if (recordIndex >= 0) records[recordIndex] = nextRecord;
+    else records.push(nextRecord);
+
+    const Model = getModel(normalizedType);
+    await Model.findByIdAndUpdate(req.params.entityId, { $set: { groupDocuments: records } }, { new: true, runValidators: false });
+    await logAudit(req, "DOCUMENT_UPLOAD", "ClientDocument", {
+      // @ts-ignore
+      resourceId: req.params.entityId,
+      detail: `${normalizedType} document uploaded (group: ${groupId}, document: ${documentId}, files: ${uploadsPayload.length})`,
+      after: { entityType: normalizedType, entityId: req.params.entityId, groupId, documentId, uploadCount: nextUploads.length },
+    });
+    // @ts-ignore
+    const refreshed = await getEntityDocumentContext(req.params.entityType, req.params.entityId);
+    res.json({
+      message: "Uploads added", entityType: normalizedType, entityId: req.params.entityId,
+      entityName: refreshed.entity?.name,
+      ...buildEntityDocumentsPayload(refreshed.entity, refreshed.documents, { usedDefaultDocuments: refreshed.usedDefaultDocuments }),
+    });
+  } catch (err: any) {
+    const httpErr = toHttpError(err, "Failed to add uploads");
+    console.error("addEntityDocumentUploads ERROR:", httpErr.message);
+    res.status(httpErr.statusCode).json({ message: httpErr.message });
+  }
+};
+
+export const updateEntityDocumentUpload = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    // @ts-ignore
+    const { normalizedType, entity } = await getEntityDocumentContext(req.params.entityType, req.params.entityId);
+    if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
+
+    const { groupId, documentId, uploadId } = req.params;
+    const selectedGroups = buildSelectedGroups(entity);
+    const targetGroup = selectedGroups.find((g: any) => String(g._id) === String(groupId));
+    if (!targetGroup) return res.status(404).json({ message: "Document group is not assigned to this entity" });
+    const targetDoc = (targetGroup.documents || []).find((d: any) => String(d._id) === String(documentId));
+    if (!targetDoc)   return res.status(404).json({ message: "Document is not part of the selected group" });
+
+    const records     = [...(entity.groupDocuments || [])];
+    const recordIndex = records.findIndex(
+      (r: any) => String(r.group) === String(groupId) && String(r.document) === String(documentId)
+    );
+    if (recordIndex < 0) return res.status(404).json({ message: "Upload record not found" });
+
+    const record  = { ...records[recordIndex] };
+    const uploads = getRecordUploads(record, targetDoc).map((u: any) => ({ ...u }));
+    const uploadIndex = uploads.findIndex((u: any) => String(u.uploadId) === String(uploadId));
+    if (uploadIndex < 0) return res.status(404).json({ message: "Upload not found" });
+
+    const existing    = uploads[uploadIndex];
+    const nextUpload  = {
+      ...existing,
+      ...(req.body.expiryDate  !== undefined && {
+        expiryDate: targetDoc?.expirable && req.body.expiryDate ? new Date(req.body.expiryDate) : null,
+      }),
+      ...(req.body.renewalDate !== undefined && { renewalDate: req.body.renewalDate ? new Date(req.body.renewalDate) : null }),
+      ...(req.body.notes       !== undefined && { notes:     req.body.notes     || "" }),
+      ...(req.body.reference   !== undefined && { reference: req.body.reference || "" }),
+    };
+    const normalized  = normalizeUploadForDocument(nextUpload, targetDoc);
+    normalized.status = computeUploadStatus(normalized, targetDoc);
+    uploads[uploadIndex] = normalized;
+    uploads.sort((a: any, b: any) => new Date(b.uploadedAt || 0).getTime() - new Date(a.uploadedAt || 0).getTime());
+
+    const latest = uploads[0] || null;
+    records[recordIndex] = {
+      ...record, uploads,
+      fileName:    latest?.fileName  || "",
+      fileUrl:     latest?.fileUrl   || "",
+      mimeType:    latest?.mimeType  || "",
+      fileSize:    latest?.fileSize  || 0,
+      uploadedAt:  latest?.uploadedAt || null,
+      expiryDate:  latest?.expiryDate || null,
+      renewalDate: latest?.renewalDate|| null,
+      notes:       latest?.notes     || "",
+      reference:   latest?.reference || "",
+      uploadedBy:  latest?.uploadedBy|| null,
+      lastUpdatedBy: (req as any).user._id,
+      status:      latest?.status || "pending",
+    };
+
+    const Model = getModel(normalizedType);
+    await Model.findByIdAndUpdate(req.params.entityId, { $set: { groupDocuments: records } }, { new: true, runValidators: false });
+    await logAudit(req, "DOCUMENT_UPDATE", "ClientDocument", {
+      // @ts-ignore
+      resourceId: req.params.entityId,
+      detail: `${normalizedType} document upload updated (group: ${groupId}, document: ${documentId}, upload: ${uploadId})`,
+    });
+    // @ts-ignore
+    const refreshed = await getEntityDocumentContext(req.params.entityType, req.params.entityId);
+    res.json({
+      message: "Upload updated", entityType: normalizedType, entityId: req.params.entityId,
+      entityName: refreshed.entity?.name,
+      ...buildEntityDocumentsPayload(refreshed.entity, refreshed.documents, { usedDefaultDocuments: refreshed.usedDefaultDocuments }),
+    });
+  } catch (err: any) {
+    const httpErr = toHttpError(err, "Failed to update upload");
+    console.error("updateEntityDocumentUpload ERROR:", httpErr.message);
+    res.status(httpErr.statusCode).json({ message: httpErr.message });
+  }
+};
+
+export const deleteEntityDocumentUpload = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    // @ts-ignore
+    const { normalizedType, entity } = await getEntityDocumentContext(req.params.entityType, req.params.entityId);
+    if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
+
+    const { groupId, documentId, uploadId } = req.params;
+    ensureValidObjectId(groupId,    "group id");
+    ensureValidObjectId(documentId, "document id");
+    if (!uploadId) return res.status(400).json({ message: "Invalid upload id" });
+
+    const selectedGroups = buildSelectedGroups(entity);
+    const targetGroup = selectedGroups.find((g: any) => String(g._id) === String(groupId));
+    if (!targetGroup) return res.status(404).json({ message: "Document group is not assigned to this entity" });
+    const targetDoc = (targetGroup.documents || []).find((d: any) => String(d._id) === String(documentId));
+    if (!targetDoc)   return res.status(404).json({ message: "Document is not part of the selected group" });
+
+    const records     = [...(entity.groupDocuments || [])];
+    const recordIndex = records.findIndex(
+      (r: any) => String(r.group) === String(groupId) && String(r.document) === String(documentId)
+    );
+    if (recordIndex < 0) return res.status(404).json({ message: "Upload record not found" });
+
+    const record     = { ...records[recordIndex] };
+    const allUploads = getRecordUploads(record, targetDoc);
+    const filtered   = allUploads.filter((u: any) => String(u.uploadId) !== String(uploadId));
+    if (filtered.length === allUploads.length) return res.status(404).json({ message: "Upload not found" });
+
+    if (filtered.length === 0) {
+      records.splice(recordIndex, 1);
+    } else {
+      const latest = filtered[0] || null;
+      records[recordIndex] = {
+        ...record, uploads: filtered,
+        fileName:    latest?.fileName  || "",
+        fileUrl:     latest?.fileUrl   || "",
+        mimeType:    latest?.mimeType  || "",
+        fileSize:    latest?.fileSize  || 0,
+        uploadedAt:  latest?.uploadedAt || null,
+        expiryDate:  latest?.expiryDate || null,
+        renewalDate: latest?.renewalDate|| null,
+        notes:       latest?.notes     || "",
+        reference:   latest?.reference || "",
+        uploadedBy:  latest?.uploadedBy|| null,
+        lastUpdatedBy: (req as any).user._id,
+        status:      latest?.status || "pending",
+      };
+    }
+
+    const Model = getModel(normalizedType);
+    await Model.findByIdAndUpdate(req.params.entityId, { $set: { groupDocuments: records } }, { new: true, runValidators: false });
+    await logAudit(req, "DOCUMENT_DELETE", "ClientDocument", {
+      // @ts-ignore
+      resourceId: req.params.entityId,
+      detail: `${normalizedType} document upload deleted (group: ${groupId}, document: ${documentId}, upload: ${uploadId})`,
+    });
+    // @ts-ignore
+    const refreshed = await getEntityDocumentContext(req.params.entityType, req.params.entityId);
+    res.json({
+      message: "Upload deleted", entityType: normalizedType, entityId: req.params.entityId,
+      entityName: refreshed.entity?.name,
+      ...buildEntityDocumentsPayload(refreshed.entity, refreshed.documents, { usedDefaultDocuments: refreshed.usedDefaultDocuments }),
+    });
+  } catch (err: any) {
+    const httpErr = toHttpError(err, "Failed to delete upload");
+    console.error("deleteEntityDocumentUpload ERROR:", httpErr.message);
+    res.status(httpErr.statusCode).json({ message: httpErr.message });
+  }
+};
+
+export const upsertEntityDocument = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const documentId = String(req.params.documentId);
+    // @ts-ignore
+    const { normalizedType, entity } = await getEntityDocumentContext(req.params.entityType, req.params.entityId);
+    if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
+    const groupList   = buildSelectedGroups(entity);
+    const targetGroup = groupList.find((g: any) => (g.documents || []).some((d: any) => String(d._id) === documentId));
+    if (!targetGroup) return res.status(404).json({ message: "Document is not part of the selected compliance group" });
+    req.params.groupId = String(targetGroup._id);
+    return addEntityDocumentUploads(req, res, next);
+  } catch (err: any) {
+    const httpErr = toHttpError(err, "Failed to update document");
+    console.error("upsertEntityDocument ERROR:", httpErr.message);
+    res.status(httpErr.statusCode).json({ message: httpErr.message });
+  }
+};
+
+/* ─────────────────────────────────────────────────────────────────────
+   getComplianceStatus  (spec §6)
+───────────────────────────────────────────────────────────────────── */
+export const getComplianceStatus = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { entityType, entityId } = req.params;
+    // @ts-ignore
+    const normalizedType = normalizeEntityType(entityType);
+    const Model    = getModel(normalizedType);
+    const docTypes = getDocTypes(normalizedType);
+
+    const entity = await Model.findById(entityId).lean();
+    if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
+
+    const complianceDocs = entity.complianceDocs || {};
+    const legacyScore    = calcScore(complianceDocs, docTypes);
+
+    const groupDocs  = Array.isArray(entity.groupDocuments) ? entity.groupDocuments : [];
+    const gdTotal    = groupDocs.length;
+    // @ts-ignore
+    const gdUploaded = groupDocs.filter((r: any) => r.fileUrl || (Array.isArray(r.uploads) && r.uploads.some((u) => u.fileUrl))).length;
+    const gdExpired  = groupDocs.filter((r: any) => r.status === "expired").length;
+    const gdPending  = gdTotal - gdUploaded;
+
+    const groupDocumentsSummary = {
+      total:    gdTotal,
+      uploaded: gdUploaded,
+      pending:  gdPending,
+      expired:  gdExpired,
+    };
+
+    const combinedTotal = legacyScore.total + gdTotal;
+    const combinedDone  = legacyScore.allDone + gdUploaded;
+    const overallPct    = combinedTotal > 0 ? Math.round((combinedDone / combinedTotal) * 100) : 100;
+
+    const docs = docTypes.map(d => {
+      const meta = complianceDocs[d.key] || null;
+      let trafficLight = "grey";
+      if (meta) {
+        if (meta.status === "rejected") trafficLight = "red";
+        else if (meta.status === "pending") trafficLight = "amber";
+        else if (meta.expiryDate) {
+          const diff = new Date(meta.expiryDate).getTime() - Date.now();
+          if (diff < 0)               trafficLight = "red";
+          else if (diff < THIRTY_DAYS_MS) trafficLight = "amber";
+          else if (meta.status === "verified") trafficLight = "green";
+        } else if (meta.status === "verified") trafficLight = "green";
+      }
+      return { ...d, meta, trafficLight };
+    });
+
+    res.json({
+      ...legacyScore,
+      overallPct,
+      groupDocumentsSummary,
+      docs,
+      entityName: entity.name,
+    });
+  } catch (err: any) {
+    console.error("getComplianceStatus ERROR:", err.message);
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to get compliance status" });
+  }
+};
+
+export const upsertComplianceDoc = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { entityType, entityId, docKey } = req.params;
+    // @ts-ignore
+    const normalizedType = normalizeEntityType(entityType);
+    const Model = getModel(normalizedType);
+
+    const entity = await Model.findById(entityId);
+    if (!entity) return res.status(404).json({ message: `${normalizedType} not found` });
+
+    // @ts-ignore
+    const existing    = entity.complianceDocs?.[docKey] || {};
+    const uploadedFile = (req as any).file
+      ? await (async () => {
+          const uploaded = await uploadBufferToStorage({
+            buffer:      (req as any).file.buffer,
+            contentType: (req as any).file.mimetype || "application/octet-stream",
+            fileName:    (req as any).file.originalname || "upload.bin",
+          });
+          return {
+            fileName: (req as any).file.originalname || "upload.bin",
+            fileUrl:  uploaded.publicUrl,
+            mimeType: (req as any).file.mimetype || "application/octet-stream",
+            fileSize: (req as any).file.size || 0,
+          };
+        })()
+      : null;
+
+    const { fileName, mimeType, fileSize, expiryDate, renewalDate, notes, status } = req.body;
+    const nextFileUrl  = uploadedFile?.fileUrl;
+    const nextFileName = uploadedFile?.fileName ?? fileName;
+    const nextMimeType = uploadedFile?.mimeType ?? mimeType;
+    const nextFileSize = uploadedFile?.fileSize ?? fileSize;
+
+    const newMeta = {
+      ...existing,
+      ...(nextFileName !== undefined && { fileName: nextFileName }),
+      ...(nextFileUrl  !== undefined && { fileUrl:  nextFileUrl  }),
+      ...(nextMimeType !== undefined && { mimeType: nextMimeType }),
+      ...(nextFileSize !== undefined && { fileSize: nextFileSize }),
+      ...(notes        !== undefined && { notes }),
+      ...(expiryDate   !== undefined && { expiryDate:  expiryDate  ? new Date(expiryDate)  : null }),
+      ...(renewalDate  !== undefined && { renewalDate: renewalDate ? new Date(renewalDate) : null }),
+      ...(nextFileUrl && nextFileUrl !== existing.fileUrl && {
+        status: "pending", uploadedAt: new Date(), version: (existing.version || 0) + 1,
+        history: [
+          ...(existing.history || []),
+          ...(existing.fileUrl ? [{ uploadedAt: existing.uploadedAt, fileName: existing.fileName, fileUrl: existing.fileUrl, status: existing.status, uploadedBy: (req as any).user._id }] : []),
+        ],
+      }),
+      ...(!nextFileUrl && status !== undefined && { status }),
+    };
+
+    const updatePayload: any = { [`complianceDocs.${docKey}`]: newMeta };
+    // @ts-ignore
+    if (newMeta.status === "verified")  updatePayload[docKey] = true;
+    // @ts-ignore
+    else if (newMeta.status === "rejected") updatePayload[docKey] = false;
+
+    const updated = await Model.findByIdAndUpdate(
+      entityId, { $set: updatePayload }, { new: true, runValidators: false }
+    ).lean();
+
+    res.json({ message: "Compliance document updated", complianceDocs: (updated as any).complianceDocs });
+  } catch (err: any) {
+    console.error("upsertComplianceDoc ERROR:", err.message, err.stack);
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to update compliance document" });
+  }
+};
+
+export const approveComplianceDoc = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { entityType, entityId, docKey } = req.params;
+    // @ts-ignore
+    const normalizedType = normalizeEntityType(entityType);
+    const Model = getModel(normalizedType);
+    const updated = await Model.findByIdAndUpdate(
+      entityId,
+      { $set: {
+        [`complianceDocs.${docKey}.status`]:          "verified",
+        [`complianceDocs.${docKey}.verifiedAt`]:      new Date(),
+        [`complianceDocs.${docKey}.verifiedBy`]:      (req as any).user._id,
+        [`complianceDocs.${docKey}.rejectionReason`]: "",
+        // @ts-ignore
+        [docKey]: true,
+      }},
+      { new: true }
+    ).lean();
+    if (!updated) return res.status(404).json({ message: `${normalizedType} not found` });
+    res.json({ message: "Document approved", complianceDocs: (updated as any).complianceDocs });
+  } catch (err: any) {
+    console.error("approveComplianceDoc ERROR:", err.message);
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to approve document" });
+  }
+};
+
+export const rejectComplianceDoc = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { entityType, entityId, docKey } = req.params;
+    const { reason } = req.body;
+    if (!reason?.trim()) return res.status(400).json({ message: "Rejection reason is required" });
+
+    // @ts-ignore
+    const normalizedType = normalizeEntityType(entityType);
+    const Model = getModel(normalizedType);
+    const updated = await Model.findByIdAndUpdate(
+      entityId,
+      { $set: {
+        [`complianceDocs.${docKey}.status`]:          "rejected",
+        [`complianceDocs.${docKey}.rejectionReason`]: reason.trim(),
+        // @ts-ignore
+        [docKey]: false,
+      }},
+      { new: true }
+    ).lean();
+    if (!updated) return res.status(404).json({ message: `${normalizedType} not found` });
+
+    try {
+      const contacts = ((updated as any).contacts || []).filter((c: any) => c.email);
+      if (contacts.length && process.env.EMAIL_FROM) {
+        const docLabel = [...PCN_DOC_TYPES, ...PRACTICE_DOC_TYPES].find(d => d.key === docKey)?.label || docKey;
+        for (const c of contacts.slice(0, 1)) {
+          await transporter.sendMail({
+            from:    process.env.EMAIL_FROM, to: c.email,
+            subject: `Action Required: ${docLabel} — Document Rejected`,
+            html: `<p>Dear ${c.name || "Team"},</p>
+              <p>The document <strong>${docLabel}</strong> has been reviewed and requires re-submission.</p>
+              <p><strong>Reason:</strong> ${reason.trim()}</p>
+              <p>Please re-upload at your earliest convenience.</p>
+              <p>Kind regards,<br/>Core Prescribing Solutions</p>`,
+          });
+        }
+      }
+    } catch (mailErr: any) { console.warn("Rejection email failed:", mailErr.message); }
+
+    res.json({ message: "Document rejected", complianceDocs: (updated as any).complianceDocs });
+  } catch (err: any) {
+    console.error("rejectComplianceDoc ERROR:", err.message);
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to reject document" });
+  }
+};
+
+/* ─────────────────────────────────────────────────────────────────────
+   getExpiringDocs  (spec §4)
+───────────────────────────────────────────────────────────────────── */
+export const getExpiringDocs = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const days   = Number((req.query.days as string)) || 30;
+    const cutoff = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+    const now    = new Date();
+
+    const [pcns, practices] = await Promise.all([
+      PCN.find({ isActive: true }).select("name complianceDocs contacts groupDocuments complianceGroup complianceGroups").lean(),
+      Practice.find({ isActive: true }).select("name complianceDocs contacts pcn groupDocuments complianceGroup").lean(),
+    ]);
+
+    const alerts: any[] = [];
+
+    const processLegacy = (entities: any[], type: string) => {
+      const docTypes = getDocTypes(type);
+      for (const e of entities) {
+        const docs = e.complianceDocs || {};
+        for (const d of docTypes) {
+          const meta = docs[d.key];
+          if (!meta?.expiryDate) continue;
+          const expiry   = new Date(meta.expiryDate);
+          if (expiry <= cutoff) {
+            const daysLeft = Math.ceil((expiry.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+            alerts.push({
+              entityType:  type,
+              entityId:    e._id,
+              entityName:  e.name,
+              docKey:      d.key,
+              docLabel:    d.label,
+              expiryDate:  meta.expiryDate,
+              daysLeft,
+              isExpired:   daysLeft < 0,
+              status:      meta.status,
+              source:      "complianceDocs",
+            });
+          }
+        }
+      }
+    };
+
+    processLegacy(pcns,       "PCN");
+    processLegacy(practices,  "Practice");
+
+    const processGroupDocs = async (entities: any[], type: string) => {
+      const allDocDefs = await ComplianceDocument.find({ active: true })
+        .select("_id name defaultReminderDays expirable")
+        .lean();
+      const docDefMap = new Map(allDocDefs.map((d: any) => [String(d._id), d]));
+
+      for (const e of entities) {
+        const groupDocs = Array.isArray(e.groupDocuments) ? e.groupDocuments : [];
+        for (const record of groupDocs) {
+          const docDef       = docDefMap.get(String(record.document)) || null;
+          // @ts-ignore
+          const reminderDays = docDef?.defaultReminderDays ?? days;
+          const docCutoff    = new Date(Date.now() + reminderDays * 24 * 60 * 60 * 1000);
+          const uploads      = getRecordUploads(record, docDef);
+
+          for (const upload of uploads) {
+            if (!upload.expiryDate) continue;
+            const expiry   = new Date(upload.expiryDate);
+            if (expiry <= docCutoff) {
+              const daysLeft = Math.ceil((expiry.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+              alerts.push({
+                entityType:   type,
+                entityId:     e._id,
+                entityName:   e.name,
+                groupId:      record.group    ? String(record.group)    : null,
+                documentId:   record.document ? String(record.document) : null,
+                // @ts-ignore
+                documentName: docDef?.name    || "Unknown document",
+                uploadId:     upload.uploadId || null,
+                expiryDate:   upload.expiryDate,
+                daysLeft,
+                isExpired:    daysLeft < 0,
+                status:       upload.status,
+                source:       "groupDocuments",
+              });
+            }
+          }
+        }
+      }
+    };
+
+    await processGroupDocs(pcns,      "PCN");
+    await processGroupDocs(practices, "Practice");
+
+    alerts.sort((a, b) => a.daysLeft - b.daysLeft);
+
+    res.json({
+      alerts,
+      summary: {
+        total:   alerts.length,
+        expired: alerts.filter(a => a.isExpired).length,
+        soon:    alerts.filter(a => !a.isExpired).length,
+      },
+    });
+  } catch (err: any) {
+    console.error("getExpiringDocs ERROR:", err.message);
+    res.status(500).json({ message: "Failed to get expiring documents" });
+  }
+};
+
+/* ─────────────────────────────────────────────────────────────────────
+   runExpiryCheck  (spec §5)
+───────────────────────────────────────────────────────────────────── */
+export const runExpiryCheck = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const now        = new Date();
+    const thirtyDays = new Date(Date.now() + THIRTY_DAYS_MS);
+    let   notified   = 0;
+
+    const [pcns, practices] = await Promise.all([
+      PCN.find({ isActive: true }).lean(),
+      Practice.find({ isActive: true }).lean(),
+    ]);
+
+    const allDocDefs = await ComplianceDocument.find({ active: true })
+      .select("_id name defaultReminderDays expirable")
+      .lean();
+    const docDefMap = new Map(allDocDefs.map((d: any) => [String(d._id), d]));
+
+    const processEntity = async (entity: any, Model: any, docTypes: any[]) => {
+      const docs    = entity.complianceDocs || {};
+      const updates: any = {};
+      const emails: any[]  = [];
+
+      for (const d of docTypes) {
+        const meta = docs[d.key];
+        if (!meta?.expiryDate) continue;
+        const expiry   = new Date(meta.expiryDate);
+        const daysLeft = Math.ceil((expiry.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+
+        if (expiry < now && meta.status === "verified") {
+          updates[`complianceDocs.${d.key}.status`] = "pending";
+          updates[d.key] = false;
+          emails.push({ label: d.label, daysLeft, expired: true });
+        } else if (daysLeft <= 30 && daysLeft > 0) {
+          emails.push({ label: d.label, daysLeft, expired: false });
+        }
+      }
+
+      const groupDocs = Array.isArray(entity.groupDocuments) ? entity.groupDocuments : [];
+      const updatedGroupDocs = groupDocs.map((record: any) => {
+        const docDef       = docDefMap.get(String(record.document)) || null;
+        // @ts-ignore
+        const reminderDays = docDef?.defaultReminderDays ?? 30;
+        const uploads      = getRecordUploads(record, docDef).map((upload: any) => {
+          if (!upload.expiryDate) return upload;
+          const expiry   = new Date(upload.expiryDate);
+          const daysLeft = Math.ceil((expiry.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+
+          if (expiry < now && upload.status !== "expired") {
+            // @ts-ignore
+            emails.push({ label: docDef?.name || "Document", daysLeft, expired: true });
+            return { ...upload, status: "expired" };
+          }
+          if (daysLeft <= reminderDays && daysLeft > 0) {
+            // @ts-ignore
+            emails.push({ label: docDef?.name || "Document", daysLeft, expired: false });
+          }
+          return upload;
+        });
+
+        const latestUpload = uploads[0] || null;
+        return { ...record, uploads, status: latestUpload?.status || record.status };
+      });
+
+      const groupDocsChanged = JSON.stringify(updatedGroupDocs) !== JSON.stringify(groupDocs);
+      if (Object.keys(updates).length || groupDocsChanged) {
+        const finalUpdate = { ...updates };
+        if (groupDocsChanged) finalUpdate.groupDocuments = updatedGroupDocs;
+        await Model.findByIdAndUpdate(entity._id, { $set: finalUpdate });
+      }
+
+      if (emails.length) {
+        const emailTarget =
+          (entity.contacts || []).find((c: any) => c.email)?.email ||
+          (entity.financeContacts || []).find((c: any) => c.email)?.email || null;
+
+        if (emailTarget && process.env.EMAIL_FROM) {
+          const rows = emails.map(e =>
+            `<tr><td>${e.label}</td><td style="color:${e.expired ? "#dc2626" : "#d97706"}">${e.expired ? "EXPIRED" : `${e.daysLeft} days`}</td></tr>`
+          ).join("");
+          await transporter.sendMail({
+            from:    process.env.EMAIL_FROM,
+            to:      emailTarget,
+            subject: `Compliance Alert: Documents Requiring Attention — ${entity.name}`,
+            html: `<p>The following compliance documents for <strong>${entity.name}</strong> require attention:</p>
+              <table border="1" cellpadding="6" style="border-collapse:collapse;font-family:sans-serif;font-size:14px">
+                <tr><th>Document</th><th>Status</th></tr>${rows}
+              </table>
+              <p>Please log in to the CPS portal to take action.</p>`,
+          }).catch(e => console.warn("Expiry email failed:", e.message));
+          notified++;
+        }
+      }
+    };
+
+    for (const pcn of pcns)      await processEntity(pcn, PCN,      PCN_DOC_TYPES);
+    for (const p   of practices) await processEntity(p,   Practice, PRACTICE_DOC_TYPES);
+
+    res.json({ message: "Expiry check complete", notified });
+  } catch (err: any) {
+    console.error("runExpiryCheck ERROR:", err.message);
+    res.status(500).json({ message: "Failed to run expiry check" });
+  }
+};

@@ -1,0 +1,255 @@
+import express, { Request, Response, NextFunction } from "express";
+import cors from "cors";
+import rateLimit from "express-rate-limit";
+import dotenv from "dotenv";
+import { fileURLToPath } from "url";
+import swaggerUi from "swagger-ui-express";
+
+import { initDB, query } from "./config/db.js";
+import { asyncHandler } from "./lib/asyncHandler.js";
+import swaggerSpec from "./swagger.js";
+
+import authRoutes from "./routes/authRoutes.js";
+import auditRoutes from "./routes/auditRoutes.js";
+import clientRoutes from "./routes/clientRoutes.js";
+import complianceDocRoutes from "./routes/complianceDocRoutes.js";
+import clinicianRoutes from "./routes/clinicianRoutes.js";
+import leaveRoutes from "./routes/leaveRoutes.js";
+import restrictedClinicianRoutes from "./routes/restrictedClinicianRoutes.js";    
+import rotaRoutes from "./routes/rotaRoutes.js";
+import timeEntryRoutes from "./routes/timeEntryRoutes.js";
+import timesheetRoutes from "./routes/timesheetRoutes.js";
+import basePatternRoutes from "./routes/basePatternRoutes.js";
+import coverRoutes from "./routes/coverRoutes.js";
+import enterMyHoursRoutes from "./routes/enterMyHoursRoutes.js";
+import { startGapDetectionScheduler } from "./services/rotaGapService.js";
+
+dotenv.config();
+
+const app = express();
+
+/*   LOGGER   */
+const log = {
+  info: (msg: string, ...args: any[]) => console.log(`[INFO] ${msg}`, ...args),
+  warn: (msg: string, ...args: any[]) => console.warn(`[WARN] ${msg}`, ...args),
+  error: (msg: string, ...args: any[]) => console.error(`[ERROR] ${msg}`, ...args),
+  ok: (msg: string, ...args: any[]) => console.log(`[OK] ${msg}`, ...args),
+};
+
+/*   CUSTOM ERROR   */
+class AppError extends Error {
+  statusCode: number;
+  code: string;
+  isOperational: boolean;
+
+  constructor(message: string, statusCode = 500, code = "INTERNAL_ERROR") {
+    super(message);
+    this.statusCode = statusCode;
+    this.code = code;
+    this.isOperational = true;
+  }
+}
+
+/*   CONFIG   */
+app.set("trust proxy", 1);
+log.info("NODE_ENV:", process.env.NODE_ENV);
+
+/*   CORS   */
+const exactOrigins = new Set(
+  [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://cps-tau-five.vercel.app",
+    ...(process.env.CLIENT_URL ? process.env.CLIENT_URL.split(",") : []),
+  ]
+    .map((v) => String(v || "").trim())
+    .filter(Boolean)
+);
+
+function isAllowedOrigin(origin: string | undefined): boolean {
+  if (!origin) return true;
+  if (exactOrigins.has(origin)) return true;
+
+  try {
+    const parsed = new URL(origin);
+    return (
+      parsed.protocol === "https:" &&
+      parsed.hostname.endsWith(".vercel.app")
+    );
+  } catch {
+    return false;
+  }
+}
+
+const corsOptionsDelegate = (req: any, callback: any) => {
+  const requestOrigin = req.header("Origin");
+  const allowed = isAllowedOrigin(requestOrigin);
+
+  if (requestOrigin && !allowed) {
+    log.warn("CORS blocked:", requestOrigin);
+  }
+
+  callback(null, {
+    origin: allowed ? requestOrigin || true : false,
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    optionsSuccessStatus: 204,
+  });
+};
+
+app.use(cors(corsOptionsDelegate));
+app.options("*", cors(corsOptionsDelegate));
+
+/*   BODY PARSER   */
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+/*   INVALID JSON HANDLER   */
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  if (err.type === "entity.parse.failed") {
+    return res.status(400).json({
+      status: "error",
+      code: "INVALID_JSON",
+      message: "Invalid JSON format",
+    });
+  }
+  next(err);
+});
+
+/*   RATE LIMIT   */
+app.use(
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 200,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: (req: Request, res: Response) => {
+      log.warn("Rate limit hit:", req.ip || "unknown");
+      res.status(429).json({
+        status: "error",
+        code: "RATE_LIMIT_EXCEEDED",
+        message: "Too many requests",
+      });
+    },
+  })
+);
+
+/*   SWAGGER DOCS   */
+// On Vercel's serverless environment, swagger-ui-express can't reliably serve
+// its static JS/CSS assets from node_modules, which causes "Unexpected token '<'"
+// errors in the browser (it gets back a 404 HTML page instead of JS).
+// Loading the UI assets from a CDN instead avoids that filesystem dependency.
+const swaggerUiOptions = {
+  customCssUrl:
+    "https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.11.0/swagger-ui.min.css",
+  customJs: [
+    "https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.11.0/swagger-ui-bundle.min.js",
+    "https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.11.0/swagger-ui-standalone-preset.min.js",
+  ],
+  swaggerOptions: {
+    // Hides the bottom "Schemas" list (Shift, ShiftInput, RotaGap, etc.)
+    // without breaking any $ref references used inside route responses.
+    defaultModelsExpandDepth: -1,
+  },
+};
+
+app.use(
+  "/api-docs",
+  swaggerUi.serve,
+  swaggerUi.setup(swaggerSpec, swaggerUiOptions)
+);
+
+/*   ROUTES   */
+app.use("/api/auth", authRoutes);
+app.use("/api/audit", auditRoutes);
+app.use("/api/clients", clientRoutes);
+app.use("/api/compliance", complianceDocRoutes);
+app.use("/api/clinicians", clinicianRoutes);
+app.use("/api/leaves", leaveRoutes);
+app.use("/api/restricted-clinicians", restrictedClinicianRoutes);
+app.use("/api/rota", rotaRoutes);
+app.use("/api/time-entries", timeEntryRoutes);
+app.use("/api/timesheets", timesheetRoutes);
+app.use("/api/enter-my-hours", enterMyHoursRoutes);
+app.use("/api/base-patterns", basePatternRoutes);
+app.use("/api/cover", coverRoutes);
+
+
+/*   HEALTH CHECK   */
+app.get(
+  "/api/db-test",
+  asyncHandler(async (req: Request, res: Response) => {
+    const result = await query("SELECT NOW() as time");
+    res.json({ status: "ok", db_time: result.rows[0].time });
+  })
+);
+
+app.get("/", (req: Request, res: Response) => {
+  res.json({ status: "ok", message: "CPS API is running 🚀" });
+});
+
+/*   404   */
+app.use((req: Request, res: Response) => {
+  log.warn("Route not found:", req.method, req.originalUrl);
+  res.status(404).json({
+    status: "error",
+    code: "ROUTE_NOT_FOUND",
+    message: `Cannot ${req.method} ${req.originalUrl}`,
+  });
+});
+
+/*   GLOBAL ERROR HANDLER   */
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  const statusCode = err.statusCode || 500;
+  const isDev = process.env.NODE_ENV !== "production";
+
+  log.error(err.message, {
+    path: req.originalUrl,
+    method: req.method,
+    ...(isDev && { stack: err.stack }),
+  });
+
+  res.status(statusCode).json({
+    status: "error",
+    code: err.code || "INTERNAL_ERROR",
+    message: isDev ? err.message : "Something went wrong",
+    ...(isDev && { stack: err.stack }),
+  });
+});
+
+/*   SERVER START   */
+const PORT = process.env.PORT || 5000;
+
+async function startServer() {
+  try {
+    await initDB();
+    log.ok("DB connected");
+
+    if (process.env.NODE_ENV !== "test") {
+      startGapDetectionScheduler();
+      log.ok("Rota gap detection scheduler started");
+    }
+
+    app.listen(PORT, () => {
+      log.ok(`Server running on http://localhost:${PORT}`);
+      log.ok(`Swagger docs available at http://localhost:${PORT}/api-docs`);
+    });
+  } catch (err: any) {
+    log.error("Startup failed:", err.message);
+    process.exit(1);
+  }
+}
+
+const isMain = fileURLToPath(import.meta.url) === process.argv[1];
+
+if (isMain && process.env.NODE_ENV !== "test") {
+  startServer();
+}
+
+/*   EXPORTS   */
+export { AppError };
+export { asyncHandler };
+export default app;

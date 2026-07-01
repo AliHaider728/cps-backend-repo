@@ -1,0 +1,683 @@
+import bcrypt from "bcryptjs";
+import { query } from "../config/db.js";
+import { createId, normalizeId } from "./ids.js";
+
+const repositoryRegistry = new Map<string, any>();
+
+function clone(value: any): any {
+  if (value == null) return value;
+  if (value instanceof Date) return new Date(value.getTime());
+  if (Array.isArray(value)) return value.map((item) => clone(item));
+  if (typeof value === "object") {
+    const next: Record<string, any> = {};
+    for (const [key, child] of Object.entries(value)) {
+      next[key] = clone(child);
+    }
+    return next;
+  }
+  return value;
+}
+
+function stripInternalFields(record: any): any {
+  if (!record || typeof record !== "object" || Array.isArray(record)) return record;
+  const next: Record<string, any> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (key.startsWith("__")) continue;
+    next[key] = value;
+  }
+  return next;
+}
+
+function getNested(source: any, path: string): any {
+  return String(path || "")
+    .split(".")
+    .filter(Boolean)
+    .reduce((acc, part) => (acc == null ? undefined : acc[part]), source);
+}
+
+function setNested(target: any, path: string, value: any): void {
+  const keys = String(path || "").split(".").filter(Boolean);
+  if (keys.length === 0) return;
+  let cursor = target;
+  for (let i = 0; i < keys.length - 1; i += 1) {
+    const key = keys[i];
+    if (cursor[key] == null || typeof cursor[key] !== "object" || Array.isArray(cursor[key])) {
+      cursor[key] = {};
+    }
+    cursor = cursor[key];
+  }
+  cursor[keys[keys.length - 1]] = value;
+}
+
+function deleteNestedValue(target: any, path: string, matcher: (item: any) => boolean): void {
+  const keys = String(path || "").split(".").filter(Boolean);
+  if (keys.length === 0) return;
+  let cursor = target;
+  for (let i = 0; i < keys.length - 1; i += 1) {
+    cursor = cursor?.[keys[i]];
+    if (cursor == null) return;
+  }
+  const key = keys[keys.length - 1];
+  if (!Array.isArray(cursor?.[key])) return;
+  cursor[key] = cursor[key].filter((item: any) => !matcher(item));
+}
+
+function deepMerge(target: any, source: any): any {
+  for (const [key, value] of Object.entries(source || {})) {
+    if (
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      !(value instanceof Date)
+    ) {
+      if (!target[key] || typeof target[key] !== "object" || Array.isArray(target[key])) {
+        target[key] = {};
+      }
+      deepMerge(target[key], value);
+    } else {
+      target[key] = value;
+    }
+  }
+  return target;
+}
+
+function normalizeDateLike(value: any): any {
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(normalizeDateLike);
+  if (value && typeof value === "object") {
+    const next: Record<string, any> = {};
+    for (const [key, child] of Object.entries(value)) {
+      next[key] = normalizeDateLike(child);
+    }
+    return next;
+  }
+  return value;
+}
+
+function applyUpdateOperators(record: any, update: any): any {
+  const next = clone(record);
+  const operators = ["$set", "$push", "$pull"];
+  const hasOperator = Object.keys(update || {}).some((key) => operators.includes(key));
+
+  if (!hasOperator) {
+    return deepMerge(next, clone(update || {}));
+  }
+
+  if (update.$set) {
+    for (const [path, value] of Object.entries(update.$set)) {
+      setNested(next, path, clone(value));
+    }
+  }
+
+  if (update.$push) {
+    for (const [path, value] of Object.entries(update.$push)) {
+      const current = getNested(next, path);
+      const nextArray = Array.isArray(current) ? [...current] : [];
+      nextArray.push(clone(value));
+      setNested(next, path, nextArray);
+    }
+  }
+
+  if (update.$pull) {
+    for (const [path, value] of Object.entries(update.$pull)) {
+      deleteNestedValue(next, path, (item) => JSON.stringify(item) === JSON.stringify(value));
+    }
+  }
+
+  return next;
+}
+
+function matchesCondition(actual: any, expected: any): boolean {
+  if (expected instanceof RegExp) {
+    return expected.test(String(actual || ""));
+  }
+
+  if (expected && typeof expected === "object" && !Array.isArray(expected)) {
+    if ("$regex" in expected) {
+      const regex = new RegExp(expected.$regex, expected.$options || "");
+      return regex.test(String(actual || ""));
+    }
+    if ("$ne" in expected) {
+      return actual !== expected.$ne;
+    }
+    if ("$in" in expected) {
+      const haystack = Array.isArray(expected.$in) ? expected.$in : [];
+      return haystack.some((item: any) => String(item) === String(actual));
+    }
+  }
+
+  if (Array.isArray(actual) && !Array.isArray(expected)) {
+    return actual.some((item) => String(item) === String(expected));
+  }
+
+  if (Array.isArray(expected)) {
+    return expected.some((item) => String(item) === String(actual));
+  }
+
+  return String(actual) === String(expected);
+}
+
+function matchesFilter(record: any, filter: any = {}): boolean {
+  if (!filter || Object.keys(filter).length === 0) return true;
+
+  if (Array.isArray(filter.$or) && filter.$or.length > 0) {
+    const { $or, ...rest } = filter;
+    return matchesFilter(record, rest) && $or.some((item: any) => matchesFilter(record, item));
+  }
+
+  return Object.entries(filter).every(([key, expected]) => {
+    if (key === "$or") return true;
+    const actual = getNested(record, key);
+    return matchesCondition(actual, expected);
+  });
+}
+
+function applySort(records: any[], sortSpec: any = {}): any[] {
+  const entries = Object.entries(sortSpec || {});
+  if (entries.length === 0) return records;
+  return [...records].sort((left, right) => {
+    for (const [field, direction] of entries) {
+      const dir = direction as number;
+      const a = getNested(left, field);
+      const b = getNested(right, field);
+      if (a == null && b == null) continue;
+      if (a == null) return dir < 0 ? 1 : -1;
+      if (b == null) return dir < 0 ? -1 : 1;
+      if (a > b) return dir < 0 ? -1 : 1;
+      if (a < b) return dir < 0 ? 1 : -1;
+    }
+    return 0;
+  });
+}
+
+function parseSelect(select: string | null | undefined): { include: Set<string>; forceInclude: Set<string> } {
+  const tokens = String(select || "")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+
+  const include = new Set<string>();
+  const forceInclude = new Set<string>();
+  for (const token of tokens) {
+    if (token.startsWith("+")) forceInclude.add(token.slice(1));
+    else if (!token.startsWith("-")) include.add(token);
+  }
+
+  return { include, forceInclude };
+}
+
+function applySelect(record: any, select: string | null | undefined, hiddenFields: string[] = []): any {
+  if (!select) {
+    const next = clone(record);
+    for (const hidden of hiddenFields) delete next[hidden];
+    return next;
+  }
+
+  const { include, forceInclude } = parseSelect(select);
+  if (include.size === 0 && forceInclude.size > 0) {
+    const next = clone(record);
+    for (const hidden of hiddenFields) {
+      if (!forceInclude.has(hidden)) delete next[hidden];
+    }
+    return next;
+  }
+
+  const picked: any = { _id: record._id };
+  for (const field of include) {
+    const value = getNested(record, field);
+    if (value !== undefined) setNested(picked, field, clone(value));
+  }
+  for (const field of forceInclude) {
+    const value = getNested(record, field);
+    if (value !== undefined) setNested(picked, field, clone(value));
+  }
+  return picked;
+}
+
+function normalizeStoredRecord(row: any, fixedData: any = {}): any {
+  if (!row) return null;
+
+  const rawData = row.data || {};
+  if (!matchesFilter(rawData, fixedData)) return null;
+
+  return {
+    _id: row.id,
+    ...(rawData || {}),
+    _idMeta: row.id,
+    createdAt: rawData.createdAt || row.created_at?.toISOString?.() || row.created_at,
+    updatedAt: rawData.updatedAt || row.updated_at?.toISOString?.() || row.updated_at,
+  };
+}
+
+async function fetchTableRows(tableModel: string): Promise<any[]> {
+  const result = await query(
+    "SELECT id, data, created_at, updated_at FROM app_records WHERE model = $1",
+    [tableModel]
+  );
+  return result.rows;
+}
+
+async function fetchRepositoryRows(repository: any): Promise<any[]> {
+  const rows = await fetchTableRows(repository.tableModel);
+  return rows
+    .map((row) => normalizeStoredRecord(row, repository.fixedData))
+    .filter(Boolean);
+}
+
+async function fetchRepositoryRecord(repository: any, id: string): Promise<any | null> {
+  const result = await query(
+    "SELECT id, data, created_at, updated_at FROM app_records WHERE model = $1 AND id = $2 LIMIT 1",
+    [repository.tableModel, id]
+  );
+  return normalizeStoredRecord(result.rows[0], repository.fixedData);
+}
+
+async function persistRepositoryRecord(repository: any, record: any): Promise<any> {
+  const normalized = normalizeDateLike({
+    ...repository.fixedData,
+    ...stripInternalFields(clone(record)),
+    _id: normalizeId(record._id) || createId(),
+    createdAt: record.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+
+  const { _id, ...data } = normalized;
+  await query(
+    `
+      INSERT INTO app_records (model, id, data, created_at, updated_at)
+      VALUES ($1, $2, $3::jsonb, COALESCE(($3::jsonb->>'createdAt')::timestamptz, NOW()), NOW())
+      ON CONFLICT (model, id)
+      DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `,
+    [repository.tableModel, _id, JSON.stringify(data)]
+  );
+
+  return normalized;
+}
+
+async function deleteRepositoryRecord(repository: any, id: string): Promise<void> {
+  await query("DELETE FROM app_records WHERE model = $1 AND id = $2", [repository.tableModel, id]);
+}
+
+export interface PopulateSpec {
+  path: string;
+  select?: string;
+  populate?: PopulateSpec | PopulateSpec[];
+}
+
+class BaseDocument {
+  __repository: any;
+  __select: string | null;
+
+  constructor(repository: any, data: any, options: { select?: string } = {}) {
+    this.__repository = repository;
+    this.__select = options.select || null;
+    Object.assign(this, clone(data));
+  }
+
+  async save(): Promise<this> {
+    if (typeof this.__repository.beforeSave === "function") {
+      await this.__repository.beforeSave(this);
+    }
+    const saved = await persistRepositoryRecord(this.__repository, this);
+    Object.assign(this, saved);
+    return this;
+  }
+
+  async populate(pathOrSpec: string | PopulateSpec, select?: string, nestedPopulate?: any): Promise<this> {
+    const plain = stripInternalFields(clone(this));
+    const populated = await this.__repository.populateRecord(
+      plain,
+      normalizePopulateArg(pathOrSpec, select, nestedPopulate)
+    );
+    Object.assign(this, populated);
+    return this;
+  }
+
+  toJSON(): any {
+    return applySelect(
+      stripInternalFields(clone(this)),
+      this.__select,
+      this.__repository.hiddenFields
+    );
+  }
+}
+
+function normalizePopulateArg(pathOrSpec: string | PopulateSpec, select?: string, nestedPopulate?: any): PopulateSpec {
+  if (typeof pathOrSpec === "string") {
+    return { path: pathOrSpec, select, populate: nestedPopulate };
+  }
+  return pathOrSpec;
+}
+
+class QueryBuilder {
+  repository: any;
+  resolver: () => Promise<any>;
+  single: boolean;
+  populateSpecs: PopulateSpec[];
+  sortSpec: any | null;
+  selectSpec: string | null;
+  limitValue: number | null;
+  skipValue: number;
+  returnLean: boolean;
+
+  constructor(repository: any, resolver: () => Promise<any>, { single = false } = {}) {
+    this.repository = repository;
+    this.resolver = resolver;
+    this.single = single;
+    this.populateSpecs = [];
+    this.sortSpec = null;
+    this.selectSpec = null;
+    this.limitValue = null;
+    this.skipValue = 0;
+    this.returnLean = false;
+  }
+
+  populate(pathOrSpec: string | PopulateSpec, select?: string, nestedPopulate?: any): this {
+    this.populateSpecs.push(normalizePopulateArg(pathOrSpec, select, nestedPopulate));
+    return this;
+  }
+
+  sort(spec: any): this {
+    this.sortSpec = spec;
+    return this;
+  }
+
+  select(spec: string): this {
+    this.selectSpec = spec;
+    return this;
+  }
+
+  limit(value: number): this {
+    this.limitValue = value;
+    return this;
+  }
+
+  skip(value: number): this {
+    this.skipValue = value;
+    return this;
+  }
+
+  lean(): this {
+    this.returnLean = true;
+    return this;
+  }
+
+  async exec(): Promise<any> {
+    const result = await this.resolver();
+    const isArray = Array.isArray(result);
+    const list = isArray ? result : (result ? [result] : []);
+
+    let next = list.map((item) => clone(item));
+
+    if (this.sortSpec) next = applySort(next, this.sortSpec);
+    if (this.skipValue) next = next.slice(this.skipValue);
+    if (this.limitValue != null) next = next.slice(0, this.limitValue);
+
+    for (const spec of this.populateSpecs) {
+      next = await Promise.all(next.map((item) => this.repository.populateRecord(item, spec)));
+    }
+
+    if (this.returnLean) {
+      const mapped = next.map((item) =>
+        applySelect(item, this.selectSpec, this.repository.hiddenFields)
+      );
+      return this.single ? (mapped[0] || null) : mapped;
+    }
+
+    const mapped = next.map(
+      (item) =>
+        new this.repository.DocumentClass(
+          this.repository,
+          applySelect(item, this.selectSpec, this.repository.hiddenFields),
+          { select: this.selectSpec }
+        )
+    );
+    return this.single ? (mapped[0] || null) : mapped;
+  }
+
+  then(resolve: any, reject?: any): Promise<any> {
+    return this.exec().then(resolve, reject);
+  }
+
+  catch(reject: any): Promise<any> {
+    return this.exec().catch(reject);
+  }
+
+  finally(handler: any): Promise<any> {
+    return this.exec().finally(handler);
+  }
+}
+
+export interface RepositoryConfig {
+  modelName: string;
+  tableModel?: string;
+  fixedData?: Record<string, any>;
+  hiddenFields?: string[];
+  defaults?: Record<string, any>;
+  refs?: Record<string, { model: string }>;
+  beforeSave?: (doc: any) => Promise<void> | void;
+  documentMethods?: Record<string, Function>;
+}
+
+export function createRepository(config: RepositoryConfig): any {
+  class RepositoryDocument extends BaseDocument {}
+
+  class Repository {
+    static modelName = config.modelName;
+    static tableModel = config.tableModel || config.modelName;
+    static fixedData = config.fixedData || {};
+    static hiddenFields = config.hiddenFields || [];
+    static defaults = config.defaults || {};
+    static refs = config.refs || {};
+    static beforeSave = config.beforeSave;
+    static DocumentClass = RepositoryDocument;
+
+    static async instantiate(record: any): Promise<BaseDocument | null> {
+      if (!record) return null;
+      return new this.DocumentClass(this, record);
+    }
+
+    static applyDefaults(payload: any = {}): any {
+      return deepMerge(deepMerge(clone(this.defaults), clone(this.fixedData)), clone(payload));
+    }
+
+    static async create(payload: any = {}): Promise<BaseDocument> {
+      const record = this.applyDefaults(payload);
+      record._id = normalizeId(record._id) || createId();
+      record.createdAt = record.createdAt || new Date().toISOString();
+      record.updatedAt = new Date().toISOString();
+      const document = new this.DocumentClass(this, record);
+      await document.save();
+      return document;
+    }
+
+    static find(filter: any = {}): QueryBuilder {
+      return new QueryBuilder(this, async () => {
+        const rows = await fetchRepositoryRows(this);
+        return rows.filter((row) => matchesFilter(row, { ...this.fixedData, ...filter }));
+      });
+    }
+
+    static findOne(filter: any = {}): QueryBuilder {
+      return new QueryBuilder(
+        this,
+        async () => {
+          const rows = await fetchRepositoryRows(this);
+          return rows.find((row) => matchesFilter(row, { ...this.fixedData, ...filter })) || null;
+        },
+        { single: true }
+      );
+    }
+
+    static findById(id: string): QueryBuilder {
+      return new QueryBuilder(
+        this,
+        async () => {
+          const normalizedId = normalizeId(id);
+          if (!normalizedId) return null;
+          return fetchRepositoryRecord(this, normalizedId);
+        },
+        { single: true }
+      );
+    }
+
+    static async exists(filter: any = {}): Promise<boolean> {
+      const rows = await fetchRepositoryRows(this);
+      return rows.some((row) => matchesFilter(row, { ...this.fixedData, ...filter }));
+    }
+
+    static async countDocuments(filter: any = {}): Promise<number> {
+      const rows = await fetchRepositoryRows(this);
+      return rows.filter((row) => matchesFilter(row, { ...this.fixedData, ...filter })).length;
+    }
+
+    static async findByIdAndDelete(id: string): Promise<BaseDocument | null> {
+      const existing = await fetchRepositoryRecord(this, normalizeId(id) as string);
+      if (!existing) return null;
+      await deleteRepositoryRecord(this, existing._id);
+      return new this.DocumentClass(this, applySelect(existing, null, this.hiddenFields));
+    }
+
+    static findByIdAndUpdate(id: string, update: any = {}, options: any = {}): QueryBuilder {
+      return new QueryBuilder(
+        this,
+        async () => {
+          const existing = await fetchRepositoryRecord(this, normalizeId(id) as string);
+          if (!existing) return null;
+          const next = applyUpdateOperators(existing, update);
+          next._id = existing._id;
+          next.createdAt = existing.createdAt || next.createdAt;
+          next.updatedAt = new Date().toISOString();
+          if (typeof this.beforeSave === "function") {
+            const draft = new this.DocumentClass(this, next);
+            await this.beforeSave(draft);
+            Object.assign(next, clone(draft));
+          }
+          const saved = await persistRepositoryRecord(this, next);
+          return options.new === false ? existing : saved;
+        },
+        { single: true }
+      );
+    }
+
+    static async findOneAndUpdate(filter: any = {}, update: any = {}, options: any = {}): Promise<BaseDocument | null> {
+      const rows = await fetchRepositoryRows(this);
+      const existing = rows.find((row) => matchesFilter(row, { ...this.fixedData, ...filter }));
+
+      if (!existing) {
+        if (!options.upsert) return null;
+        const created = this.applyDefaults({
+          ...filter,
+          ...(update.$set || update),
+        });
+        const document = await this.create(created);
+        return options.new === false ? null : document;
+      }
+
+      const next = applyUpdateOperators(existing, update);
+      next._id = existing._id;
+      next.createdAt = existing.createdAt || next.createdAt;
+      const saved = await persistRepositoryRecord(this, next);
+      return new this.DocumentClass(this, options.new === false ? existing : saved);
+    }
+
+    static async updateMany(filter: any = {}, update: any = {}): Promise<{ modifiedCount: number }> {
+      const rows = await fetchRepositoryRows(this);
+      let count = 0;
+      for (const row of rows) {
+        if (!matchesFilter(row, { ...this.fixedData, ...filter })) continue;
+        count += 1;
+        const next = applyUpdateOperators(row, update);
+        next._id = row._id;
+        next.createdAt = row.createdAt || next.createdAt;
+        await persistRepositoryRecord(this, next);
+      }
+      return { modifiedCount: count };
+    }
+
+    static async deleteMany(filter: any = {}): Promise<{ deletedCount: number }> {
+      const rows = await fetchRepositoryRows(this);
+      let count = 0;
+      for (const row of rows) {
+        if (!matchesFilter(row, { ...this.fixedData, ...filter })) continue;
+        count += 1;
+        await deleteRepositoryRecord(this, row._id);
+      }
+      return { deletedCount: count };
+    }
+
+    static async aggregate(pipeline: any[] = []): Promise<any[]> {
+      let rows = await fetchRepositoryRows(this);
+      rows = rows.filter((row) => matchesFilter(row, this.fixedData));
+
+      for (const stage of pipeline) {
+        if (stage.$match) {
+          rows = rows.filter((row) => matchesFilter(row, { ...this.fixedData, ...stage.$match }));
+        } else if (stage.$group) {
+          const field = String(stage.$group._id || "").replace(/^\$/, "");
+          const grouped = new Map<any, number>();
+          for (const row of rows) {
+            const key = getNested(row, field);
+            grouped.set(key, (grouped.get(key) || 0) + 1);
+          }
+          rows = Array.from(grouped.entries()).map(([key, count]) => ({ _id: key, count }));
+        } else if (stage.$sort) {
+          rows = applySort(rows, stage.$sort);
+        }
+      }
+
+      return rows;
+    }
+
+    static async populateRecord(record: any, spec: PopulateSpec): Promise<any> {
+      if (!record || !spec?.path) return record;
+      const next = clone(record);
+      const ref = this.refs[spec.path];
+      if (!ref) return next;
+
+      const targetRepository = repositoryRegistry.get(ref.model);
+      if (!targetRepository) return next;
+
+      const current = getNested(next, spec.path);
+      if (current == null) return next;
+
+      const populateOne = async (value: any) => {
+        const id = typeof value === "object" && value !== null ? value._id : value;
+        if (!id) return null;
+        let populated = await targetRepository.findById(id).lean();
+        if (!populated) return null;
+        if (spec.select) {
+          populated = applySelect(populated, spec.select, targetRepository.hiddenFields);
+        }
+        if (spec.populate) {
+          populated = await targetRepository.populateRecord(populated, spec.populate);
+        }
+        return populated;
+      };
+
+      if (Array.isArray(current)) {
+        const populated = (await Promise.all(current.map(populateOne))).filter(Boolean);
+        setNested(next, spec.path, populated);
+      } else {
+        const populated = await populateOne(current);
+        setNested(next, spec.path, populated);
+      }
+
+      return next;
+    }
+  }
+
+  if (config.documentMethods) {
+    Object.assign(RepositoryDocument.prototype, config.documentMethods);
+  }
+
+  repositoryRegistry.set(config.modelName, Repository);
+  return Repository;
+}
+
+export async function hashPasswordIfNeeded(document: any): Promise<void> {
+  if (!document.password) return;
+  if (String(document.password).startsWith("$2")) return;
+  document.password = await bcrypt.hash(String(document.password), 10);
+}
