@@ -435,6 +435,8 @@ class QueryBuilder {
 
 export interface ModelConfig {
   modelName: string;
+  tableModel?: string;
+  fixedData?: Record<string, any>;
   hiddenFields?: string[];
   defaults?: Record<string, any>;
   refs?: Record<string, { model: string }>;
@@ -447,6 +449,8 @@ export function createModel(config: ModelConfig): any {
 
   class Model {
     static modelName = config.modelName;
+    static tableModel = config.tableModel || config.modelName;
+    static fixedData = config.fixedData || {};
     static hiddenFields = config.hiddenFields || [];
     static defaults = config.defaults || {};
     static refs = config.refs || {};
@@ -459,7 +463,7 @@ export function createModel(config: ModelConfig): any {
     }
 
     static applyDefaults(payload: any = {}): any {
-      return deepMerge(clone(this.defaults), clone(payload));
+      return deepMerge(deepMerge(clone(this.defaults), clone(this.fixedData)), clone(payload));
     }
 
     static async create(payload: any = {}): Promise<BaseDocument> {
@@ -474,8 +478,8 @@ export function createModel(config: ModelConfig): any {
 
     static find(filter: any = {}): QueryBuilder {
       return new QueryBuilder(this, async () => {
-        const rows = await fetchModelRows(this.modelName);
-        return rows.filter((row) => matchesFilter(row, filter));
+        const rows = await fetchModelRows(this.tableModel);
+        return rows.filter((row) => matchesFilter(row, { ...this.fixedData, ...filter }));
       });
     }
 
@@ -483,8 +487,8 @@ export function createModel(config: ModelConfig): any {
       return new QueryBuilder(
         this,
         async () => {
-          const rows = await fetchModelRows(this.modelName);
-          return rows.find((row) => matchesFilter(row, filter)) || null;
+          const rows = await fetchModelRows(this.tableModel);
+          return rows.find((row) => matchesFilter(row, { ...this.fixedData, ...filter })) || null;
         },
         { single: true }
       );
@@ -496,21 +500,23 @@ export function createModel(config: ModelConfig): any {
         async () => {
           const normalizedId = normalizeId(id);
           if (!normalizedId) return null;
-          return fetchModelRecord(this.modelName, normalizedId);
+          const record = await fetchModelRecord(this.tableModel, normalizedId);
+          if (record && !matchesFilter(record, this.fixedData)) return null;
+          return record;
         },
         { single: true }
       );
     }
 
     static async countDocuments(filter: any = {}): Promise<number> {
-      const rows = await fetchModelRows(this.modelName);
-      return rows.filter((row) => matchesFilter(row, filter)).length;
+      const rows = await fetchModelRows(this.tableModel);
+      return rows.filter((row) => matchesFilter(row, { ...this.fixedData, ...filter })).length;
     }
 
     static async findByIdAndDelete(id: string): Promise<BaseDocument | null> {
-      const existing = await fetchModelRecord(this.modelName, normalizeId(id) as string);
-      if (!existing) return null;
-      await deleteModelRecord(this.modelName, existing._id);
+      const existing = await fetchModelRecord(this.tableModel, normalizeId(id) as string);
+      if (!existing || !matchesFilter(existing, this.fixedData)) return null;
+      await deleteModelRecord(this.tableModel, existing._id);
       return new this.DocumentClass(this, applySelect(existing, null, this.hiddenFields));
     }
 
@@ -518,8 +524,8 @@ export function createModel(config: ModelConfig): any {
       return new QueryBuilder(
         this,
         async () => {
-          const existing = await fetchModelRecord(this.modelName, normalizeId(id) as string);
-          if (!existing) return null;
+          const existing = await fetchModelRecord(this.tableModel, normalizeId(id) as string);
+          if (!existing || !matchesFilter(existing, this.fixedData)) return null;
           const next = applyUpdateOperators(existing, update);
           next._id = existing._id;
           next.createdAt = existing.createdAt || next.createdAt;
@@ -529,7 +535,7 @@ export function createModel(config: ModelConfig): any {
             await this.beforeSave(draft);
             Object.assign(next, clone(draft));
           }
-          const saved = await persistModelRecord(this.modelName, next);
+          const saved = await persistModelRecord(this.tableModel, next);
           return options.new === false ? existing : saved;
         },
         { single: true }
@@ -537,8 +543,8 @@ export function createModel(config: ModelConfig): any {
     }
 
     static async findOneAndUpdate(filter: any = {}, update: any = {}, options: any = {}): Promise<BaseDocument | null> {
-      const rows = await fetchModelRows(this.modelName);
-      const existing = rows.find((row) => matchesFilter(row, filter));
+      const rows = await fetchModelRows(this.tableModel);
+      const existing = rows.find((row) => matchesFilter(row, { ...this.fixedData, ...filter }));
 
       if (!existing) {
         if (!options.upsert) return null;
@@ -553,39 +559,43 @@ export function createModel(config: ModelConfig): any {
       const next = applyUpdateOperators(existing, update);
       next._id = existing._id;
       next.createdAt = existing.createdAt || next.createdAt;
-      const saved = await persistModelRecord(this.modelName, next);
+      const saved = await persistModelRecord(this.tableModel, next);
       return new this.DocumentClass(this, options.new === false ? existing : saved);
     }
 
     static async updateMany(filter: any = {}, update: any = {}): Promise<{ modifiedCount: number }> {
-      const rows = await fetchModelRows(this.modelName);
+      const rows = await fetchModelRows(this.tableModel);
       let count = 0;
       for (const row of rows) {
-        if (!matchesFilter(row, filter)) continue;
+        if (!matchesFilter(row, { ...this.fixedData, ...filter })) continue;
         count += 1;
         const next = applyUpdateOperators(row, update);
         next._id = row._id;
         next.createdAt = row.createdAt || next.createdAt;
-        await persistModelRecord(this.modelName, next);
+        await persistModelRecord(this.tableModel, next);
       }
       return { modifiedCount: count };
     }
 
     static async deleteMany(filter: any = {}): Promise<{ deletedCount: number }> {
-      const rows = await fetchModelRows(this.modelName);
+      const rows = await fetchModelRows(this.tableModel);
       let count = 0;
       for (const row of rows) {
-        if (!matchesFilter(row, filter)) continue;
+        if (!matchesFilter(row, { ...this.fixedData, ...filter })) continue;
         count += 1;
-        await deleteModelRecord(this.modelName, row._id);
+        await deleteModelRecord(this.tableModel, row._id);
       }
       return { deletedCount: count };
     }
 
     static async aggregate(pipeline: any[] = []): Promise<any[]> {
-      let rows = await fetchModelRows(this.modelName);
+      let rows = await fetchModelRows(this.tableModel);
+      rows = rows.filter((row) => matchesFilter(row, this.fixedData));
+      
       for (const stage of pipeline) {
-        if (stage.$group) {
+        if (stage.$match) {
+          rows = rows.filter((row) => matchesFilter(row, { ...this.fixedData, ...stage.$match }));
+        } else if (stage.$group) {
           const field = String(stage.$group._id || "").replace(/^\$/, "");
           const grouped = new Map<any, number>();
           for (const row of rows) {

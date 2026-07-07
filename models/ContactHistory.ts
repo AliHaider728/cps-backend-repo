@@ -20,9 +20,9 @@
  *   to move existing records from model="ContactHistory" to model="client".
  */
 
-import { createRepository } from "../lib/recordModel.js";
+import { createModel } from "../lib/model.js";
 
-const ContactHistory = createRepository({
+const ContactHistory = createModel({
   modelName: "ContactHistory",
   tableModel: "client",          // ← SAME table as all other entities
   fixedData: {

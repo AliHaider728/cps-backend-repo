@@ -1,6 +1,6 @@
-import { createRepository, hashPasswordIfNeeded } from "./recordModel.js";
+import { createModel, hashPasswordIfNeeded } from "./model.js";
 
-export const User = createRepository({
+export const User = createModel({
   modelName: "User",
   tableModel: "user",
   hiddenFields: ["password"],
@@ -23,7 +23,7 @@ export const User = createRepository({
   },
 });
 
-export const AuditLog = createRepository({
+export const AuditLog = createModel({
   modelName: "AuditLog",
   tableModel: "audit_log",
   refs: {
@@ -45,7 +45,7 @@ export const AuditLog = createRepository({
   },
 });
 
-export const ICB = createRepository({
+export const ICB = createModel({
   modelName: "ICB",
   tableModel: "client",
   fixedData: {
@@ -62,7 +62,7 @@ export const ICB = createRepository({
   },
 });
 
-export const Federation = createRepository({
+export const Federation = createModel({
   modelName: "Federation",
   tableModel: "client",
   fixedData: {
@@ -82,7 +82,7 @@ export const Federation = createRepository({
   },
 });
 
-export const ComplianceDocument = createRepository({
+export const ComplianceDocument = createModel({
   modelName: "ComplianceDocument",
   tableModel: "compliance_doc",
   fixedData: {
@@ -108,7 +108,7 @@ export const ComplianceDocument = createRepository({
   },
 });
 
-export const DocumentGroup = createRepository({
+export const DocumentGroup = createModel({
   modelName: "DocumentGroup",
   tableModel: "compliance_doc",
   fixedData: {
@@ -133,7 +133,7 @@ export const DocumentGroup = createRepository({
   },
 });
 
-export const PCN = createRepository({
+export const PCN = createModel({
   modelName: "PCN",
   tableModel: "client",
   fixedData: {
@@ -194,7 +194,7 @@ export const PCN = createRepository({
   },
 });
 
-export const Practice = createRepository({
+export const Practice = createModel({
   modelName: "Practice",
   tableModel: "client",
   fixedData: {
@@ -252,7 +252,7 @@ export const Practice = createRepository({
   },
 });
 
-export const ContactHistory = createRepository({
+export const ContactHistory = createModel({
   modelName: "ContactHistory",
   tableModel: "client",
   fixedData: {

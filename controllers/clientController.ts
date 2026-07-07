@@ -1245,7 +1245,8 @@ export const updatePractice = async (req: Request, res: Response) => {
 
     const payload = normalizeComplianceGroup(req.body);
     if (Object.prototype.hasOwnProperty.call(payload, "complianceGroup")) {
-      const prev = (existing.complianceGroup || []).map((g: any) => String(g._id || g)).sort().join(",");
+      const existingCg = Array.isArray(existing.complianceGroup) ? existing.complianceGroup : (existing.complianceGroup ? [existing.complianceGroup] : []);
+      const prev = existingCg.map((g: any) => String(g._id || g)).sort().join(",");
       // @ts-ignore
       const next = (payload.complianceGroup || []).map(String).sort().join(",");
       // @ts-ignore
@@ -1266,8 +1267,11 @@ export const updatePractice = async (req: Request, res: Response) => {
   .populate("restrictedClinicians","name email role")
   .lean();
 
-    const beforeGroups = (existing.complianceGroup || []).map((g: any) => g.name).filter(Boolean);
-    const afterGroups  = (practice.complianceGroup || []).map((g: any) => g.name).filter(Boolean);
+    const existingCgForAudit = Array.isArray(existing.complianceGroup) ? existing.complianceGroup : (existing.complianceGroup ? [existing.complianceGroup] : []);
+    const practiceCgForAudit = Array.isArray(practice.complianceGroup) ? practice.complianceGroup : (practice.complianceGroup ? [practice.complianceGroup] : []);
+
+    const beforeGroups = existingCgForAudit.map((g: any) => g.name).filter(Boolean);
+    const afterGroups  = practiceCgForAudit.map((g: any) => g.name).filter(Boolean);
     await logAudit(req, "UPDATE_CLIENT", "Practice", {
       resourceId: practice._id,
       detail: beforeGroups.join("|") !== afterGroups.join("|")
