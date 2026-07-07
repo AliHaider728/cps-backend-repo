@@ -80,6 +80,7 @@ const reader = [
 ];
 
 const writer = [verifyToken, allowRoles("super_admin", "director", "ops_manager")];
+const complianceUploadAuth = [verifyToken, allowRoles("super_admin", "director", "ops_manager", "clinician")];
 
 const admin = [verifyToken, allowRoles("super_admin", "ops_manager")];
 
@@ -1185,7 +1186,7 @@ router.put("/:id/supervision/:logId", ...clinicianLeaveWriter, updateSupervision
  *       404:
  *         description: Document or clinician not found
  */
-router.patch("/:id/compliance/:docId", ...writer, upload.single("file"), upsertDoc);
+router.patch("/:id/compliance/:docId", ...complianceUploadAuth, upload.single("file"), upsertDoc);
 
 /**
  * @swagger

@@ -88,6 +88,14 @@ export const upsertDoc = async (req: Request, res: Response, next: NextFunction)
     const docId = req.params.docId;
     if (!id) return res.status(400).json({ message: "Invalid clinician id" });
 
+    // Strict ownership check for clinician role
+    const user = (req as any).user;
+    if (user?.role === "clinician") {
+      if (String(user.clinicianId) !== String(id)) {
+        return res.status(403).json({ message: "You can only update your own compliance documents" });
+      }
+    }
+
     const clinician = await Clinician.findById(id).lean();
     if (!clinician) return res.status(404).json({ message: "Clinician not found" });
 
