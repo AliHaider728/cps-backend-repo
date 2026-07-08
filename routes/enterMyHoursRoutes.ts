@@ -16,6 +16,7 @@ import {
   submitMyEnterHours,
   listManagerEnterHours,
   reviewManagerEnterHours,
+  bulkReviewManagerEnterHours,
 } from "../controllers/enterMyHoursController.js";
 
 const router: Router = express.Router();
@@ -315,6 +316,54 @@ router.get("/manager", managerRoles, listManagerEnterHours);
  *         description: Insufficient permissions (manager only)
  */
 router.patch("/manager/:id/review", managerRoles, reviewManagerEnterHours);
+
+/**
+ * @swagger
+ * /api/hours/manager/bulk-review:
+ *   post:
+ *     tags:
+ *       - Manager Hours Review
+ *     summary: Bulk review and approve/reject hours entry for a month
+ *     description: Manager reviews submitted hours and either approves or rejects for a clinician's entire month
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - clinicianId
+ *               - month
+ *               - year
+ *               - action
+ *             properties:
+ *               clinicianId:
+ *                 type: string
+ *               month:
+ *                 type: number
+ *               year:
+ *                 type: number
+ *               action:
+ *                 type: string
+ *                 enum: [approve, reject]
+ *               reason:
+ *                 type: string
+ *                 description: Manager's feedback or rejection reason
+ *     responses:
+ *       200:
+ *         description: Hours entry reviewed and updated
+ *       400:
+ *         description: Invalid action or status
+ *       404:
+ *         description: Hours entry not found
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Insufficient permissions (manager only)
+ */
+router.post("/manager/bulk-review", managerRoles, bulkReviewManagerEnterHours);
 
 /* ─────────────────────────────────────────────────────────── */
 /* EXPORT ROUTER                                               */

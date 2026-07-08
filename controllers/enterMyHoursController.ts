@@ -215,3 +215,55 @@ export async function reviewManagerEnterHours(req: Request, res: Response, next:
     return next(err);
   }
 }
+
+export async function bulkReviewManagerEnterHours(req: Request, res: Response, next: NextFunction) {
+  try {
+    const role = (req as any).user?.role;
+    if (!MANAGER_ROLES.includes(role)) {
+      return res.status(403).json({ message: "Access denied: insufficient permissions" });
+    }
+
+    const { clinicianId, month, year, action, reason = "" } = req.body || {};
+    
+    if (!clinicianId || !month || !year) {
+      return res.status(400).json({ message: "clinicianId, month, and year are required." });
+    }
+
+    if (!["approve", "reject"].includes(action)) {
+      return res.status(400).json({ message: "action must be approve or reject." });
+    }
+    if (action === "reject" && !String(reason).trim()) {
+      return res.status(400).json({ message: "reason is required for rejection." });
+    }
+
+    const entries = await EnterMyHoursEntry.find({
+      clinician: clinicianId,
+      month: Number(month),
+      year: Number(year),
+      submissionStatus: "submitted"
+    }).lean();
+
+    if (!entries || entries.length === 0) {
+      return res.status(404).json({ message: "No submitted entries found for this month." });
+    }
+
+    let updatedCount = 0;
+    for (const entry of entries as any[]) {
+      await EnterMyHoursEntry.findByIdAndUpdate(
+        entry._id,
+        {
+          managerApprovalStatus: action === "approve" ? "approved" : "rejected",
+          rejectionReason: action === "reject" ? String(reason).trim() : "",
+          reviewedBy: (req as any).user?._id || (req as any).user?.id || null,
+          reviewedAt: new Date().toISOString(),
+        },
+        { new: true }
+      );
+      updatedCount++;
+    }
+
+    return res.json({ message: `Bulk ${action}d ${updatedCount} entries.` });
+  } catch (err) {
+    return next(err);
+  }
+}
