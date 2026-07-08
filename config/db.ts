@@ -168,6 +168,8 @@ async function runMigrations() {
   await addColIfMissing("rota_shifts", "rota_year",      "INTEGER");
   await addColIfMissing("rota_shifts", "sent_to_client", "BOOLEAN DEFAULT false");
   await addColIfMissing("rota_shifts", "created_by",     "UUID");
+  await addColIfMissing("rota_shifts", "hourly_rate",    "DECIMAL(10,2)");
+  await addColIfMissing("rota_shifts", "clinical_system","VARCHAR(100)");
 
   // timesheets: seed.js and Supabase client inserts expect created_by
   await addColIfMissing("timesheets", "created_by", "UUID REFERENCES users(id)");
