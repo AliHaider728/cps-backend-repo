@@ -678,6 +678,10 @@ export const createShift = async (req: Request, res: Response, next: NextFunctio
         req.body?.hours != null && req.body?.hours !== ""
           ? Number(req.body?.hours)
           : computeHours(req.body?.start_time, req.body?.end_time),
+      hourly_rate:
+        req.body?.hourly_rate != null && req.body?.hourly_rate !== ""
+          ? Number(req.body?.hourly_rate)
+          : null,
       clinical_system:     req.body?.clinical_system || null,
       status:              String(req.body?.status || "working").toLowerCase(),
       is_cover:            req.body?.is_cover === true || req.body?.is_cover === "true",
@@ -775,6 +779,9 @@ export const updateShift = async (req: Request, res: Response, next: NextFunctio
       ...(req.body?.date        !== undefined && { date: req.body?.date }),
       ...(req.body?.status      !== undefined && { status: String(req.body?.status).toLowerCase() }),
       ...(req.body?.workstreams_notes !== undefined && { workstreams_notes: req.body?.workstreams_notes }),
+      ...(req.body?.hourly_rate !== undefined && { 
+        hourly_rate: req.body?.hourly_rate != null && req.body?.hourly_rate !== "" ? Number(req.body?.hourly_rate) : null 
+      }),
     };
 
     if (patch.clinician_id) {
