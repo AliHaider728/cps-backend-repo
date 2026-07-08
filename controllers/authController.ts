@@ -677,18 +677,24 @@ export const anonymiseUser = async (req: Request, res: Response) => {
 export const changePassword = async (req: Request, res: Response) => {
   try {
     const { oldPassword, newPassword } = req.body;
-    if (!oldPassword)
-      return res.status(400).json({ message: "Current password is required" });
-    if (!newPassword || String(newPassword).length < 6)
-      return res.status(400).json({ message: "Password must be at least 6 characters" });
 
     // @ts-ignore
     const existingUser = await findUserById(req.user._id);
     if (!existingUser) return res.status(404).json({ message: "User not found" });
 
-    const passwordMatches = await bcrypt.compare(String(oldPassword), existingUser.password || "");
-    if (!passwordMatches)
-      return res.status(401).json({ message: "Current password is incorrect" });
+    // If the user isn't in a forced-reset state, STRICTLY require and verify the old password
+    if (!existingUser.mustChangePassword) {
+      if (!oldPassword)
+        return res.status(400).json({ message: "Current password is required" });
+
+      const passwordMatches = await bcrypt.compare(String(oldPassword), existingUser.password || "");
+      if (!passwordMatches)
+        return res.status(401).json({ message: "Current password is incorrect" });
+    }
+
+    // Common validation for the new password
+    if (!newPassword || String(newPassword).length < 6)
+      return res.status(400).json({ message: "Password must be at least 6 characters" });
 
     const updatedUser = await updateUserRecord(existingUser._id, {
       password:           await bcrypt.hash(String(newPassword), PASSWORD_ROUNDS),
