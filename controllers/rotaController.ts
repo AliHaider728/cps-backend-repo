@@ -771,6 +771,80 @@ export const updateShift = async (req: Request, res: Response, next: NextFunctio
     const shiftId = toUUID(req.params.id);
     if (!shiftId) return fail(res, 400, "Invalid shift id");
 
+    // 1. Try to find in rota_shifts
+    const rsQuery = await query(`SELECT * FROM rota_shifts WHERE id = $1`, [shiftId]);
+    if (rsQuery.rowCount && rsQuery.rowCount > 0) {
+      const before = rsQuery.rows[0];
+
+      // Build patch for rota_shifts
+      const updates: any = {};
+      const params: any[] = [];
+      let paramIdx = 1;
+
+      if (req.body?.clinician_id !== undefined) {
+        updates.clinician_id = toUUID(req.body.clinician_id) || toMongoId(req.body.clinician_id) || null;
+      }
+      if (req.body?.practice_id !== undefined || req.body?.surgery_id !== undefined) {
+        updates.surgery_id = toPracticeId(req.body.practice_id || req.body.surgery_id);
+      }
+      if (req.body?.date !== undefined) {
+        updates.shift_date = req.body.date;
+      }
+      if (req.body?.status !== undefined || req.body?.shift_type !== undefined) {
+        updates.shift_type = String(req.body.status || req.body.shift_type).toLowerCase();
+      }
+      if (req.body?.start_time !== undefined) {
+        updates.start_time = req.body.start_time;
+      }
+      if (req.body?.end_time !== undefined) {
+        updates.end_time = req.body.end_time;
+      }
+      if (req.body?.hourly_rate !== undefined) {
+        updates.hourly_rate = req.body.hourly_rate != null && req.body.hourly_rate !== "" ? Number(req.body.hourly_rate) : null;
+      }
+      if (req.body?.clinical_system !== undefined) {
+        updates.clinical_system = req.body.clinical_system || null;
+      }
+
+      if (updates.clinician_id) {
+        const restriction = await checkRestrictedClinician(
+          updates.clinician_id,
+          updates.surgery_id || before.surgery_id
+        );
+        if (restriction.blocked) {
+          await logAudit(req, "ROTA_UPDATE_BLOCKED_RESTRICTED", "RotaShift", {
+            resourceId: shiftId,
+            detail:     "Blocked update: restricted clinician",
+            status:     "blocked",
+          });
+          return fail(res, 403, restriction.reason);
+        }
+      }
+
+      const updateKeys = Object.keys(updates);
+      if (updateKeys.length > 0) {
+        let sql = `UPDATE rota_shifts SET updated_at = NOW()`;
+        for (const key of updateKeys) {
+          sql += `, ${key} = $${paramIdx++}`;
+          params.push(updates[key]);
+        }
+        sql += ` WHERE id = $${paramIdx} RETURNING *`;
+        params.push(shiftId);
+
+        const updated = await query(sql, params);
+        
+        await logAudit(req, "UPDATE_SHIFT", "RotaShift", {
+          resourceId: shiftId,
+          detail:     `Updated rota_shift ${shiftId}`,
+          before:     safeJson(before),
+          after:      safeJson(updated.rows[0]),
+        });
+        return ok(res, updated.rows[0], "Shift updated");
+      }
+      return ok(res, before, "No changes");
+    }
+
+    // 2. Fall back to shifts table
     const before = await Shift.findById(shiftId);
     if (!before) return fail(res, 404, "Shift not found");
 
@@ -786,6 +860,10 @@ export const updateShift = async (req: Request, res: Response, next: NextFunctio
       ...(req.body?.hourly_rate !== undefined && { 
         hourly_rate: req.body?.hourly_rate != null && req.body?.hourly_rate !== "" ? Number(req.body?.hourly_rate) : null 
       }),
+      ...(req.body?.start_time !== undefined && { start_time: req.body?.start_time }),
+      ...(req.body?.end_time !== undefined && { end_time: req.body?.end_time }),
+      ...(req.body?.clinical_system !== undefined && { clinical_system: req.body?.clinical_system }),
+      ...(req.body?.service_code !== undefined && { service_code: req.body?.service_code }),
     };
 
     if (patch.clinician_id) {
@@ -825,6 +903,23 @@ export const deleteShift = async (req: Request, res: Response, next: NextFunctio
     const shiftId = toUUID(req.params.id);
     if (!shiftId) return fail(res, 400, "Invalid shift id");
 
+    // 1. Try to find and delete from rota_shifts first
+    const rsResult = await query(
+      `DELETE FROM rota_shifts WHERE id = $1 RETURNING *`,
+      [shiftId]
+    );
+
+    if (rsResult.rowCount && rsResult.rowCount > 0) {
+      const deletedShift = rsResult.rows[0];
+      await logAudit(req, "DELETE_SHIFT", "RotaShift", {
+        resourceId: shiftId,
+        detail:     `Deleted rota_shift ${shiftId}`,
+        before:     safeJson(deletedShift),
+      });
+      return ok(res, { id: shiftId }, "Shift deleted from rota");
+    }
+
+    // 2. Fall back to legacy shifts table
     const before = await Shift.findById(shiftId);
     if (!before) return fail(res, 404, "Shift not found");
 
