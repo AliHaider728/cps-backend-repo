@@ -396,6 +396,8 @@ export const createBulkShifts = async (req: Request, res: Response, next: NextFu
             rotaMonth,                                                 // rota_month
             rotaYear,                                                  // rota_year
             userId,                                                    // created_by
+            rate,                                                      // hourly_rate
+            clinical_system || null,                                   // clinical_system
           ]
         );
 

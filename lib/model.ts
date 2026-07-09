@@ -140,6 +140,14 @@ function matchesCondition(actual: any, expected: any): boolean {
     if ("$ne" in expected) {
       return actual !== expected.$ne;
     }
+    if ("$in" in expected) {
+      if (!Array.isArray(expected.$in)) return false;
+      return expected.$in.some((item: any) => String(item) === String(actual));
+    }
+    if ("$nin" in expected) {
+      if (!Array.isArray(expected.$nin)) return false;
+      return !expected.$nin.some((item: any) => String(item) === String(actual));
+    }
   }
 
   if (Array.isArray(actual) && !Array.isArray(expected)) {
