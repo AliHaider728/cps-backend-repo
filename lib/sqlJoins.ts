@@ -12,8 +12,9 @@ export const SQL_PRACTICE_NAME: string = `NULLIF(TRIM(COALESCE(
   cli.name
 )), '')`;
 
-/** Clinical system for rota_shifts (no clinical_system column on rs) */
+/** Clinical system for rota_shifts (prioritizes rs.clinical_system, then falls back to linked practice/client) */
 export const SQL_ROTA_CLINICAL_SYSTEM: string = `NULLIF(TRIM(COALESCE(
+  rs.clinical_system,
   p.clinical_system,
   pr.data->>'clinicalSystem',
   pr.data->>'system',
