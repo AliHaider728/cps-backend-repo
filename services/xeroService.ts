@@ -1,35 +1,149 @@
 import axios from "axios";
+import dotenv from "dotenv";
 import { query } from "../config/db.js";
-import { CLIENT_INVOICE_ACCOUNT_CODE, CONTRACTOR_INVOICE_ACCOUNT_CODE } from "../config/xeroAccountCodes.js";
+import {
+  CLIENT_INVOICE_ACCOUNT_CODE,
+  CONTRACTOR_INVOICE_ACCOUNT_CODE,
+} from "../config/xeroAccountCodes.js";
 
-// Helper for retrying 429
-async function withRetry(fn: () => Promise<any>, maxRetries = 2) {
+dotenv.config();
+
+const XERO_AUTHORIZE_URL = "https://login.xero.com/identity/connect/authorize";
+const XERO_TOKEN_URL = "https://identity.xero.com/connect/token";
+const XERO_CONNECTIONS_URL = "https://api.xero.com/connections";
+const XERO_ACCOUNTING_API_URL = "https://api.xero.com/api.xro/2.0";
+
+/**
+ * These scopes match the functions currently present in this service:
+ * - accounting.contacts: read/create/update contacts
+ * - accounting.invoices: read/create invoices
+ * - accounting.settings.read: read Accounts, Tax Rates, Tracking Categories, Organisation, etc.
+ * - offline_access: receive a refresh token
+ *
+ * XERO_SCOPES can contain extra scopes. Both spaces and commas are accepted in
+ * the environment variable, but the final OAuth request is always sent as a
+ * valid space-separated scope string.
+ */
+const REQUIRED_XERO_SCOPES = [
+  "openid",
+  "profile",
+  "email",
+  "offline_access",
+  "accounting.contacts",
+  "accounting.invoices",
+  "accounting.settings.read",
+];
+
+function getFirstEnvironmentValue(...names: string[]): string | null {
+  for (const name of names) {
+    const value = process.env[name]?.trim();
+    if (value) return value;
+  }
+
+  return null;
+}
+
+function getRequiredEnvironmentValue(...names: string[]): string {
+  const value = getFirstEnvironmentValue(...names);
+
+  if (!value) {
+    throw new Error(
+      `Missing Xero environment variable. Set one of: ${names.join(", ")}`
+    );
+  }
+
+  return value;
+}
+
+function getClientId(): string {
+  return getRequiredEnvironmentValue(
+    "XERO_CLIENT_ID",
+    "XERO_CLIENT_ID_TEST",
+    "XERO_CLIENT_ID_PROD"
+  );
+}
+
+function getClientSecret(): string {
+  return getRequiredEnvironmentValue(
+    "XERO_CLIENT_SECRET",
+    "XERO_CLIENT_SECRET_TEST",
+    "XERO_CLIENT_SECRET_PROD"
+  );
+}
+
+function getRedirectUri(): string {
+  return (
+    process.env.XERO_REDIRECT_URI?.trim() ||
+    "http://localhost:5000/api/xero/callback"
+  );
+}
+
+function getScopes(): string {
+  const configuredScopes = (process.env.XERO_SCOPES || "")
+    .split(/[\s,]+/)
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+
+  // Merge required scopes with any extra configured scopes and remove duplicates.
+  return [...new Set([...REQUIRED_XERO_SCOPES, ...configuredScopes])].join(" ");
+}
+
+function getBasicAuthorizationHeader(): string {
+  const credentials = `${getClientId()}:${getClientSecret()}`;
+  return `Basic ${Buffer.from(credentials, "utf8").toString("base64")}`;
+}
+
+function newSearchParams(params: Record<string, string>): string {
+  const searchParams = new URLSearchParams();
+
+  for (const [key, value] of Object.entries(params)) {
+    searchParams.append(key, value);
+  }
+
+  return searchParams.toString();
+}
+
+function getXeroErrorMessage(err: any): string {
+  return (
+    err?.response?.data?.error_description ||
+    err?.response?.data?.error ||
+    err?.response?.data?.Message ||
+    err?.response?.data?.message ||
+    err?.message ||
+    "Unknown Xero error"
+  );
+}
+
+// Helper for retrying Xero rate-limit responses.
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries = 2
+): Promise<T> {
   let attempt = 0;
+
   while (attempt <= maxRetries) {
     try {
       return await fn();
     } catch (err: any) {
-      if (err.response?.status === 429 && attempt < maxRetries) {
-        const retryAfter = err.response.headers['retry-after'] || 2;
-        await new Promise((resolve) => setTimeout(resolve, retryAfter * 1000));
-        attempt++;
-      } else {
+      if (err?.response?.status !== 429 || attempt >= maxRetries) {
         throw err;
       }
+
+      const retryAfterHeader = err.response?.headers?.["retry-after"];
+      const parsedRetryAfter = Number(retryAfterHeader);
+      const retryAfterSeconds = Number.isFinite(parsedRetryAfter)
+        ? parsedRetryAfter
+        : 2;
+
+      await new Promise((resolve) =>
+        setTimeout(resolve, retryAfterSeconds * 1000)
+      );
+
+      attempt += 1;
     }
   }
-}
 
-function getClientId() {
-  return process.env.XERO_CLIENT_ID_TEST || process.env.XERO_CLIENT_ID_PROD || "";
-}
-
-function getClientSecret() {
-  return process.env.XERO_CLIENT_SECRET_TEST || process.env.XERO_CLIENT_SECRET_PROD || "";
-}
-
-function getRedirectUri() {
-  return process.env.XERO_REDIRECT_URI || "http://localhost:5000/api/xero/callback";
+  throw new Error("Xero request failed after retry attempts.");
 }
 
 export async function logXeroAction(
@@ -42,7 +156,8 @@ export async function logXeroAction(
 ) {
   try {
     await query(
-      `INSERT INTO xero_audit_log (tenant_id, action_type, title, description, status, performed_by)
+      `INSERT INTO xero_audit_log
+        (tenant_id, action_type, title, description, status, performed_by)
        VALUES ($1, $2, $3, $4, $5, $6)`,
       [tenantId, actionType, title, description, status, userId]
     );
@@ -51,200 +166,334 @@ export async function logXeroAction(
   }
 }
 
-export async function getAuthUrl(state: string) {
-  const clientId = getClientId();
-  const redirectUri = encodeURIComponent(getRedirectUri());
-  const scope = encodeURIComponent("openid profile email accounting.contacts accounting.transactions offline_access");
-  
-  const url = `https://login.xero.com/identity/connect/authorize?response_type=code&client_id=${clientId}&redirect_uri=${redirectUri}&scope=${scope}&state=${state}`;
-  console.log("XERO GENERATED AUTH URL:", url);
-  return url;
+export async function getAuthUrl(state: string): Promise<string> {
+  if (!state?.trim()) {
+    throw new Error("A valid OAuth state value is required.");
+  }
+
+  const authorizationUrl = new URL(XERO_AUTHORIZE_URL);
+
+  authorizationUrl.search = new URLSearchParams({
+    response_type: "code",
+    client_id: getClientId(),
+    redirect_uri: getRedirectUri(),
+    scope: getScopes(),
+    state: state.trim(),
+  }).toString();
+
+  // Avoid logging the complete URL because it contains the OAuth state value.
+  console.log("Xero OAuth URL generated with scopes:", getScopes());
+
+  return authorizationUrl.toString();
 }
 
 export async function exchangeCode(code: string, userId: string) {
-  const clientId = getClientId();
-  const clientSecret = getClientSecret();
-  const redirectUri = getRedirectUri();
+  if (!code?.trim()) {
+    throw new Error("Xero authorization code is missing.");
+  }
 
   try {
     const tokenResponse = await axios.post(
-      "https://identity.xero.com/connect/token",
-      new URLSearchParams({
+      XERO_TOKEN_URL,
+      newSearchParams({
         grant_type: "authorization_code",
-        client_id: clientId,
-        client_secret: clientSecret,
-        code,
-        redirect_uri: redirectUri,
-      }).toString(),
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+        code: code.trim(),
+        redirect_uri: getRedirectUri(),
+      }),
+      {
+        headers: {
+          Authorization: getBasicAuthorizationHeader(),
+          "Content-Type": "application/x-www-form-urlencoded",
+          Accept: "application/json",
+        },
+      }
     );
 
     const { access_token, refresh_token, expires_in } = tokenResponse.data;
-    const expiresAt = new Date(Date.now() + expires_in * 1000);
 
-    const tenantResponse = await axios.get("https://api.xero.com/connections", {
-      headers: { Authorization: `Bearer ${access_token}` },
+    if (!access_token || !refresh_token || !expires_in) {
+      throw new Error("Xero returned an incomplete token response.");
+    }
+
+    const expiresAt = new Date(Date.now() + Number(expires_in) * 1000);
+
+    const tenantResponse = await axios.get(XERO_CONNECTIONS_URL, {
+      headers: {
+        Authorization: `Bearer ${access_token}`,
+        Accept: "application/json",
+      },
     });
 
-    if (!tenantResponse.data || tenantResponse.data.length === 0) {
-      throw new Error("No Xero tenants connected.");
+    if (!Array.isArray(tenantResponse.data) || tenantResponse.data.length === 0) {
+      throw new Error("No Xero organisation was connected.");
     }
 
     const tenant = tenantResponse.data[0];
     const tenantId = tenant.tenantId;
-    const tenantName = tenant.tenantName;
+    const tenantName = tenant.tenantName || "Xero organisation";
 
-    await query(`DELETE FROM xero_connections`);
-    
+    await query("DELETE FROM xero_connections");
+
     await query(
-      `INSERT INTO xero_connections (tenant_id, tenant_name, access_token, refresh_token, expires_at, connected_by) 
+      `INSERT INTO xero_connections
+        (tenant_id, tenant_name, access_token, refresh_token, expires_at, connected_by)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [tenantId, tenantName, access_token, refresh_token, expiresAt.toISOString(), userId]
+      [
+        tenantId,
+        tenantName,
+        access_token,
+        refresh_token,
+        expiresAt.toISOString(),
+        userId,
+      ]
     );
 
-    await logXeroAction(tenantId, "connect", `Connected to ${tenantName}`, `Successfully completed OAuth flow`, "Success", userId);
-    return { tenantName, tenantId };
+    await logXeroAction(
+      tenantId,
+      "connect",
+      `Connected to ${tenantName}`,
+      "Successfully completed the Xero OAuth flow",
+      "Success",
+      userId
+    );
 
+    return { tenantName, tenantId };
   } catch (err: any) {
-    await logXeroAction(null, "connect", "Connection failed", err.message, "Failed", userId);
-    throw err;
+    const message = getXeroErrorMessage(err);
+
+    await logXeroAction(
+      null,
+      "connect",
+      "Connection failed",
+      message,
+      "Failed",
+      userId
+    );
+
+    console.error("Xero OAuth exchange failed:", err?.response?.data || err);
+    throw new Error(message);
   }
 }
 
 export async function getConnection() {
-  const res = await query(`SELECT * FROM xero_connections ORDER BY connected_at DESC LIMIT 1`);
-  if (res.rows.length === 0) return null;
-  
-  let conn = res.rows[0];
+  const result = await query(
+    "SELECT * FROM xero_connections ORDER BY connected_at DESC LIMIT 1"
+  );
 
-  if (new Date(conn.expires_at).getTime() < Date.now() + 60000) {
-    conn = await refreshConnection(conn);
+  if (result.rows.length === 0) return null;
+
+  let connection = result.rows[0];
+
+  // Refresh one minute before expiry to avoid using a token during expiration.
+  if (new Date(connection.expires_at).getTime() < Date.now() + 60_000) {
+    connection = await refreshConnection(connection);
   }
 
-  return conn;
+  return connection;
 }
 
-async function refreshConnection(conn: any) {
-  const clientId = getClientId();
-  const clientSecret = getClientSecret();
-
+async function refreshConnection(connection: any) {
   try {
     const tokenResponse = await axios.post(
-      "https://identity.xero.com/connect/token",
+      XERO_TOKEN_URL,
       newSearchParams({
         grant_type: "refresh_token",
-        client_id: clientId,
-        client_secret: clientSecret,
-        refresh_token: conn.refresh_token,
+        refresh_token: connection.refresh_token,
       }),
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+      {
+        headers: {
+          Authorization: getBasicAuthorizationHeader(),
+          "Content-Type": "application/x-www-form-urlencoded",
+          Accept: "application/json",
+        },
+      }
     );
 
     const { access_token, refresh_token, expires_in } = tokenResponse.data;
-    const expiresAt = new Date(Date.now() + expires_in * 1000);
+
+    if (!access_token || !refresh_token || !expires_in) {
+      throw new Error("Xero returned an incomplete refresh-token response.");
+    }
+
+    const expiresAt = new Date(Date.now() + Number(expires_in) * 1000);
 
     await query(
-      `UPDATE xero_connections SET access_token = $1, refresh_token = $2, expires_at = $3, updated_at = now() WHERE id = $4`,
-      [access_token, refresh_token, expiresAt.toISOString(), conn.id]
+      `UPDATE xero_connections
+       SET access_token = $1,
+           refresh_token = $2,
+           expires_at = $3,
+           updated_at = NOW()
+       WHERE id = $4`,
+      [
+        access_token,
+        refresh_token,
+        expiresAt.toISOString(),
+        connection.id,
+      ]
     );
 
-    return { ...conn, access_token, refresh_token, expires_at: expiresAt };
+    return {
+      ...connection,
+      access_token,
+      refresh_token,
+      expires_at: expiresAt.toISOString(),
+    };
   } catch (err: any) {
-    console.error("Failed to refresh Xero token:", err);
-    await logXeroAction(conn.tenant_id, "refresh", "Token refresh failed", err.message, "Failed", conn.connected_by);
-    throw new Error("Xero connection expired and refresh failed. Please reconnect.");
-  }
-}
+    const message = getXeroErrorMessage(err);
 
-function newSearchParams(params: Record<string, string>) {
-  const searchParams = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
-    searchParams.append(key, value);
+    console.error(
+      "Failed to refresh Xero token:",
+      err?.response?.data || err
+    );
+
+    await logXeroAction(
+      connection.tenant_id,
+      "refresh",
+      "Token refresh failed",
+      message,
+      "Failed",
+      connection.connected_by
+    );
+
+    throw new Error(
+      "Xero connection expired and the token refresh failed. Please reconnect Xero."
+    );
   }
-  return searchParams.toString();
 }
 
 export async function disconnectXero(userId: string) {
-  const conn = await getConnection();
+  const connection = await getConnection();
+
   try {
-    await query(`DELETE FROM xero_connections`);
-    if (conn) {
-      await logXeroAction(conn.tenant_id, "disconnect", `Disconnected from ${conn.tenant_name}`, `Cleared connection successfully`, "Success", userId);
+    await query("DELETE FROM xero_connections");
+
+    if (connection) {
+      await logXeroAction(
+        connection.tenant_id,
+        "disconnect",
+        `Disconnected from ${connection.tenant_name}`,
+        "Cleared the local Xero connection successfully",
+        "Success",
+        userId
+      );
     }
   } catch (err: any) {
-    if (conn) {
-      await logXeroAction(conn.tenant_id, "disconnect", "Disconnect failed", err.message, "Failed", userId);
+    if (connection) {
+      await logXeroAction(
+        connection.tenant_id,
+        "disconnect",
+        "Disconnect failed",
+        getXeroErrorMessage(err),
+        "Failed",
+        userId
+      );
     }
+
     throw err;
   }
 }
 
 export async function getContacts() {
-  const conn = await getConnection();
-  if (!conn) throw new Error("Not connected to Xero");
+  const connection = await getConnection();
 
-  const res = await withRetry(() => axios.get("https://api.xero.com/api.xro/2.0/Contacts", {
-    headers: {
-      Authorization: `Bearer ${conn.access_token}`,
-      "xero-tenant-id": conn.tenant_id,
-      Accept: "application/json",
-    },
-  }));
+  if (!connection) {
+    throw new Error("Not connected to Xero");
+  }
 
-  return res.data.Contacts;
+  const response = await withRetry(() =>
+    axios.get(`${XERO_ACCOUNTING_API_URL}/Contacts`, {
+      headers: {
+        Authorization: `Bearer ${connection.access_token}`,
+        "xero-tenant-id": connection.tenant_id,
+        Accept: "application/json",
+      },
+    })
+  );
+
+  return response.data.Contacts || [];
 }
 
 export async function syncContact(
-  payload: { name: string; contactNumber?: string; email?: string; isCustomer?: boolean; isSupplier?: boolean }, 
+  payload: {
+    name: string;
+    contactNumber?: string;
+    email?: string;
+    isCustomer?: boolean;
+    isSupplier?: boolean;
+  },
   userId: string | null
 ) {
-  const conn = await getConnection();
-  if (!conn) {
+  const connection = await getConnection();
+
+  if (!connection) {
     throw new Error("Not connected to Xero");
   }
 
   try {
-    const contactData: any = {
+    const contactData: Record<string, unknown> = {
       Name: payload.name,
     };
-    if (payload.contactNumber) contactData.ContactNumber = payload.contactNumber;
-    if (payload.email) contactData.EmailAddress = payload.email;
-    if (payload.isCustomer !== undefined) contactData.IsCustomer = payload.isCustomer;
-    if (payload.isSupplier !== undefined) contactData.IsSupplier = payload.isSupplier;
 
-    const res = await withRetry(() => axios.post(
-      "https://api.xero.com/api.xro/2.0/Contacts",
-      { Contacts: [contactData] },
-      {
-        headers: {
-          Authorization: `Bearer ${conn.access_token}`,
-          "xero-tenant-id": conn.tenant_id,
-          Accept: "application/json",
-        },
-      }
-    ));
+    if (payload.contactNumber) {
+      contactData.ContactNumber = payload.contactNumber;
+    }
 
-    const contact = res.data.Contacts[0];
+    if (payload.email) {
+      contactData.EmailAddress = payload.email;
+    }
+
+    if (payload.isCustomer !== undefined) {
+      contactData.IsCustomer = payload.isCustomer;
+    }
+
+    if (payload.isSupplier !== undefined) {
+      contactData.IsSupplier = payload.isSupplier;
+    }
+
+    const response = await withRetry(() =>
+      axios.post(
+        `${XERO_ACCOUNTING_API_URL}/Contacts`,
+        { Contacts: [contactData] },
+        {
+          headers: {
+            Authorization: `Bearer ${connection.access_token}`,
+            "xero-tenant-id": connection.tenant_id,
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+        }
+      )
+    );
+
+    const contact = response.data.Contacts?.[0];
+
+    if (!contact) {
+      throw new Error("Xero did not return the synced contact.");
+    }
+
     await logXeroAction(
-      conn.tenant_id,
+      connection.tenant_id,
       "sync_contact",
       `Synced contact: ${payload.name}`,
-      `Successfully created/updated contact in Xero`,
+      "Successfully created or updated the contact in Xero",
       "Success",
       userId
     );
 
     return contact;
   } catch (err: any) {
+    const message = getXeroErrorMessage(err);
+
     await logXeroAction(
-      conn.tenant_id,
+      connection.tenant_id,
       "sync_contact",
       `Sync failed: ${payload.name}`,
-      err.response?.data?.Message || err.message || "Unknown error",
+      message,
       "Failed",
       userId
     );
-    throw err;
+
+    throw new Error(message);
   }
 }
 
@@ -262,17 +511,21 @@ export async function createInvoices(
   },
   userId: string | null
 ) {
-  const conn = await getConnection();
-  if (!conn) {
+  const connection = await getConnection();
+
+  if (!connection) {
     throw new Error("Not connected to Xero");
   }
 
-  const result: { clientInvoiceId?: string; contractorInvoiceId?: string } = {};
+  const result: {
+    clientInvoiceId?: string;
+    contractorInvoiceId?: string;
+  } = {};
 
-  // Create ACCREC for Client
+  // Create ACCREC invoice for the client.
   if (data.clientContactId) {
     try {
-      const accrecData = {
+      const clientInvoice = {
         Type: "ACCREC",
         Contact: { ContactID: data.clientContactId },
         Date: data.date,
@@ -284,35 +537,60 @@ export async function createInvoices(
             Quantity: data.quantity,
             UnitAmount: data.unitAmountClient,
             AccountCode: CLIENT_INVOICE_ACCOUNT_CODE || undefined,
-          }
+          },
         ],
-        Status: "DRAFT"
+        Status: "DRAFT",
       };
 
-      const res = await withRetry(() => axios.post(
-        "https://api.xero.com/api.xro/2.0/Invoices",
-        { Invoices: [accrecData] },
-        {
-          headers: {
-            Authorization: `Bearer ${conn.access_token}`,
-            "xero-tenant-id": conn.tenant_id,
-            Accept: "application/json",
+      const response = await withRetry(() =>
+        axios.post(
+          `${XERO_ACCOUNTING_API_URL}/Invoices`,
+          { Invoices: [clientInvoice] },
+          {
+            headers: {
+              Authorization: `Bearer ${connection.access_token}`,
+              "xero-tenant-id": connection.tenant_id,
+              Accept: "application/json",
+              "Content-Type": "application/json",
+            },
           }
-        }
-      ));
-      result.clientInvoiceId = res.data.Invoices[0].InvoiceID;
-      await logXeroAction(conn.tenant_id, "create_invoice", `Created client invoice`, `Created ACCREC for ${data.reference}`, "Success", userId);
+        )
+      );
+
+      result.clientInvoiceId = response.data.Invoices?.[0]?.InvoiceID;
+
+      await logXeroAction(
+        connection.tenant_id,
+        "create_invoice",
+        "Created client invoice",
+        `Created ACCREC for ${data.reference}`,
+        "Success",
+        userId
+      );
     } catch (err: any) {
-      await logXeroAction(conn.tenant_id, "create_invoice", `Client invoice failed`, err.response?.data?.Message || err.message, "Failed", userId);
-      // We do not throw because we want to attempt contractor invoice even if client fails, or vice versa
-      console.error("ACCREC Creation failed:", err.response?.data || err.message);
+      const message = getXeroErrorMessage(err);
+
+      await logXeroAction(
+        connection.tenant_id,
+        "create_invoice",
+        "Client invoice failed",
+        message,
+        "Failed",
+        userId
+      );
+
+      // Continue so the contractor invoice can still be attempted.
+      console.error(
+        "ACCREC creation failed:",
+        err?.response?.data || err
+      );
     }
   }
 
-  // Create ACCPAY for Contractor
+  // Create ACCPAY invoice for the contractor.
   if (data.clinicianContactId) {
     try {
-      const accpayData = {
+      const contractorInvoice = {
         Type: "ACCPAY",
         Contact: { ContactID: data.clinicianContactId },
         Date: data.date,
@@ -324,27 +602,52 @@ export async function createInvoices(
             Quantity: data.quantity,
             UnitAmount: data.unitAmountContractor,
             AccountCode: CONTRACTOR_INVOICE_ACCOUNT_CODE || undefined,
-          }
+          },
         ],
-        Status: "DRAFT"
+        Status: "DRAFT",
       };
 
-      const res = await withRetry(() => axios.post(
-        "https://api.xero.com/api.xro/2.0/Invoices",
-        { Invoices: [accpayData] },
-        {
-          headers: {
-            Authorization: `Bearer ${conn.access_token}`,
-            "xero-tenant-id": conn.tenant_id,
-            Accept: "application/json",
+      const response = await withRetry(() =>
+        axios.post(
+          `${XERO_ACCOUNTING_API_URL}/Invoices`,
+          { Invoices: [contractorInvoice] },
+          {
+            headers: {
+              Authorization: `Bearer ${connection.access_token}`,
+              "xero-tenant-id": connection.tenant_id,
+              Accept: "application/json",
+              "Content-Type": "application/json",
+            },
           }
-        }
-      ));
-      result.contractorInvoiceId = res.data.Invoices[0].InvoiceID;
-      await logXeroAction(conn.tenant_id, "create_invoice", `Created contractor invoice`, `Created ACCPAY for ${data.reference}`, "Success", userId);
+        )
+      );
+
+      result.contractorInvoiceId = response.data.Invoices?.[0]?.InvoiceID;
+
+      await logXeroAction(
+        connection.tenant_id,
+        "create_invoice",
+        "Created contractor invoice",
+        `Created ACCPAY for ${data.reference}`,
+        "Success",
+        userId
+      );
     } catch (err: any) {
-      await logXeroAction(conn.tenant_id, "create_invoice", `Contractor invoice failed`, err.response?.data?.Message || err.message, "Failed", userId);
-      console.error("ACCPAY Creation failed:", err.response?.data || err.message);
+      const message = getXeroErrorMessage(err);
+
+      await logXeroAction(
+        connection.tenant_id,
+        "create_invoice",
+        "Contractor invoice failed",
+        message,
+        "Failed",
+        userId
+      );
+
+      console.error(
+        "ACCPAY creation failed:",
+        err?.response?.data || err
+      );
     }
   }
 
