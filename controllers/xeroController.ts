@@ -186,7 +186,7 @@ export async function syncContact(req: Request, res: Response) {
 export async function getAuditLog(req: Request, res: Response) {
   try {
     const logRes = await query(`
-      SELECT l.*, u.first_name, u.last_name 
+      SELECT l.*, u.full_name 
       FROM xero_audit_log l
       LEFT JOIN users u ON l.performed_by = u.id
       ORDER BY l.created_at DESC 
@@ -195,7 +195,7 @@ export async function getAuditLog(req: Request, res: Response) {
     
     const logs = logRes.rows.map(r => ({
       ...r,
-      user_name: r.first_name ? `${r.first_name} ${r.last_name}` : "System"
+      user_name: r.full_name ? r.full_name : "System"
     }));
 
     res.json(logs);

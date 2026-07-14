@@ -1,4 +1,4 @@
-﻿import axios from "axios";
+import axios from "axios";
 import { query } from "../config/db.js";
 import { CLIENT_INVOICE_ACCOUNT_CODE, CONTRACTOR_INVOICE_ACCOUNT_CODE } from "../config/xeroAccountCodes.js";
 
@@ -56,7 +56,9 @@ export async function getAuthUrl(state: string) {
   const redirectUri = encodeURIComponent(getRedirectUri());
   const scope = encodeURIComponent("openid profile email accounting.contacts accounting.transactions offline_access");
   
-  return `https://login.xero.com/identity/connect/authorize?response_type=code&client_id=${clientId}&redirect_uri=${redirectUri}&scope=${scope}&state=${state}`;
+  const url = `https://login.xero.com/identity/connect/authorize?response_type=code&client_id=${clientId}&redirect_uri=${redirectUri}&scope=${scope}&state=${state}`;
+  console.log("XERO GENERATED AUTH URL:", url);
+  return url;
 }
 
 export async function exchangeCode(code: string, userId: string) {
