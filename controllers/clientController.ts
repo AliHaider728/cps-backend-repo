@@ -17,6 +17,7 @@
 
 import { Request, Response, NextFunction } from "express";
 import ICB            from "../models/ICB.js";
+import { syncClientToXero } from "../lib/xeroSync.js";
 import Federation     from "../models/Federation.js";
 import PCN            from "../models/PCN.js";
 import Practice       from "../models/Practice.js";
@@ -863,7 +864,8 @@ export const createPCN = async (req: Request, res: Response) => {
     await logAudit(req, "CREATE_CLIENT", "PCN", {
       resourceId: pcn._id, detail: `PCN created: ${pcn.name}`, after: safeJson(populated),
     });
-    res.status(201).json({ pcn: populated, message: "PCN created" });
+    syncClientToXero(pcn._id, pcn.name, false).catch(e => console.error("Xero PCN sync failed:", e));
+      res.status(201).json({ pcn: populated, message: "PCN created" });
   } catch (err) {
     // @ts-ignore
     console.error("createPCN ERROR:", err.message);
@@ -1228,7 +1230,8 @@ export const createPractice = async (req: Request, res: Response) => {
       .populate("complianceGroup", "name")
       .lean();
     await logAudit(req, "CREATE_CLIENT", "Practice", { resourceId: practice._id, detail: `Practice created: ${practice.name}`, after: safeJson(populated) });
-    res.status(201).json({ practice: populated, message: "Practice created" });
+    syncClientToXero(practice._id, practice.name, true).catch(e => console.error("Xero Practice sync failed:", e));
+      res.status(201).json({ practice: populated, message: "Practice created" });
   } catch (err) {
     // @ts-ignore
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to create practice" });

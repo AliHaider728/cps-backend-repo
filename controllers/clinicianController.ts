@@ -18,6 +18,7 @@ import { normalizeId }         from "../lib/ids.js";
 import { calcAllBalances }     from "../lib/leaveCalc.js";
 import { linkUserToClinician, unlinkUserFromClinician } from "../lib/clinicianLink.js";
 import { syncClinicianStub } from "../lib/syncClinicianStub.js";
+import { syncClinicianToXero } from "../lib/xeroSync.js";
 import { sendWelcomeEmail }    from "../utils/sendEmail.js";
 import { query }               from "../config/db.js";
 import { fetchShiftCountsByClinician } from "../lib/shiftCounts.js";
@@ -297,6 +298,8 @@ export const createClinician = async (req: Request, res: Response, next: NextFun
       detail: `Created clinician "${created.fullName || created.email || created._id}"${userCreated ? " with login account" : ""}`,
       after:  safeJson(created),
     });
+
+    syncClinicianToXero(created._id, created.fullName || created.email, created.contractType).catch(e => console.error("Xero Clinician sync failed:", e));
 
     res.status(201).json({
       clinician: created,

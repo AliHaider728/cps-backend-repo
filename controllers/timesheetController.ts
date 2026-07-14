@@ -4,6 +4,7 @@ import { query } from "../config/db.js";
 import { calculateFTE, calculateHours, compareHours } from "../lib/timesheetCalc.js";
 import Timesheet from "../models/Timesheet.js";
 import TimesheetEntry from "../models/TimesheetEntry.js";
+import { syncTimesheetToXero } from "../lib/xeroSync.js";
 
 const ok   = (res: Response, data: any, message = "OK", status = 200) =>
   res.status(status).json({ success: true, data, message });
@@ -217,6 +218,7 @@ export const getTimesheetDetail = asyncHandler(async (req: Request, res: Respons
 export const approveTimesheet = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
   const approved = await Timesheet.approve(req.params.id, userId(req));
   if (!approved) return fail(res, 404, "Timesheet not found");
+  syncTimesheetToXero(approved.id, userId(req)).catch(e => console.error("Xero Timesheet sync failed:", e));
   return ok(res, approved, "Timesheet approved");
 });
 
@@ -255,5 +257,7 @@ export const adminApproveTimesheet     = asyncHandler(async (req: Request, res: 
     return ok(res, rejected, "Timesheet rejected");
   }
   const approved = await Timesheet.approve(req.params.id, userId(req));
+  if (!approved) return fail(res, 404, "Timesheet not found");
+  syncTimesheetToXero(approved.id, userId(req)).catch(e => console.error("Xero Timesheet sync failed:", e));
   return ok(res, approved, "Timesheet approved");
 });

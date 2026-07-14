@@ -21,6 +21,7 @@ import timeEntryRoutes from "./routes/timeEntryRoutes.js";
 import timesheetRoutes from "./routes/timesheetRoutes.js";
 import basePatternRoutes from "./routes/basePatternRoutes.js";
 import coverRoutes from "./routes/coverRoutes.js";
+import xeroRoutes from "./routes/xeroRoutes.js";
 import enterMyHoursRoutes from "./routes/enterMyHoursRoutes.js";
 import { startGapDetectionScheduler } from "./services/rotaGapService.js";
 
@@ -176,6 +177,7 @@ app.use("/api/timesheets", timesheetRoutes);
 app.use("/api/enter-my-hours", enterMyHoursRoutes);
 app.use("/api/base-patterns", basePatternRoutes);
 app.use("/api/cover", coverRoutes);
+app.use("/api/xero", xeroRoutes);
 
 
 /*   HEALTH CHECK   */
