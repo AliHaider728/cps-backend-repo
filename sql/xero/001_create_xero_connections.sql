@@ -1,7 +1,7 @@
 -- =============================================================================
 -- sql/xero/001_create_xero_connections.sql
 -- =============================================================================
-
+                                                                                                        
 CREATE TABLE IF NOT EXISTS xero_connections (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id      TEXT NOT NULL,

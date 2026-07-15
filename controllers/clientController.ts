@@ -864,8 +864,11 @@ export const createPCN = async (req: Request, res: Response) => {
     await logAudit(req, "CREATE_CLIENT", "PCN", {
       resourceId: pcn._id, detail: `PCN created: ${pcn.name}`, after: safeJson(populated),
     });
-    syncClientToXero(pcn._id, pcn.name, false).catch(e => console.error("Xero PCN sync failed:", e));
-      res.status(201).json({ pcn: populated, message: "PCN created" });
+    
+    const email = req.body.financeContacts?.[0]?.email || req.body.contacts?.[0]?.email || req.body.decisionMakers?.[0]?.email;
+    syncClientToXero(pcn._id, pcn.name, false, email).catch(e => console.error("Xero PCN sync failed:", e));
+    
+    res.status(201).json({ pcn: populated, message: "PCN created" });
   } catch (err) {
     // @ts-ignore
     console.error("createPCN ERROR:", err.message);
@@ -1230,8 +1233,10 @@ export const createPractice = async (req: Request, res: Response) => {
       .populate("complianceGroup", "name")
       .lean();
     await logAudit(req, "CREATE_CLIENT", "Practice", { resourceId: practice._id, detail: `Practice created: ${practice.name}`, after: safeJson(populated) });
-    syncClientToXero(practice._id, practice.name, true).catch(e => console.error("Xero Practice sync failed:", e));
-      res.status(201).json({ practice: populated, message: "Practice created" });
+    
+    const email = req.body.financeContacts?.[0]?.email || req.body.contacts?.[0]?.email || req.body.decisionMakers?.[0]?.email;
+    syncClientToXero(practice._id, practice.name, true, email).catch(e => console.error("Xero Practice sync failed:", e));
+    res.status(201).json({ practice: populated, message: "Practice created" });
   } catch (err) {
     // @ts-ignore
     res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : "Failed to create practice" });

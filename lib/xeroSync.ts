@@ -1,9 +1,15 @@
-﻿import { syncContact, createInvoices, logXeroAction } from "../services/xeroService.js";
+import { syncContact, createInvoices, logXeroAction } from "../services/xeroService.js";
 import { query } from "../config/db.js";
 
-export async function syncClientToXero(clientId: string, name: string, isPractice: boolean) {
+export async function syncClientToXero(clientId: string, name: string, isPractice: boolean, email?: string) {
   try {
-    const contact = await syncContact({ name, isCustomer: true }, null);
+    const contact = await syncContact({ 
+      name, 
+      isCustomer: true,
+      email: email || undefined,
+      contactNumber: clientId.toString()
+    }, null);
+    
     if (contact?.ContactID) {
       if (isPractice) {
         await query(`UPDATE practices SET xero_contact_id = $1 WHERE _id = $2 OR id::text = $2`, [contact.ContactID, clientId.toString()]);
