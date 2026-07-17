@@ -1,45 +1,97 @@
 /**
- * clientController.js  —  CPS Client Management
- *
- * UPDATED (Jun 2026 — Rate & Contract History):   NEW
- *   — trackFieldChanges() helper: detects real changes to hourlyRate,
- *     contractStartDate, contractRenewalDate, contractExpiryDate and
- *     appends entries to PCN.hourlyRateHistory
- *   — updatePCN: now calls trackFieldChanges() before saving, so every
- *     rate/contract-date change is automatically logged
- *   — getPCNRateHistory: GET /pcn/:id/rate-history — full history for one client
- *   — getAllPCNRateSummary: GET /pcn/rate-history/summary — all clients,
- *     current values + last change + change count (powers the list page)
- *
- * (All previous history/comments preserved from original file — see
- *  earlier versions for the Apr/Jun 2026 changelog.)
+ * clientController.ts  -  CPS Client Management
  */
 
-import { Request, Response, NextFunction } from "express";
-import ICB            from "../models/ICB.js";
-import { syncClientToXero } from "../lib/xeroSync.js";
-import Federation     from "../models/Federation.js";
-import PCN            from "../models/PCN.js";
-import Practice       from "../models/Practice.js";
-import ContactHistory from "../models/ContactHistory.js";
-import User           from "../models/User.js";
-import nodemailer     from "nodemailer";
-import crypto         from "crypto";
-import { logAudit }   from "../middleware/auditLogger.js";
-import { normalizeId } from "../lib/ids.js";
-import { uploadBufferToStorage } from "../lib/supabase.js";
+import { Request, Response, NextFunction } from 'express';
+import ICB from '../models/ICB.js';
+import Federation from '../models/Federation.js';
+import PCN from '../models/PCN.js';
+import Practice from '../models/Practice.js';
+import ContactHistory from '../models/ContactHistory.js';
+import User from '../models/User.js';
+import nodemailer from 'nodemailer';
+import crypto from 'crypto';
+import { logAudit } from '../middleware/auditLogger.js';
+import { normalizeId } from '../lib/ids.js';
+import { uploadBufferToStorage } from '../lib/supabase.js';
+import { mergeAppRecordData, findAppRecordById } from '../config/db.js';
+import { enqueueHubSpotJob } from '../integrations/hubspot/hubspot.sync.js';
+import { syncClientToXero } from '../lib/xeroSync.js';
+
+export async function ensureContactIds(entityId: any, entity: any, Model: any, entityType: string) {
+  const buckets = ['contacts', 'decisionMakers', 'financeContacts', 'localDecisionMakers'];
+  let changed = false;
+  const updates: Record<string, any> = {};
+  
+  for (const b of buckets) {
+    if (Array.isArray(entity[b])) {
+      const newArray = [...entity[b]];
+      let arrayChanged = false;
+      newArray.forEach((c: any) => {
+        if (!c._id) {
+          c._id = crypto.randomUUID();
+          arrayChanged = true;
+          changed = true;
+        } else if (typeof c._id === 'object') {
+          c._id = c._id.toString();
+          arrayChanged = true;
+          changed = true;
+        }
+      });
+      if (arrayChanged) {
+        updates[b] = newArray;
+      }
+    }
+  }
+
+  if (changed) {
+    try {
+      if (Model.modelName) {
+         await Model.findByIdAndUpdate(entityId, { $set: updates });
+      } else {
+         await mergeAppRecordData(Model, entityId.toString(), updates);
+      }
+      return { ...entity, ...updates };
+    } catch (err) {
+      console.warn('Failed to persist contact UUIDs:', err);
+    }
+  }
+  return entity;
+}
+
+export async function triggerHubSpotSync(entityId: any, Model: any, entityType: string) {
+  try {
+    let entity;
+    if (Model.modelName) {
+       entity = await Model.findById(entityId).lean();
+    } else {
+       entity = await findAppRecordById(Model, entityId.toString());
+    }
+    if (!entity) return;
+
+    if (!entity.hubspotSyncEnabled) return;
+    if (entity.status !== 'approved' && entity.approvalStatus !== 'approved') return;
+    if (!entity.name && !entity.practiceName) return;
+
+    entity = await ensureContactIds(entityId, entity, Model, entityType);
+
+    const idempotencyKey = `hubspot:${entityType}:${entityId.toString()}:${entity.updatedAt || Date.now()}`;
+    await enqueueHubSpotJob('upsert', entityType, entityId.toString(), { entity, entityType }, idempotencyKey);
+  } catch (err: any) {
+    console.error('HubSpot trigger error:', err.message);
+  }
+}
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
 // @ts-ignore
 const toObjectId = (id) => normalizeId(id);
 
 // @ts-ignore
-const validateObjectIdOr400 = (id, label = "id") => {
+const validateObjectIdOr400 = (id, label = 'id') => {
   const objectId = toObjectId(id);
   if (!objectId) {
     const error = new Error(`Invalid ${label}`);
-    // @ts-ignore
-    error.statusCode = 400;
+    (error as any).statusCode = 400;
     throw error;
   }
   return objectId;
@@ -867,6 +919,7 @@ export const createPCN = async (req: Request, res: Response) => {
     
     const email = req.body.financeContacts?.[0]?.email || req.body.contacts?.[0]?.email || req.body.decisionMakers?.[0]?.email;
     syncClientToXero(pcn._id, pcn.name, false, email).catch(e => console.error("Xero PCN sync failed:", e));
+      triggerHubSpotSync(pcn._id, PCN, "pcn");
     
     res.status(201).json({ pcn: populated, message: "PCN created" });
   } catch (err) {
@@ -1236,6 +1289,7 @@ export const createPractice = async (req: Request, res: Response) => {
     
     const email = req.body.financeContacts?.[0]?.email || req.body.contacts?.[0]?.email || req.body.decisionMakers?.[0]?.email;
     syncClientToXero(practice._id, practice.name, true, email).catch(e => console.error("Xero Practice sync failed:", e));
+      triggerHubSpotSync(practice._id, Practice, "practice");
     res.status(201).json({ practice: populated, message: "Practice created" });
   } catch (err) {
     // @ts-ignore

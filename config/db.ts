@@ -268,6 +268,22 @@ export async function ensureSchema() {
       clinical_system VARCHAR(50)
     );`);
 
+      // Run HubSpot Migrations
+      const fs = await import('fs');
+      const path = await import('path');
+      try {
+        const migrationPath = path.join(process.cwd(), 'migrations', '20260716183000_hubspot_init.sql');
+        if (fs.existsSync(migrationPath)) {
+            const sql = fs.readFileSync(migrationPath, 'utf8');
+            await rawQuery(sql);
+            console.log('[DB] HubSpot migration applied.');
+        } else {
+            console.warn('[DB] Migration file not found at:', migrationPath);
+        }
+      } catch (err: any) {
+        console.error('[DB] Failed to run migration:', err.message);
+      }
+
     try {
       await rawQuery(`
         INSERT INTO clients (id, name, type, clinical_system)

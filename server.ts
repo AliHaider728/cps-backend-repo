@@ -23,6 +23,7 @@ import basePatternRoutes from "./routes/basePatternRoutes.js";
 import coverRoutes from "./routes/coverRoutes.js";
 import xeroRoutes from "./routes/xeroRoutes.js";
 import enterMyHoursRoutes from "./routes/enterMyHoursRoutes.js";
+import hubspotRoutes from "./integrations/hubspot/hubspot.routes.js";
 import { startGapDetectionScheduler } from "./services/rotaGapService.js";
 
 dotenv.config();
@@ -178,6 +179,7 @@ app.use("/api/enter-my-hours", enterMyHoursRoutes);
 app.use("/api/base-patterns", basePatternRoutes);
 app.use("/api/cover", coverRoutes);
 app.use("/api/xero", xeroRoutes);
+app.use("/api/hubspot", hubspotRoutes);
 
 
 /*   HEALTH CHECK   */
