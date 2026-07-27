@@ -2,6 +2,13 @@ import { hubspotClient } from './hubspot.client.js';
 import { mapClientToCompany, mapContactToHubSpotContact } from './hubspot.mapping.js';
 import { query } from '../../config/db.js';
 
+export function isHubSpotSyncEligible(entity: any, entityType: string): boolean {
+  if (entityType !== 'pcn' && entityType !== 'practice') return false;
+  if (!entity.hubspotSyncEnabled) return false;
+  if (entity.isActive === false) return false;
+  return true;
+}
+
 export async function enqueueHubSpotJob(action: string, entityType: string, entityId: string, payload: any, idempotencyKey: string) {
   try {
     await query(`
@@ -128,8 +135,28 @@ export async function processContactJob(job: any) {
     ]
   };
 
-  const res = await hubspotClient.post(`/crm/objects/2026-03/contacts/batch/upsert`, requestBody);
-  const hubspotContactId = res.data?.results?.[0]?.id;
+  let hubspotContactId: string | undefined;
+
+  try {
+    const res = await hubspotClient.post(`/crm/objects/2026-03/contacts/batch/upsert`, requestBody);
+    hubspotContactId = res.data?.results?.[0]?.id;
+  } catch (err: any) {
+    if (err.message && err.message.includes('409') && err.message.includes('Contact already exists')) {
+      // Extract existing ID from error message: "Contact already exists. Existing ID: 520953303760"
+      const match = err.message.match(/Existing ID: (\d+)/);
+      if (match && match[1]) {
+        hubspotContactId = match[1];
+        // Patch the existing contact with our properties and custom key
+        await hubspotClient.patch(`/crm/v3/objects/contacts/${hubspotContactId}`, {
+          properties: payload.properties
+        });
+      } else {
+        throw err;
+      }
+    } else {
+      throw err;
+    }
+  }
 
   if (!hubspotContactId) {
     throw new Error("No contact ID returned from HubSpot upsert");

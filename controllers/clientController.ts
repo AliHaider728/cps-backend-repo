@@ -15,7 +15,8 @@ import { logAudit } from '../middleware/auditLogger.js';
 import { normalizeId } from '../lib/ids.js';
 import { uploadBufferToStorage } from '../lib/supabase.js';
 import { mergeAppRecordData, findAppRecordById } from '../config/db.js';
-import { enqueueHubSpotJob } from '../integrations/hubspot/hubspot.sync.js';
+import { enqueueHubSpotJob, isHubSpotSyncEligible } from '../integrations/hubspot/hubspot.sync.js';
+import { generatePayloadHash } from '../integrations/hubspot/hubspot.mapping.js';
 import { syncClientToXero } from '../lib/xeroSync.js';
 
 export async function ensureContactIds(entityId: any, entity: any, Model: any, entityType: string) {
@@ -69,14 +70,23 @@ export async function triggerHubSpotSync(entityId: any, Model: any, entityType: 
     }
     if (!entity) return;
 
-    if (!entity.hubspotSyncEnabled) return;
-    if (entity.status !== 'approved' && entity.approvalStatus !== 'approved') return;
+    if (!isHubSpotSyncEligible(entity, entityType)) return;
     if (!entity.name && !entity.practiceName) return;
 
     entity = await ensureContactIds(entityId, entity, Model, entityType);
 
-    const idempotencyKey = `hubspot:${entityType}:${entityId.toString()}:${entity.updatedAt || Date.now()}`;
-    await enqueueHubSpotJob('upsert', entityType, entityId.toString(), { entity, entityType }, idempotencyKey);
+    const hash = generatePayloadHash(entityId.toString(), entity, entityType);
+    const idempotencyKey = `hubspot:${entityType}:${entityId.toString()}:${hash}`;
+    await enqueueHubSpotJob('upsert', 'company', entityId.toString(), { entityId: entityId.toString(), entity, entityType }, idempotencyKey);
+
+    const parentKey = `${entityType}:${entityId.toString()}`;
+    for (const bucket of ['decisionMakers', 'financeContacts', 'contacts']) {
+      for (const c of entity[bucket] || []) {
+        if (!c._id) continue;
+        const contactIdKey = `hubspot:contact:${c._id.toString()}:${hash}`;
+        await enqueueHubSpotJob('upsert', 'contact', c._id.toString(), { contactId: c._id.toString(), contactData: c, parentKey, clientId: entityId.toString(), bucket }, contactIdKey);
+      }
+    }
   } catch (err: any) {
     console.error('HubSpot trigger error:', err.message);
   }
@@ -892,7 +902,9 @@ export const getPCNById = async (req: Request, res: Response) => {
 
 export const createPCN = async (req: Request, res: Response) => {
   try {
-    const { name, icb, decisionMakers, financeContacts, tags, priority, clientFacingData } = req.body;
+    delete req.body.hubspotSyncEnabled;
+      delete req.body.approvalStatus;
+      const { name, icb, decisionMakers, financeContacts, tags, priority, clientFacingData } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: "PCN name is required" });
 
     const payload = normalizeComplianceGroup({
@@ -905,7 +917,7 @@ export const createPCN = async (req: Request, res: Response) => {
     });
 
     // @ts-ignore
-    const pcn = await PCN.create({ ...payload, name: name.trim(), createdBy: req.user._id });
+    const pcn = await PCN.create({ ...payload, name: name.trim(), createdBy: req.user._id, hubspotSyncEnabled: true });
     const populated = await PCN.findById(pcn._id)
       .populate("icb", "name")
       .populate("federation", "name type")
@@ -941,7 +953,8 @@ export const updatePCN = async (req: Request, res: Response) => {
       .lean();
     if (!existing) return res.status(404).json({ message: "PCN not found" });
 
-    let payload = normalizeComplianceGroup(req.body);
+    delete req.body.hubspotSyncEnabled;
+      let payload = normalizeComplianceGroup(req.body);
 
     if (
       Object.prototype.hasOwnProperty.call(payload, "complianceGroups") ||
@@ -1011,6 +1024,7 @@ export const updatePCN = async (req: Request, res: Response) => {
       before: safeJson(existing),
       after:  safeJson(pcn),
     });
+    triggerHubSpotSync(pcn._id, PCN, "pcn");
     res.json({ pcn, message: "PCN updated" });
   } catch (err) {
     // @ts-ignore
@@ -1268,12 +1282,14 @@ export const getPracticeById = async (req: Request, res: Response) => {
 
 export const createPractice = async (req: Request, res: Response) => {
   try {
-    const { name, pcn } = req.body;
+    delete req.body.hubspotSyncEnabled;
+      delete req.body.approvalStatus;
+      const { name, pcn } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: "Practice name is required" });
     if (!pcn)          return res.status(400).json({ message: "PCN is required" });
     const payload  = normalizeComplianceGroup(req.body);
     // @ts-ignore
-    const practice = await Practice.create({ ...payload, name: name.trim(), createdBy: req.user._id });
+    const practice = await Practice.create({ ...payload, name: name.trim(), createdBy: req.user._id, hubspotSyncEnabled: true });
     const populated = await Practice.findById(practice._id)
       .populate({
         path:   "pcn",
@@ -1305,7 +1321,8 @@ export const updatePractice = async (req: Request, res: Response) => {
       .populate("linkedClinicians","name email role").populate("restrictedClinicians","name email role").lean();
     if (!existing) return res.status(404).json({ message: "Practice not found" });
 
-    const payload = normalizeComplianceGroup(req.body);
+    delete req.body.hubspotSyncEnabled;
+      const payload = normalizeComplianceGroup(req.body);
     if (Object.prototype.hasOwnProperty.call(payload, "complianceGroup")) {
       const existingCg = Array.isArray(existing.complianceGroup) ? existing.complianceGroup : (existing.complianceGroup ? [existing.complianceGroup] : []);
       const prev = existingCg.map((g: any) => String(g._id || g)).sort().join(",");
@@ -1342,6 +1359,7 @@ export const updatePractice = async (req: Request, res: Response) => {
         : `Practice updated: ${practice.name}`,
       before: safeJson(existing), after: safeJson(practice),
     });
+    triggerHubSpotSync(practice._id, Practice, "practice");
     res.json({ practice, message: "Practice updated" });
   } catch (err) {
     // @ts-ignore
